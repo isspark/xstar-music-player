@@ -3,7 +3,9 @@ package life.xstar.music.player.data.repository
 import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
+import java.io.File
 import java.security.MessageDigest
 import life.xstar.music.player.data.local.*
 import kotlinx.coroutines.Dispatchers
@@ -59,19 +61,28 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
         return runCatching {
             retriever.setDataSource(context, file.uri)
             val fileName = file.name.orEmpty()
+            val id = stableId(file.uri.toString())
             SongEntity(
-                mediaStoreId = stableId(file.uri.toString()),
+                mediaStoreId = id,
                 title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE).orDefault(fileName.substringBeforeLast('.')),
                 artist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST).orDefault("未知艺术家"),
                 album = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM).orDefault("未知专辑"),
                 durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0,
                 uri = file.uri.toString(),
                 mimeType = file.type ?: context.contentResolver.getType(file.uri),
-                albumArtUri = null,
+                albumArtUri = cacheEmbeddedArtwork(id, retriever.embeddedPicture),
                 sourceFolderUri = folderUri,
                 dateAdded = file.lastModified()
             )
         }.getOrNull().also { retriever.release() }
+    }
+
+    private fun cacheEmbeddedArtwork(id: Long, bytes: ByteArray?): String? {
+        if (bytes == null || bytes.isEmpty()) return null
+        val directory = File(context.cacheDir, "album_art").apply { mkdirs() }
+        val artwork = File(directory, "${id.toULong()}.img")
+        if (!artwork.exists() || artwork.length() != bytes.size.toLong()) artwork.writeBytes(bytes)
+        return FileProvider.getUriForFile(context, "${context.packageName}.files", artwork).toString()
     }
 
     private fun stableId(value: String): Long = MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).take(8).fold(0L) { result, byte -> (result shl 8) or (byte.toLong() and 0xff) }

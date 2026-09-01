@@ -1,6 +1,7 @@
 package life.xstar.music.player.data.preferences
 
 import android.content.Context
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -18,11 +19,13 @@ class PlaybackPreferences(private val context: Context) {
     private val positionKey = longPreferencesKey("position_ms")
     private val foldersKey = stringSetPreferencesKey("music_folders")
     private val themeKey = stringPreferencesKey("theme_accent")
+    private val beatEffectKey = booleanPreferencesKey("beat_effect")
 
     val folders: Flow<Set<String>> = context.playbackDataStore.data.map { it[foldersKey].orEmpty() }
     val theme: Flow<ThemeAccent> = context.playbackDataStore.data.map { values ->
         runCatching { ThemeAccent.valueOf(values[themeKey] ?: ThemeAccent.Blue.name) }.getOrDefault(ThemeAccent.Blue)
     }
+    val beatEffect: Flow<Boolean> = context.playbackDataStore.data.map { it[beatEffectKey] ?: true }
 
     suspend fun save(queue: List<Long>, index: Int, position: Long) {
         context.playbackDataStore.edit { values ->
@@ -47,6 +50,7 @@ class PlaybackPreferences(private val context: Context) {
     }
 
     suspend fun setTheme(theme: ThemeAccent) = context.playbackDataStore.edit { it[themeKey] = theme.name }
+    suspend fun setBeatEffect(enabled: Boolean) = context.playbackDataStore.edit { it[beatEffectKey] = enabled }
 }
 
 data class SavedPlayback(val queue: List<Long>, val index: Int, val position: Long)

@@ -2,6 +2,7 @@ package life.xstar.music.player.player
 
 import android.content.ComponentName
 import android.content.Context
+import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -129,7 +130,9 @@ class PlayerController(context: Context) {
     private fun SongEntity.toMediaItem() = MediaItem.Builder()
         .setMediaId(mediaStoreId.toString())
         .setUri(uri)
-        .setMediaMetadata(MediaMetadata.Builder().setTitle(title).setArtist(artist).setAlbumTitle(album).build())
+        .setMediaMetadata(MediaMetadata.Builder().setTitle(title).setArtist(artist).setAlbumTitle(album).apply {
+            albumArtUri?.let { setArtworkUri(Uri.parse(it)) }
+        }.build())
         .build()
 }
 

@@ -9,6 +9,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -23,6 +26,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -36,6 +40,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlin.random.Random
 import life.xstar.music.player.data.local.*
 import life.xstar.music.player.data.preferences.PlaybackPreferences
 import life.xstar.music.player.data.preferences.ThemeAccent
@@ -61,6 +66,8 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val scanning = MutableStateFlow(false)
     val folders = preferences.folders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val theme = preferences.theme.stateIn(viewModelScope, SharingStarted.Eagerly, ThemeAccent.Blue)
+    val beatEffect = preferences.beatEffect.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    val openPlayer = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     init {
         viewModelScope.launch { playback.debounce(1_000).collect { state -> if (state.queue.isNotEmpty()) preferences.save(state.queue.map { it.mediaStoreId }, state.index, state.position) } }
@@ -71,7 +78,11 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     fun addFolder(uri: String) = viewModelScope.launch { preferences.addFolder(uri); repo.scan(folders.value + uri) }
     fun removeFolder(uri: String) = viewModelScope.launch { preferences.removeFolder(uri); repo.scan(folders.value - uri) }
     fun setTheme(theme: ThemeAccent) = viewModelScope.launch { preferences.setTheme(theme) }
-    fun play(song: SongEntity, source: List<SongEntity> = songs.value) = player.playQueue(source.ifEmpty { listOf(song) }, source.indexOf(song).coerceAtLeast(0))
+    fun setBeatEffect(enabled: Boolean) = viewModelScope.launch { preferences.setBeatEffect(enabled) }
+    fun play(song: SongEntity, source: List<SongEntity> = songs.value) {
+        player.playQueue(source.ifEmpty { listOf(song) }, source.indexOf(song).coerceAtLeast(0))
+        openPlayer.tryEmit(Unit)
+    }
     fun favorite(id: Long) = viewModelScope.launch { repo.toggleFavorite(id) }
     fun createPlaylist(name: String) = viewModelScope.launch { if (name.isNotBlank()) repo.createPlaylist(name.trim()) }
     fun deletePlaylist(item: PlaylistEntity) = viewModelScope.launch { repo.deletePlaylist(item) }
@@ -95,6 +106,7 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     var screen by remember { mutableStateOf(Screen.Player) }
     val theme by vm.theme.collectAsStateWithLifecycle()
     val accent = theme.color()
+    LaunchedEffect(vm) { vm.openPlayer.collect { screen = Screen.Player; drawerState.close() } }
     ModalNavigationDrawer(drawerState = drawerState, gesturesEnabled = true, drawerContent = {
         ModalDrawerSheet(drawerContainerColor = Color(0xFF10131A)) {
             Column(Modifier.fillMaxHeight().width(300.dp).padding(horizontal = 16.dp)) {
@@ -127,14 +139,36 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
 @Composable private fun PlayerScreen(vm: MusicViewModel, openMenu: () -> Unit) {
     val state by vm.playback.collectAsStateWithLifecycle()
     var showQueue by remember { mutableStateOf(false) }
+    val theme by vm.theme.collectAsStateWithLifecycle()
+    val beatEffect by vm.beatEffect.collectAsStateWithLifecycle()
+    val pulseColors = remember(theme) { theme.pulseColors() }
+    var ambientTarget by remember(theme) { mutableStateOf(pulseColors.first()) }
+    var pulseScale by remember { mutableFloatStateOf(1f) }
+    LaunchedEffect(state.playing, state.song?.mediaStoreId, theme, beatEffect) {
+        if (!state.playing || !beatEffect) {
+            ambientTarget = theme.color()
+            pulseScale = 1f
+            return@LaunchedEffect
+        }
+        while (true) {
+            ambientTarget = pulseColors.random()
+            pulseScale = if (pulseScale > 1f) 1f else Random.nextDouble(1.012, 1.035).toFloat()
+            kotlinx.coroutines.delay(Random.nextLong(380, 900))
+        }
+    }
+    val ambient by animateColorAsState(ambientTarget, tween(650), label = "ambient")
+    val artworkScale by animateFloatAsState(pulseScale, tween(420), label = "artworkPulse")
     val song = state.song
-    Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(ambient.copy(alpha = .55f), ambient.copy(alpha = .13f), Color(0xFF090B10)), radius = 1250f))) {
     IconButton(openMenu, Modifier.statusBarsPadding().padding(10.dp).align(Alignment.TopStart)) { Icon(Icons.Default.Menu, "菜单", tint = Color.White) }
     Column(Modifier.fillMaxSize().padding(horizontal = 22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.weight(.45f))
-        Surface(Modifier.fillMaxWidth().aspectRatio(1f).padding(horizontal = 18.dp), shape = RoundedCornerShape(34.dp), tonalElevation = 12.dp, shadowElevation = 16.dp, color = Color(0xFF242B37)) {
-            if (song?.albumArtUri != null) AsyncImage(song.albumArtUri, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-            else Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(Color(0xFF34425A), Color(0xFF171C25)))), Alignment.Center) { Icon(Icons.Default.MusicNote, null, Modifier.size(90.dp), tint = Color(0xFF8FA7C7)) }
+        BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            val artworkSize = minOf(maxWidth - 48.dp, 330.dp)
+            Surface(Modifier.size(artworkSize).scale(artworkScale).clip(CircleShape), shape = CircleShape, tonalElevation = 12.dp, shadowElevation = 18.dp, color = Color(0xFF242B37)) {
+                if (song?.albumArtUri != null) AsyncImage(song.albumArtUri, null, Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop)
+                else Box(Modifier.fillMaxSize().clip(CircleShape).background(Brush.linearGradient(listOf(ambient.copy(alpha = .7f), Color(0xFF171C25)))), Alignment.Center) { Icon(Icons.Default.MusicNote, null, Modifier.size(72.dp), tint = Color.White.copy(alpha = .8f)) }
+            }
         }
         Spacer(Modifier.height(30.dp))
         Text(song?.title ?: "选择一首歌曲", color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -192,11 +226,42 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun PlaylistSheet(vm: MusicViewModel, playlist: PlaylistEntity, close: () -> Unit) { val links by vm.playlistSongs(playlist.id).collectAsStateWithLifecycle(emptyList()); val all by vm.songs.collectAsStateWithLifecycle(); val current = links.mapNotNull { link -> all.find { it.mediaStoreId == link.songId } }; var name by remember { mutableStateOf(playlist.name) }; var add by remember { mutableStateOf(false) }; ModalBottomSheet(onDismissRequest = close, containerColor = Color(0xFF171B23)) { Column(Modifier.padding(20.dp)) { Row(verticalAlignment = Alignment.CenterVertically) { OutlinedTextField(name, { name = it }, Modifier.weight(1f), label = { Text("名称") }); IconButton({ vm.renamePlaylist(playlist.id, name) }) { Icon(Icons.Default.Check, "保存") } }; TextButton({ add = true }) { Icon(Icons.Default.Add, null); Text("添加歌曲") }; SongsList(current, vm) } }; if (add) AlertDialog(onDismissRequest = { add = false }, title = { Text("添加歌曲") }, text = { LazyColumn { items(all.filterNot { it in current }, key = { it.mediaStoreId }) { song -> ListItem(headlineContent = { Text(song.title) }, modifier = Modifier.clickable { vm.addToPlaylist(playlist.id, song.mediaStoreId); add = false }) } } }, confirmButton = { TextButton({ add = false }) { Text("关闭") } }) }
 
-@Composable private fun SettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) { val context = LocalContext.current; val folders by vm.folders.collectAsStateWithLifecycle(); val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> uri?.let { runCatching { context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }; vm.addFolder(it.toString()) } }; Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) { PageHeader(openMenu); Text("音乐文件夹", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp)); folders.forEach { uri -> ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(folderName(uri), color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) }, supportingContent = { Text(uri, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis) }, leadingContent = { Icon(Icons.Default.Folder, null) }, trailingContent = { IconButton({ vm.removeFolder(uri) }) { Icon(Icons.Default.Close, "移除") } }) }; OutlinedButton({ picker.launch(null) }, Modifier.padding(horizontal = 16.dp)) { Icon(Icons.Default.CreateNewFolder, null); Spacer(Modifier.width(8.dp)); Text("添加文件夹") }; ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("重新扫描音乐库", color = Color.White) }, supportingContent = { Text("仅同步已选择文件夹中的音频", color = Color.Gray) }, leadingContent = { Icon(Icons.Default.Refresh, null) }, modifier = Modifier.clickable { vm.scan() }); ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("XSTAR", color = Color.White) }, supportingContent = { Text("本地音乐播放器 · 0.1.0", color = Color.Gray) }, leadingContent = { Icon(Icons.Default.Info, null) }) } }
+@Composable private fun SettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) {
+    val context = LocalContext.current
+    val folders by vm.folders.collectAsStateWithLifecycle()
+    val beatEffect by vm.beatEffect.collectAsStateWithLifecycle()
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let { runCatching { context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }; vm.addFolder(it.toString()) }
+    }
+    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) {
+        PageHeader(openMenu)
+        ListItem(
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            headlineContent = { Text("音乐节拍动态效果", color = Color.White) },
+            supportingContent = { Text("播放时切换背景颜色并轻微缩放封面", color = Color.Gray) },
+            leadingContent = { Icon(Icons.Default.GraphicEq, null) },
+            trailingContent = { Switch(checked = beatEffect, onCheckedChange = vm::setBeatEffect) }
+        )
+        Text("音乐文件夹", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
+        folders.forEach { uri ->
+            ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(folderName(uri), color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) }, supportingContent = { Text(uri, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis) }, leadingContent = { Icon(Icons.Default.Folder, null) }, trailingContent = { IconButton({ vm.removeFolder(uri) }) { Icon(Icons.Default.Close, "移除") } })
+        }
+        OutlinedButton({ picker.launch(null) }, Modifier.padding(horizontal = 16.dp)) { Icon(Icons.Default.CreateNewFolder, null); Spacer(Modifier.width(8.dp)); Text("添加文件夹") }
+        ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("重新扫描音乐库", color = Color.White) }, supportingContent = { Text("仅同步已选择文件夹中的音频", color = Color.Gray) }, leadingContent = { Icon(Icons.Default.Refresh, null) }, modifier = Modifier.clickable { vm.scan() })
+        ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("XSTAR", color = Color.White) }, supportingContent = { Text("本地音乐播放器 · 0.1.0", color = Color.Gray) }, leadingContent = { Icon(Icons.Default.Info, null) })
+    }
+}
 @Composable private fun EmptyState(title: String, text: String, action: String, click: () -> Unit) { Column(Modifier.fillMaxWidth().padding(42.dp), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Default.LibraryMusic, null, Modifier.size(58.dp), tint = Color(0xFF65738A)); Spacer(Modifier.height(18.dp)); Text(title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold); Text(text, color = Color.Gray, modifier = Modifier.padding(vertical = 12.dp)); Button(click) { Text(action) } } }
 private fun PlaybackMode.next() = when (this) { PlaybackMode.Sequential -> PlaybackMode.Shuffle; PlaybackMode.Shuffle -> PlaybackMode.RepeatOne; PlaybackMode.RepeatOne -> PlaybackMode.Sequential }
 private fun time(ms: Long) = "%d:%02d".format(ms.coerceAtLeast(0) / 60_000, (ms.coerceAtLeast(0) / 1_000) % 60)
 private fun formatName(mime: String?) = mime?.substringAfter('/')?.uppercase()?.replace("MPEG", "MP3") ?: "AUDIO"
 private fun folderName(uri: String) = Uri.parse(uri).lastPathSegment?.substringAfterLast(':')?.ifBlank { "音乐文件夹" } ?: "音乐文件夹"
 private fun ThemeAccent.color() = when (this) { ThemeAccent.Blue -> Color(0xFF78A9FF); ThemeAccent.Violet -> Color(0xFFAE8CFF); ThemeAccent.Rose -> Color(0xFFFF7998); ThemeAccent.Emerald -> Color(0xFF55D6A9); ThemeAccent.Amber -> Color(0xFFFFBE5C) }
+private fun ThemeAccent.pulseColors(): List<Color> = when (this) {
+    ThemeAccent.Blue -> listOf(Color(0xFF2676D9), Color(0xFF6E4BD8), Color(0xFF1696A7), Color(0xFF2752A8))
+    ThemeAccent.Violet -> listOf(Color(0xFF7547D8), Color(0xFFB43FA1), Color(0xFF4452C9), Color(0xFF8A45C2))
+    ThemeAccent.Rose -> listOf(Color(0xFFD93663), Color(0xFFC849A5), Color(0xFFD25A3A), Color(0xFF9D3E77))
+    ThemeAccent.Emerald -> listOf(Color(0xFF15956B), Color(0xFF168E9B), Color(0xFF3C8D4C), Color(0xFF237E70))
+    ThemeAccent.Amber -> listOf(Color(0xFFD18425), Color(0xFFC95833), Color(0xFFA79324), Color(0xFFB66B2B))
+}
 @Composable private fun XstarTheme(accent: ThemeAccent, content: @Composable () -> Unit) { MaterialTheme(colorScheme = darkColorScheme(primary = accent.color(), background = Color(0xFF090B10), surface = Color(0xFF171B23)), content = content) }

@@ -8,7 +8,9 @@
     <application
         android:name=".XstarApplication"
         android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
         android:label="XSTAR"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/Theme.XSTAR"
         android:supportsRtl="true">
         <activity android:name=".MainActivity" android:exported="true">
@@ -17,6 +19,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
         <service
             android:name=".player.PlaybackService"
             android:exported="true"
