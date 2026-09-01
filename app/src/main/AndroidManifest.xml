@@ -9,6 +9,7 @@
         android:name=".XstarApplication"
         android:allowBackup="true"
         android:label="XSTAR"
+        android:theme="@style/Theme.XSTAR"
         android:supportsRtl="true">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
