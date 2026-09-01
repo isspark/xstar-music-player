@@ -1,13 +1,11 @@
 package life.xstar.music.player.data.repository
 
-import android.content.ContentUris
 import android.content.Context
-import android.provider.MediaStore
-import life.xstar.music.player.data.local.SongDao
-import life.xstar.music.player.data.local.SongEntity
-import life.xstar.music.player.data.local.PlaylistDao
-import life.xstar.music.player.data.local.PlaylistEntity
-import life.xstar.music.player.data.local.PlaylistSongEntity
+import android.media.MediaMetadataRetriever
+import android.net.Uri
+import androidx.documentfile.provider.DocumentFile
+import java.security.MessageDigest
+import life.xstar.music.player.data.local.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -25,53 +23,58 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
     suspend fun removeFromPlaylist(playlistId: Long, songId: Long) = playlistDao.remove(playlistId, songId)
     suspend fun renamePlaylist(id: Long, name: String) = playlistDao.rename(id, name.trim())
 
-    suspend fun scan(): Int = withContext(Dispatchers.IO) {
-        val resolver = context.contentResolver
-        val songs = mutableListOf<SongEntity>()
-        val ids = mutableListOf<Long>()
-        val projection = arrayOf(
-            MediaStore.Audio.Media._ID, MediaStore.Audio.Media.TITLE,
-            MediaStore.Audio.Media.ARTIST, MediaStore.Audio.Media.ALBUM,
-            MediaStore.Audio.Media.DURATION, MediaStore.Audio.Media.DATE_ADDED,
-            MediaStore.Audio.Media.ALBUM_ID
-        )
-        resolver.query(
-            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, projection,
-            "${MediaStore.Audio.Media.IS_MUSIC} != 0 AND ${MediaStore.Audio.Media.DURATION} > 0",
-            null, "${MediaStore.Audio.Media.TITLE} COLLATE NOCASE ASC"
-        )?.use { cursor ->
-            val id = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
-            val title = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
-            val artist = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
-            val album = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
-            val duration = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
-            val added = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_ADDED)
-            val albumId = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
-            while (cursor.moveToNext()) {
-                val mediaId = cursor.getLong(id)
-                ids += mediaId
-                songs += SongEntity(
-                    mediaStoreId = mediaId,
-                    title = cursor.getString(title).orDefault("未知歌曲"),
-                    artist = cursor.getString(artist).orDefault("未知艺术家"),
-                    album = cursor.getString(album).orDefault("未知专辑"),
-                    durationMs = cursor.getLong(duration),
-                    uri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, mediaId).toString(),
-                    albumArtUri = ContentUris.withAppendedId(MediaStore.Audio.Albums.EXTERNAL_CONTENT_URI, cursor.getLong(albumId)).toString(),
-                    dateAdded = cursor.getLong(added)
-                )
-            }
+    suspend fun scan(folderUris: Set<String>): Int = withContext(Dispatchers.IO) {
+        if (folderUris.isEmpty()) {
+            dao.deleteAll()
+            return@withContext 0
         }
-        val existing = if (ids.isEmpty()) emptyList() else dao.findByMediaIds(ids).associateBy { it.mediaStoreId }
-        val merged = songs.map { scanned ->
-            val old = existing[scanned.mediaStoreId]
-            scanned.copy(isFavorite = old?.isFavorite ?: false, playCount = old?.playCount ?: 0, lastPlayedAt = old?.lastPlayedAt)
+        val scanned = mutableListOf<SongEntity>()
+        folderUris.forEach { folderUri ->
+            DocumentFile.fromTreeUri(context, Uri.parse(folderUri))?.let { scanDirectory(it, folderUri, scanned) }
         }
+        val ids = scanned.map { it.mediaStoreId }
+        val existing = if (ids.isEmpty()) emptyMap() else dao.findByMediaIds(ids).associateBy { it.mediaStoreId }
+        val merged = scanned.map { song -> existing[song.mediaStoreId]?.let { old -> song.copy(isFavorite = old.isFavorite, playCount = old.playCount, lastPlayedAt = old.lastPlayedAt) } ?: song }
         if (ids.isEmpty()) dao.deleteAll() else dao.deleteNotInMediaIds(ids)
         if (merged.isNotEmpty()) dao.upsertAll(merged)
         merged.size
     }
 
-    suspend fun findByIds(ids: List<Long>): List<SongEntity> = dao.findByMediaIds(ids)
+    private fun scanDirectory(directory: DocumentFile, folderUri: String, output: MutableList<SongEntity>) {
+        directory.listFiles().forEach { file ->
+            when {
+                file.isDirectory -> scanDirectory(file, folderUri, output)
+                file.isFile && isAudio(file) -> readSong(file, folderUri)?.let(output::add)
+            }
+        }
+    }
+
+    private fun isAudio(file: DocumentFile): Boolean {
+        if (file.type?.startsWith("audio/") == true) return true
+        return file.name?.substringAfterLast('.', "")?.lowercase() in setOf("mp3", "m4a", "aac", "flac", "ogg", "opus", "wav", "wma")
+    }
+
+    private fun readSong(file: DocumentFile, folderUri: String): SongEntity? {
+        val retriever = MediaMetadataRetriever()
+        return runCatching {
+            retriever.setDataSource(context, file.uri)
+            val fileName = file.name.orEmpty()
+            SongEntity(
+                mediaStoreId = stableId(file.uri.toString()),
+                title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE).orDefault(fileName.substringBeforeLast('.')),
+                artist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST).orDefault("未知艺术家"),
+                album = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM).orDefault("未知专辑"),
+                durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0,
+                uri = file.uri.toString(),
+                mimeType = file.type ?: context.contentResolver.getType(file.uri),
+                albumArtUri = null,
+                sourceFolderUri = folderUri,
+                dateAdded = file.lastModified()
+            )
+        }.getOrNull().also { retriever.release() }
+    }
+
+    private fun stableId(value: String): Long = MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).take(8).fold(0L) { result, byte -> (result shl 8) or (byte.toLong() and 0xff) }
+    suspend fun findByIds(ids: List<Long>): List<SongEntity> { val songs = dao.findByMediaIds(ids).associateBy { it.mediaStoreId }; return ids.mapNotNull(songs::get) }
     private fun String?.orDefault(default: String) = if (isNullOrBlank() || this == "<unknown>") default else this
 }
