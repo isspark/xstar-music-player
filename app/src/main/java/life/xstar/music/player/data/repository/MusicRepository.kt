@@ -13,6 +13,8 @@ import java.security.MessageDigest
 import life.xstar.music.player.data.local.*
 import life.xstar.music.player.data.audio.AudioAnalyzer
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 
@@ -60,14 +62,14 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
         true
     }
 
-    suspend fun scan(folderUris: Set<String>): Int = withContext(Dispatchers.IO) {
+    suspend fun scan(folderUris: Set<String>, onProgress: (ScanProgress) -> Unit = {}): Int = withContext(Dispatchers.IO) {
         if (folderUris.isEmpty()) {
             dao.deleteAll()
             return@withContext 0
         }
         val scanned = mutableListOf<SongEntity>()
         folderUris.forEach { folderUri ->
-            DocumentFile.fromTreeUri(context, Uri.parse(folderUri))?.let { scanDirectory(it, folderUri, scanned) }
+            DocumentFile.fromTreeUri(context, Uri.parse(folderUri))?.let { scanDirectory(it, folderUri, scanned, onProgress) }
         }
         val ids = scanned.map { it.mediaStoreId }
         val existing = if (ids.isEmpty()) emptyMap() else dao.findByMediaIds(ids).associateBy { it.mediaStoreId }
@@ -84,11 +86,16 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
         merged.size
     }
 
-    private fun scanDirectory(directory: DocumentFile, folderUri: String, output: MutableList<SongEntity>) {
+    private suspend fun scanDirectory(directory: DocumentFile, folderUri: String, output: MutableList<SongEntity>, onProgress: (ScanProgress) -> Unit) {
         directory.listFiles().forEach { file ->
+            currentCoroutineContext().ensureActive()
             when {
-                file.isDirectory -> scanDirectory(file, folderUri, output)
-                file.isFile && isAudio(file) -> readSong(file, folderUri)?.let(output::add)
+                file.isDirectory -> scanDirectory(file, folderUri, output, onProgress)
+                file.isFile && isAudio(file) -> {
+                    onProgress(ScanProgress(file.name.orEmpty(), output.size))
+                    readSong(file, folderUri)?.let(output::add)
+                    onProgress(ScanProgress(file.name.orEmpty(), output.size))
+                }
             }
         }
     }
@@ -178,3 +185,4 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
 }
 
 data class ArtworkCandidate(val url: String, val label: String)
+data class ScanProgress(val fileName: String, val discovered: Int)

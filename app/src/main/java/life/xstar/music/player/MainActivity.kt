@@ -1,8 +1,11 @@
 package life.xstar.music.player
 
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.SystemClock
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 import android.os.Bundle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.ComponentActivity
@@ -34,14 +37,19 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.*
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.palette.graphics.Palette
 import coil.compose.SubcomposeAsyncImage
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.async
@@ -54,6 +62,7 @@ import life.xstar.music.player.data.preferences.PlaybackPreferences
 import life.xstar.music.player.data.preferences.ThemeAccent
 import life.xstar.music.player.data.repository.MusicRepository
 import life.xstar.music.player.data.repository.ArtworkCandidate
+import life.xstar.music.player.data.repository.ScanProgress
 import life.xstar.music.player.data.lyrics.LyricsRepository
 import life.xstar.music.player.data.lyrics.LyricsState
 import life.xstar.music.player.data.lyrics.LyricsCandidate
@@ -75,7 +84,13 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val favorites = repo.favorites().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val playlists = repo.playlists().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val playback = player.state
-    val scanning = MutableStateFlow(false)
+    private val _scanState = MutableStateFlow(ScanState())
+    val scanState = _scanState.asStateFlow()
+    private var scanJob: Job? = null
+    private val scanGeneration = AtomicInteger()
+    private val _sleepTimerRemaining = MutableStateFlow<Long?>(null)
+    val sleepTimerRemaining = _sleepTimerRemaining.asStateFlow()
+    private var sleepTimerJob: Job? = null
     val folders = preferences.folders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val theme = preferences.theme.stateIn(viewModelScope, SharingStarted.Eagerly, ThemeAccent.Blue)
     val beatEffect = preferences.beatEffect.stateIn(viewModelScope, SharingStarted.Eagerly, true)
@@ -102,18 +117,37 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         }
     }
 
-    fun scan() = viewModelScope.launch {
-        scanning.value = true
-        runCatching { repo.scan(folders.value) }
-        scanning.value = false
-    }
+    fun scan() = startScan(folders.value)
     fun addFolder(uri: String) = viewModelScope.launch {
         preferences.addFolder(uri)
-        repo.scan(folders.value + uri)
+        startScan(folders.value + uri)
     }
     fun removeFolder(uri: String) = viewModelScope.launch {
         preferences.removeFolder(uri)
-        repo.scan(folders.value - uri)
+        startScan(folders.value - uri)
+    }
+    private fun startScan(folderUris: Set<String>) {
+        scanJob?.cancel()
+        val generation = scanGeneration.incrementAndGet()
+        scanJob = viewModelScope.launch {
+            _scanState.value = ScanState(running = true)
+            val result = runCatching {
+                repo.scan(folderUris) { progress: ScanProgress ->
+                    if (scanGeneration.get() == generation) {
+                        _scanState.value = ScanState(running = true, currentFile = progress.fileName, discovered = progress.discovered)
+                    }
+                }
+            }
+            result.exceptionOrNull()?.let { if (it is CancellationException) throw it }
+            val finished = result.fold(
+                onSuccess = { ScanState(discovered = it, message = "扫描完成，共发现 $it 首歌曲") },
+                onFailure = { ScanState(discovered = _scanState.value.discovered, message = "扫描失败，请重试", failed = true) }
+            )
+            if (scanGeneration.get() != generation) return@launch
+            _scanState.value = finished
+            delay(3_000)
+            if (_scanState.value == finished) _scanState.value = ScanState()
+        }
     }
     fun setTheme(theme: ThemeAccent) = viewModelScope.launch { preferences.setTheme(theme) }
     fun setBeatEffect(enabled: Boolean) = viewModelScope.launch { preferences.setBeatEffect(enabled) }
@@ -146,12 +180,39 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     fun playlistSongs(id: Long) = repo.playlistSongs(id)
     fun addToPlaylist(playlistId: Long, songId: Long) = viewModelScope.launch { repo.addToPlaylist(playlistId, songId) }
     fun removeFromPlaylist(playlistId: Long, songId: Long) = viewModelScope.launch { repo.removeFromPlaylist(playlistId, songId) }
+    fun setSleepTimer(minutes: Int) {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = viewModelScope.launch {
+            val endAt = SystemClock.elapsedRealtime() + minutes * 60_000L
+            while (true) {
+                val remaining = (endAt - SystemClock.elapsedRealtime()).coerceAtLeast(0)
+                _sleepTimerRemaining.value = remaining
+                if (remaining == 0L) break
+                delay(1_000)
+            }
+            player.pause()
+            _sleepTimerRemaining.value = null
+        }
+    }
+    fun cancelSleepTimer() {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
+        _sleepTimerRemaining.value = null
+    }
     override fun onCleared() { player.release() }
 
     companion object { fun factory(repo: MusicRepository, player: PlayerController, preferences: PlaybackPreferences, lyrics: LyricsRepository) = object : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player, preferences, lyrics) as T
     } }
 }
+
+data class ScanState(
+    val running: Boolean = false,
+    val currentFile: String? = null,
+    val discovered: Int = 0,
+    val message: String? = null,
+    val failed: Boolean = false
+)
 
 private enum class Screen(val title: String) { Player("正在播放"), Library("音乐库"), Favorites("我的收藏"), Playlists("播放列表"), Settings("设置") }
 
@@ -161,6 +222,7 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     val scope = rememberCoroutineScope()
     var screen by remember { mutableStateOf(Screen.Player) }
     val theme by vm.theme.collectAsStateWithLifecycle()
+    val sleepTimerRemaining by vm.sleepTimerRemaining.collectAsStateWithLifecycle()
     val accent = theme.color()
     LaunchedEffect(vm) { vm.openPlayer.collect { screen = Screen.Player; drawerState.close() } }
     ModalNavigationDrawer(drawerState = drawerState, gesturesEnabled = true, drawerContent = {
@@ -169,6 +231,28 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
                 Spacer(Modifier.height(44.dp)); Text("XSTAR", fontSize = 30.sp, fontWeight = FontWeight.Black, color = Color.White); Text("YOUR MUSIC. YOUR SPACE.", color = Color(0xFF7E8A9A), fontSize = 11.sp); Spacer(Modifier.height(34.dp))
                 listOf(Screen.Player to Icons.Default.Headphones, Screen.Library to Icons.Default.LibraryMusic, Screen.Favorites to Icons.Default.Favorite, Screen.Playlists to Icons.Default.QueueMusic, Screen.Settings to Icons.Default.Settings).forEach { item ->
                     NavigationDrawerItem(label = { Text(item.first.title) }, icon = { Icon(item.second, null) }, selected = screen == item.first, onClick = { screen = item.first; scope.launch { drawerState.close() } }, modifier = Modifier.padding(vertical = 3.dp))
+                }
+                Spacer(Modifier.height(16.dp))
+                Text("定时关闭", color = Color(0xFF9BA5B5), fontSize = 13.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = .06f)) {
+                    Column(Modifier.padding(12.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Bedtime, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(8.dp))
+                            Text(sleepTimerRemaining?.let { "剩余 ${sleepTimerText(it)}" } ?: "播放一段时间后暂停", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                            if (sleepTimerRemaining != null) TextButton(vm::cancelSleepTimer, contentPadding = PaddingValues(horizontal = 6.dp)) { Text("取消", fontSize = 12.sp) }
+                        }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                            listOf(10 to "10分", 20 to "20分", 30 to "30分", 60 to "1小时").forEach { (minutes, label) ->
+                                AssistChip(
+                                    onClick = { vm.setSleepTimer(minutes) },
+                                    label = { Text(label, fontSize = 11.sp) },
+                                    modifier = Modifier.weight(1f),
+                                    border = null
+                                )
+                            }
+                        }
+                    }
                 }
                 Spacer(Modifier.weight(1f))
                 Text("主题颜色", color = Color(0xFF9BA5B5), fontSize = 13.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
@@ -194,16 +278,20 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun PlayerScreen(vm: MusicViewModel, openMenu: () -> Unit) {
     val state by vm.playback.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     var showQueue by remember { mutableStateOf(false) }
     val theme by vm.theme.collectAsStateWithLifecycle()
     val beatEffect by vm.beatEffect.collectAsStateWithLifecycle()
-    val pulseColors = remember(theme) { theme.pulseColors() }
-    var ambientTarget by remember(theme) { mutableStateOf(pulseColors.first()) }
+    val artworkColors by produceState(initialValue = ArtworkColors.fallback(theme), state.song?.albumArtUri, theme) {
+        value = loadArtworkColors(context, state.song?.albumArtUri, theme)
+    }
+    val pulseColors = artworkColors.pulseColors
+    var ambientTarget by remember { mutableStateOf(artworkColors.primary) }
     var pulseScale by remember { mutableFloatStateOf(1f) }
     val discRotation = remember { Animatable(0f) }
-    LaunchedEffect(state.playing, state.song?.mediaStoreId, theme, beatEffect) {
+    LaunchedEffect(state.playing, state.song?.mediaStoreId, artworkColors, beatEffect) {
         if (!state.playing || !beatEffect) {
-            ambientTarget = theme.color()
+            ambientTarget = artworkColors.primary
             pulseScale = 1f
             return@LaunchedEffect
         }
@@ -228,13 +316,22 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     var showSongDetails by remember { mutableStateOf(false) }
     var showLyrics by remember { mutableStateOf(false) }
     LaunchedEffect(song?.mediaStoreId) { showLyrics = false }
-    Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(ambient.copy(alpha = .55f), ambient.copy(alpha = .13f), Color(0xFF090B10)), radius = 1250f))) {
+    Box(
+        Modifier.fillMaxSize()
+            .background(artworkColors.dark)
+            .background(Brush.radialGradient(listOf(artworkColors.light.copy(alpha = .42f), Color.Transparent), center = Offset(120f, 80f), radius = 820f))
+            .background(Brush.radialGradient(listOf(ambient.copy(alpha = .48f), Color.Transparent), center = Offset(920f, 620f), radius = 1050f))
+            .background(Brush.radialGradient(listOf(artworkColors.primary.copy(alpha = .24f), Color.Transparent, artworkColors.dark.copy(alpha = .72f)), center = Offset(520f, 430f), radius = 1300f))
+    ) {
     IconButton(openMenu, Modifier.statusBarsPadding().padding(10.dp).align(Alignment.TopStart)) { Icon(Icons.Default.Menu, "菜单", tint = Color.White) }
     Column(Modifier.fillMaxSize().padding(horizontal = 22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Spacer(Modifier.weight(.45f))
-        BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Spacer(Modifier.weight(if (showLyrics) .12f else .45f))
+        BoxWithConstraints(
+            Modifier.fillMaxWidth().then(if (showLyrics) Modifier.weight(1f) else Modifier),
+            contentAlignment = Alignment.Center
+        ) {
             val artworkSize = minOf(maxWidth - 48.dp, 330.dp)
-            if (showLyrics) LyricsPanel(vm, artworkSize) { showLyrics = false } else Box(
+            if (showLyrics) LyricsPanel(vm, Modifier.fillMaxSize()) { showLyrics = false } else Box(
                 Modifier.size(artworkSize).scale(artworkScale).graphicsLayer { rotationZ = discRotation.value }.clickable { showLyrics = true },
                 contentAlignment = Alignment.Center
             ) {
@@ -252,15 +349,26 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
                 }
             }
         }
-        Spacer(Modifier.height(30.dp))
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = { showSongDetails = true }, Modifier.size(34.dp)) { Icon(Icons.Default.Info, "歌曲详情", Modifier.size(19.dp), tint = Color(0xFFB3BDCC)) }
-            Text(if (song == null) "选择一首歌曲" else "${song.artist} - ${song.title}", Modifier.weight(1f), color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            song?.let { QualityBadge(it.audioQuality) }
-        }
-        if (song != null) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("${formatName(song.mimeType)} · ${audioDetail(song)}", color = Color(0xFF71809A), fontSize = 12.sp, modifier = Modifier.padding(start = 34.dp, top = 4.dp))
+        Spacer(Modifier.height(if (showLyrics) 12.dp else 30.dp))
+        Column(Modifier.fillMaxWidth().heightIn(min = 64.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+                if (song != null) {
+                    IconButton(onClick = { showSongDetails = true }, Modifier.size(30.dp)) {
+                        Icon(Icons.Default.Info, "歌曲详情", Modifier.size(17.dp), tint = Color(0xFFBEC8D7))
+                    }
+                    Spacer(Modifier.width(3.dp))
+                }
+                Text(song?.title ?: "选择一首歌曲", Modifier.widthIn(max = 290.dp), color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Spacer(Modifier.height(7.dp))
+            if (song == null) {
+                Text("从音乐库开始播放", color = Color(0xFFADB6C5), fontSize = 14.sp, modifier = Modifier.height(22.dp))
+            } else {
+                Row(Modifier.height(22.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+                    Text(song.artist, color = Color(0xFFC5CDDA), fontSize = 14.sp, lineHeight = 22.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.width(8.dp))
+                    QualityBadge(song.audioQuality)
+                }
             }
         }
         Spacer(Modifier.height(22.dp))
@@ -290,12 +398,17 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
             IconButton(onClick = { showQueue = true }, Modifier.size(52.dp)) { Icon(Icons.Default.QueueMusic, "播放列表", tint = Color(0xFFB3BDCC)) }
         }
         state.error?.let { Text(it, color = Color(0xFFFF8A96), fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp)) }
-        Spacer(Modifier.weight(.5f))
+        Spacer(Modifier.weight(if (showLyrics) .08f else .5f))
     }
     }
     if (showQueue) QueueSheet(state, vm) { showQueue = false }
     if (showArtworkPicker && song != null) AlbumArtworkSheet(song.album, listOf(song), vm, allowReplace = true) { showArtworkPicker = false }
-    if (showSongDetails && song != null) SongDetailsSheet(song, vm, { showArtworkPicker = true }) { showSongDetails = false }
+    if (showSongDetails && song != null) SongDetailsSheet(
+        song = song,
+        getArtwork = { showSongDetails = false; showArtworkPicker = true },
+        getLyrics = { showSongDetails = false; showLyrics = true; vm.findLyrics() },
+        close = { showSongDetails = false }
+    )
 }
 
 @Composable private fun QualityBadge(value: String) {
@@ -306,22 +419,32 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
         AudioQuality.Lossless -> Triple("无损", Color(0xFFB18CFF), Icons.Default.Verified)
         AudioQuality.HiRes -> Triple("Hi-Res", Color(0xFFFFBE5C), Icons.Default.WorkspacePremium)
     }
-    Surface(shape = RoundedCornerShape(7.dp), color = color.copy(alpha = .18f)) { Row(Modifier.padding(horizontal = 7.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) { Icon(icon, label, Modifier.size(13.dp), tint = color); Spacer(Modifier.width(3.dp)); Text(label, color = color, fontSize = 10.sp, fontWeight = FontWeight.Bold) } }
+    Surface(Modifier.height(22.dp), shape = RoundedCornerShape(50), color = color.copy(alpha = .18f)) { Row(Modifier.padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) { Icon(icon, label, Modifier.size(11.dp), tint = color); Spacer(Modifier.width(3.dp)); Text(label, color = color, fontSize = 9.sp, lineHeight = 22.sp, fontWeight = FontWeight.Bold) } }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun SongDetailsSheet(song: SongEntity, vm: MusicViewModel, getArtwork: () -> Unit, close: () -> Unit) {
+@Composable private fun SongDetailsSheet(song: SongEntity, getArtwork: () -> Unit, getLyrics: () -> Unit, close: () -> Unit) {
     ModalBottomSheet(onDismissRequest = close, containerColor = Color(0xFF171B23)) {
         Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 8.dp)) {
-            Text("歌曲详情", color = Color.White, style = MaterialTheme.typography.headlineSmall)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("歌曲详情", color = Color.White, style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
+                TextButton(onClick = getArtwork) {
+                    Icon(Icons.Default.Image, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text(if (song.albumArtUri.isNullOrBlank()) "获取封面" else "更换封面")
+                }
+                TextButton(onClick = getLyrics) {
+                    Icon(Icons.Default.QueueMusic, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(5.dp))
+                    Text("获取歌词")
+                }
+            }
             Spacer(Modifier.height(12.dp))
             DetailRow("歌手", song.artist); DetailRow("歌曲", song.title); DetailRow("专辑", song.album)
             DetailRow("格式", formatName(song.mimeType)); DetailRow("音质", qualityLabel(song.audioQuality))
             DetailRow("编码", song.codec ?: "未知"); DetailRow("采样率", song.sampleRate?.let { "${it / 1000.0} kHz" } ?: "未知")
             DetailRow("位深", song.bitDepth?.let { "$it bit" } ?: "未知"); DetailRow("码率", song.bitrate?.let { "${it / 1000} kbps" } ?: "无损/未知")
             DetailRow("声道", song.channelCount?.let { if (it == 1) "单声道" else "${it} 声道" } ?: "未知"); DetailRow("时长", time(song.durationMs)); DetailRow("文件", song.fileName ?: "未知")
-            Spacer(Modifier.height(10.dp))
-            Button(onClick = { getArtwork(); close() }, Modifier.fillMaxWidth()) { Icon(Icons.Default.Image, null); Spacer(Modifier.width(8.dp)); Text(if (song.albumArtUri.isNullOrBlank()) "获取封面" else "更换封面") }
             Spacer(Modifier.height(18.dp))
         }
     }
@@ -329,16 +452,18 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
 
 @Composable private fun DetailRow(label: String, value: String) { Row(Modifier.fillMaxWidth().padding(vertical = 7.dp), horizontalArrangement = Arrangement.SpaceBetween) { Text(label, color = Color(0xFF8F99A9)); Text(value, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 20.dp)) } }
 
-@Composable private fun LyricsPanel(vm: MusicViewModel, size: androidx.compose.ui.unit.Dp, close: () -> Unit) {
+@Composable private fun LyricsPanel(vm: MusicViewModel, modifier: Modifier = Modifier, close: () -> Unit) {
     val state by vm.lyrics.collectAsStateWithLifecycle()
     val playback by vm.playback.collectAsStateWithLifecycle()
-    when (state) {
-        LyricsState.Loading -> CircularProgressIndicator()
-        LyricsState.NotFound -> LyricsEmpty("未找到本地歌词", vm::findLyrics, close)
-        is LyricsState.Error -> LyricsEmpty((state as LyricsState.Error).message, vm::findLyrics, close)
-        is LyricsState.Candidates -> LyricsCandidates((state as LyricsState.Candidates).items, vm, close)
-        is LyricsState.Loaded -> LyricsScroll((state as LyricsState.Loaded).document.lines, playback.position, close)
-        LyricsState.Idle -> LyricsEmpty("点击获取歌词", vm::findLyrics, close)
+    Box(modifier, contentAlignment = Alignment.Center) {
+        when (state) {
+            LyricsState.Loading -> CircularProgressIndicator()
+            LyricsState.NotFound -> LyricsEmpty("未找到本地歌词", vm::findLyrics, close)
+            is LyricsState.Error -> LyricsEmpty((state as LyricsState.Error).message, vm::findLyrics, close)
+            is LyricsState.Candidates -> LyricsCandidates((state as LyricsState.Candidates).items, vm)
+            is LyricsState.Loaded -> LyricsScroll((state as LyricsState.Loaded).document.lines, playback.position, close)
+            LyricsState.Idle -> LyricsEmpty("点击获取歌词", vm::findLyrics, close)
+        }
     }
 }
 
@@ -350,11 +475,11 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     }
 }
 
-@Composable private fun LyricsCandidates(items: List<LyricsCandidate>, vm: MusicViewModel, close: () -> Unit) {
-    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 330.dp)) {
+@Composable private fun LyricsCandidates(items: List<LyricsCandidate>, vm: MusicViewModel) {
+    LazyColumn(Modifier.fillMaxSize()) {
         item { Text("选择歌词", color = Color.White, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(16.dp)) }
         items(items, key = { it.id }) { candidate ->
-            ListItem(headlineContent = { Text(candidate.trackName.ifBlank { "未知歌曲" }) }, supportingContent = { Text("${candidate.artistName} · ${if (candidate.isSynced) "同步歌词" else "纯文本"}") }, modifier = Modifier.clickable { vm.saveLyrics(candidate); close() })
+            ListItem(headlineContent = { Text(candidate.trackName.ifBlank { "未知歌曲" }) }, supportingContent = { Text("${candidate.artistName} · ${if (candidate.isSynced) "同步歌词" else "纯文本"}") }, modifier = Modifier.clickable { vm.saveLyrics(candidate) })
         }
     }
 }
@@ -363,7 +488,7 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     val current = lines.indexOfLast { it.timeMs?.let(position::compareTo) ?: -1 >= 0 }
     LaunchedEffect(current) { if (current >= 0) listState.animateScrollToItem(current) }
-    LazyColumn(state = listState, modifier = Modifier.fillMaxWidth().heightIn(max = 370.dp).clickable(onClick = close), horizontalAlignment = Alignment.CenterHorizontally, contentPadding = PaddingValues(vertical = 90.dp)) {
+    LazyColumn(state = listState, modifier = Modifier.fillMaxSize().clickable(onClick = close), horizontalAlignment = Alignment.CenterHorizontally, contentPadding = PaddingValues(vertical = 110.dp)) {
         items(lines) { line -> Text(line.text, color = if (lines.indexOf(line) == current) Color.White else Color.White.copy(alpha = .38f), fontSize = if (lines.indexOf(line) == current) 21.sp else 16.sp, fontWeight = if (lines.indexOf(line) == current) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.padding(vertical = 9.dp, horizontal = 16.dp)) }
     }
 }
@@ -389,10 +514,67 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
 @Composable private fun LibraryScreen(vm: MusicViewModel, openMenu: () -> Unit) {
     val context = LocalContext.current
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> uri?.let { runCatching { context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }; vm.addFolder(it.toString()) } }
-    val songs by vm.songs.collectAsStateWithLifecycle(); val folders by vm.folders.collectAsStateWithLifecycle(); val scanning by vm.scanning.collectAsStateWithLifecycle(); var query by remember { mutableStateOf("") }; var group by remember { mutableIntStateOf(0) }
+    val songs by vm.songs.collectAsStateWithLifecycle()
+    val folders by vm.folders.collectAsStateWithLifecycle()
+    val scanState by vm.scanState.collectAsStateWithLifecycle()
+    var query by remember { mutableStateOf("") }
+    var group by remember { mutableIntStateOf(0) }
     var selectedAlbum by remember { mutableStateOf<Pair<String, List<SongEntity>>?>(null) }
-    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) { PageHeader(openMenu, { IconButton({ folderPicker.launch(null) }) { Icon(Icons.Default.CreateNewFolder, "添加文件夹", tint = Color.White) }; IconButton(vm::scan) { Icon(Icons.Default.Refresh, "扫描", tint = Color.White) } }); OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), leadingIcon = { Icon(Icons.Default.Search, null) }, placeholder = { Text("搜索歌曲、艺术家或专辑") }, singleLine = true, shape = RoundedCornerShape(18.dp)); Spacer(Modifier.height(12.dp)); if (folders.isEmpty()) EmptyState("选择音乐文件夹", "可以连续选择多个目录，XSTAR 只扫描这些目录中的音频。", "选择文件夹") { folderPicker.launch(null) } else if (scanning) Box(Modifier.fillMaxSize(), Alignment.Center) { CircularProgressIndicator() } else { val filtered = songs.filter { query.isBlank() || "${it.title}${it.artist}${it.album}".contains(query, true) }; TabRow(group, containerColor = Color.Transparent) { listOf("歌曲", "专辑", "艺术家").forEachIndexed { i, text -> Tab(group == i, { group = i }, text = { Text(text) }) } }; if (group == 0) SongsList(filtered, vm) else GroupsList(filtered.groupBy { if (group == 1) it.album else it.artist }, vm) { name, entries -> if (group == 1) selectedAlbum = name to entries } } }
+    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) {
+        PageHeader(openMenu, {
+            IconButton({ folderPicker.launch(null) }, enabled = !scanState.running) { Icon(Icons.Default.CreateNewFolder, "添加文件夹", tint = Color.White) }
+            IconButton(vm::scan, enabled = !scanState.running && folders.isNotEmpty()) { Icon(Icons.Default.Refresh, "扫描", tint = Color.White) }
+        })
+        OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), leadingIcon = { Icon(Icons.Default.Search, null) }, placeholder = { Text("搜索歌曲、艺术家或专辑") }, singleLine = true, shape = RoundedCornerShape(18.dp))
+        if (scanState.running || scanState.message != null) {
+            Spacer(Modifier.height(12.dp))
+            ScanStatusCard(scanState)
+        }
+        Spacer(Modifier.height(12.dp))
+        if (folders.isEmpty() && !scanState.running) {
+            EmptyState("选择音乐文件夹", "可以连续选择多个目录，XSTAR 只扫描这些目录中的音频。", "选择文件夹") { folderPicker.launch(null) }
+        } else {
+            val filtered = songs.filter { query.isBlank() || "${it.title}${it.artist}${it.album}".contains(query, true) }
+            TabRow(group, containerColor = Color.Transparent) {
+                listOf("歌曲", "专辑", "艺术家").forEachIndexed { i, text -> Tab(group == i, { group = i }, text = { Text(text) }) }
+            }
+            if (filtered.isEmpty() && scanState.running) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Default.LibraryMusic, null, Modifier.size(48.dp), tint = MaterialTheme.colorScheme.primary.copy(alpha = .72f))
+                        Spacer(Modifier.height(12.dp))
+                        Text("正在建立音乐库", color = Color(0xFFB8C1CF))
+                    }
+                }
+            } else if (group == 0) {
+                SongsList(filtered, vm)
+            } else {
+                GroupsList(filtered.groupBy { if (group == 1) it.album else it.artist }, vm) { name, entries -> if (group == 1) selectedAlbum = name to entries }
+            }
+        }
+    }
     selectedAlbum?.let { (name, entries) -> AlbumArtworkSheet(name, entries, vm) { selectedAlbum = null } }
+}
+
+@Composable private fun ScanStatusCard(state: ScanState) {
+    val accent = if (state.failed) Color(0xFFFF8A96) else MaterialTheme.colorScheme.primary
+    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = .07f)) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 13.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(if (state.failed) Icons.Default.ErrorOutline else if (state.running) Icons.Default.Radar else Icons.Default.CheckCircle, null, Modifier.size(20.dp), tint = accent)
+                Spacer(Modifier.width(9.dp))
+                Text(if (state.running) "正在扫描音乐库" else state.message.orEmpty(), color = if (state.failed) accent else Color.White, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                if (state.running) Text("${state.discovered} 首", color = accent, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
+            if (state.running) {
+                Spacer(Modifier.height(10.dp))
+                LinearProgressIndicator(Modifier.fillMaxWidth().height(3.dp).clip(CircleShape), color = accent, trackColor = Color.White.copy(alpha = .1f))
+                state.currentFile?.takeIf { it.isNotBlank() }?.let { fileName ->
+                    Text("正在读取：$fileName", color = Color(0xFF8F99A9), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 8.dp))
+                }
+            }
+        }
+    }
 }
 
 @Composable private fun CollectionScreen(songs: List<SongEntity>, vm: MusicViewModel, openMenu: () -> Unit) { Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) { PageHeader(openMenu); if (songs.isEmpty()) EmptyState("还没有收藏", "在歌曲右侧点击爱心即可收藏。", "前往音乐库") {} else SongsList(songs, vm) } }
@@ -465,6 +647,7 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     val folders by vm.folders.collectAsStateWithLifecycle()
     val beatEffect by vm.beatEffect.collectAsStateWithLifecycle()
     val onlineArtwork by vm.onlineArtworkEnabled.collectAsStateWithLifecycle()
+    val scanState by vm.scanState.collectAsStateWithLifecycle()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let { runCatching { context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }; vm.addFolder(it.toString()) }
     }
@@ -493,30 +676,75 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
         )
         Text("音乐文件夹", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
         folders.forEach { uri ->
-            ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(folderName(uri), color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) }, supportingContent = { Text(uri, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis) }, leadingContent = { Icon(Icons.Default.Folder, null) }, trailingContent = { IconButton({ vm.removeFolder(uri) }) { Icon(Icons.Default.Close, "移除") } })
+            ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(folderName(uri), color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) }, supportingContent = { Text(uri, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis) }, leadingContent = { Icon(Icons.Default.Folder, null) }, trailingContent = { IconButton({ vm.removeFolder(uri) }, enabled = !scanState.running) { Icon(Icons.Default.Close, "移除") } })
         }
-        OutlinedButton({ picker.launch(null) }, Modifier.padding(horizontal = 16.dp)) { Icon(Icons.Default.CreateNewFolder, null); Spacer(Modifier.width(8.dp)); Text("添加文件夹") }
-        ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("重新扫描音乐库", color = Color.White) }, supportingContent = { Text("仅同步已选择文件夹中的音频", color = Color.Gray) }, leadingContent = { Icon(Icons.Default.Refresh, null) }, modifier = Modifier.clickable { vm.scan() })
+        OutlinedButton({ picker.launch(null) }, Modifier.padding(horizontal = 16.dp), enabled = !scanState.running) { Icon(Icons.Default.CreateNewFolder, null); Spacer(Modifier.width(8.dp)); Text("添加文件夹") }
+        ListItem(
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            headlineContent = { Text(if (scanState.running) "正在扫描音乐库" else "重新扫描音乐库", color = Color.White) },
+            supportingContent = {
+                Text(
+                    when {
+                        scanState.running && !scanState.currentFile.isNullOrBlank() -> "已发现 ${scanState.discovered} 首 · ${scanState.currentFile}"
+                        scanState.message != null -> scanState.message.orEmpty()
+                        else -> "仅同步已选择文件夹中的音频"
+                    },
+                    color = if (scanState.failed) Color(0xFFFF8A96) else Color.Gray,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            },
+            leadingContent = { Icon(if (scanState.running) Icons.Default.Radar else Icons.Default.Refresh, null) },
+            trailingContent = { if (scanState.running) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp) },
+            modifier = Modifier.clickable(enabled = !scanState.running && folders.isNotEmpty()) { vm.scan() }
+        )
         ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("XSTAR", color = Color.White) }, supportingContent = { Text("本地音乐播放器 · 0.1.0", color = Color.Gray) }, leadingContent = { Icon(Icons.Default.Info, null) })
     }
 }
 @Composable private fun EmptyState(title: String, text: String, action: String, click: () -> Unit) { Column(Modifier.fillMaxWidth().padding(42.dp), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Default.LibraryMusic, null, Modifier.size(58.dp), tint = Color(0xFF65738A)); Spacer(Modifier.height(18.dp)); Text(title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold); Text(text, color = Color.Gray, modifier = Modifier.padding(vertical = 12.dp)); Button(click) { Text(action) } } }
 private fun PlaybackMode.next() = when (this) { PlaybackMode.Sequential -> PlaybackMode.Shuffle; PlaybackMode.Shuffle -> PlaybackMode.RepeatOne; PlaybackMode.RepeatOne -> PlaybackMode.Sequential }
 private fun time(ms: Long) = "%d:%02d".format(ms.coerceAtLeast(0) / 60_000, (ms.coerceAtLeast(0) / 1_000) % 60)
-private fun audioDetail(song: SongEntity): String = buildList {
-    song.bitrate?.let { add("${it / 1000}kbps") }
-    if (song.sampleRate != null) add("${song.sampleRate / 1000.0}kHz")
-    song.bitDepth?.let { add("${it}bit") }
-}.joinToString("/").ifBlank { "音频" }
 private fun qualityLabel(value: String): String = runCatching { AudioQuality.valueOf(value) }.getOrDefault(AudioQuality.Standard).let { quality -> when (quality) { AudioQuality.Standard -> "普通"; AudioQuality.High -> "高清"; AudioQuality.Lossless -> "无损"; AudioQuality.HiRes -> "Hi-Res" } }
 private fun formatName(mime: String?) = mime?.substringAfter('/')?.uppercase()?.replace("MPEG", "MP3") ?: "AUDIO"
 private fun folderName(uri: String) = Uri.parse(uri).lastPathSegment?.substringAfterLast(':')?.ifBlank { "音乐文件夹" } ?: "音乐文件夹"
-private fun ThemeAccent.color() = when (this) { ThemeAccent.Blue -> Color(0xFF78A9FF); ThemeAccent.Violet -> Color(0xFFAE8CFF); ThemeAccent.Rose -> Color(0xFFFF7998); ThemeAccent.Emerald -> Color(0xFF55D6A9); ThemeAccent.Amber -> Color(0xFFFFBE5C) }
-private fun ThemeAccent.pulseColors(): List<Color> = when (this) {
-    ThemeAccent.Blue -> listOf(Color(0xFF2676D9), Color(0xFF6E4BD8), Color(0xFF1696A7), Color(0xFF2752A8))
-    ThemeAccent.Violet -> listOf(Color(0xFF7547D8), Color(0xFFB43FA1), Color(0xFF4452C9), Color(0xFF8A45C2))
-    ThemeAccent.Rose -> listOf(Color(0xFFD93663), Color(0xFFC849A5), Color(0xFFD25A3A), Color(0xFF9D3E77))
-    ThemeAccent.Emerald -> listOf(Color(0xFF15956B), Color(0xFF168E9B), Color(0xFF3C8D4C), Color(0xFF237E70))
-    ThemeAccent.Amber -> listOf(Color(0xFFD18425), Color(0xFFC95833), Color(0xFFA79324), Color(0xFFB66B2B))
+private fun sleepTimerText(milliseconds: Long): String {
+    val totalSeconds = (milliseconds.coerceAtLeast(0) + 999) / 1_000
+    return if (totalSeconds >= 3_600) "%d:%02d:%02d".format(totalSeconds / 3_600, totalSeconds / 60 % 60, totalSeconds % 60)
+    else "%d:%02d".format(totalSeconds / 60, totalSeconds % 60)
 }
+
+private data class ArtworkColors(val primary: Color, val light: Color, val dark: Color) {
+    val pulseColors: List<Color> get() = listOf(primary, light, lerp(primary, light, .42f), lerp(primary, dark, .2f))
+
+    companion object {
+        fun fallback(theme: ThemeAccent): ArtworkColors {
+            val primary = theme.color()
+            return ArtworkColors(primary, lerp(primary, Color.White, .24f), lerp(primary, Color(0xFF090B10), .74f))
+        }
+    }
+}
+
+private suspend fun loadArtworkColors(context: android.content.Context, artworkUri: String?, theme: ThemeAccent): ArtworkColors = withContext(Dispatchers.IO) {
+    if (artworkUri.isNullOrBlank()) return@withContext ArtworkColors.fallback(theme)
+    val openArtwork = {
+        if (artworkUri.startsWith("content://") || artworkUri.startsWith("file://")) context.contentResolver.openInputStream(Uri.parse(artworkUri))
+        else File(artworkUri).inputStream()
+    }
+    runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        openArtwork().use { BitmapFactory.decodeStream(it, null, bounds) }
+        var sampleSize = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / sampleSize > 256) sampleSize *= 2
+        val bitmap = openArtwork().use { BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sampleSize }) }
+            ?: return@runCatching ArtworkColors.fallback(theme)
+        val palette = Palette.from(bitmap).maximumColorCount(24).generate()
+        bitmap.recycle()
+        val fallback = theme.color()
+        val primary = Color(palette.vibrantSwatch?.rgb ?: palette.dominantSwatch?.rgb ?: palette.mutedSwatch?.rgb ?: fallback.toArgb())
+        val lightBase = Color(palette.lightVibrantSwatch?.rgb ?: palette.lightMutedSwatch?.rgb ?: primary.toArgb())
+        val darkBase = Color(palette.darkMutedSwatch?.rgb ?: palette.darkVibrantSwatch?.rgb ?: primary.toArgb())
+        ArtworkColors(primary, lerp(lightBase, Color.White, .12f), lerp(darkBase, Color(0xFF07090D), .68f))
+    }.getOrElse { ArtworkColors.fallback(theme) }
+}
+private fun ThemeAccent.color() = when (this) { ThemeAccent.Blue -> Color(0xFF78A9FF); ThemeAccent.Violet -> Color(0xFFAE8CFF); ThemeAccent.Rose -> Color(0xFFFF7998); ThemeAccent.Emerald -> Color(0xFF55D6A9); ThemeAccent.Amber -> Color(0xFFFFBE5C) }
 @Composable private fun XstarTheme(accent: ThemeAccent, content: @Composable () -> Unit) { MaterialTheme(colorScheme = darkColorScheme(primary = accent.color(), background = Color(0xFF090B10), surface = Color(0xFF171B23)), content = content) }

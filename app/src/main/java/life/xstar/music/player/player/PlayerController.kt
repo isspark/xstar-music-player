@@ -93,6 +93,12 @@ class PlayerController(context: Context) {
         }, executor)
     }
 
+    fun pause() = controllerFuture.addListener({
+        val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
+        controller.pause()
+        _state.value = _state.value.copy(playing = false)
+    }, executor)
+
     fun next() = controllerFuture.addListener({ controllerFuture.get().seekToNextMediaItem() }, executor)
     fun previous() = controllerFuture.addListener({ controllerFuture.get().seekToPreviousMediaItem() }, executor)
     fun seek(position: Long) = controllerFuture.addListener({ controllerFuture.get().seekTo(position) }, executor)
