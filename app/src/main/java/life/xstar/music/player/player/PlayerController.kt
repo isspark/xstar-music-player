@@ -65,13 +65,15 @@ class PlayerController(context: Context) {
     }
 
     fun playQueue(songs: List<SongEntity>, startIndex: Int) {
+        if (songs.isEmpty()) return
         controllerFuture.addListener({
-            val controller = controllerFuture.get()
+            val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
+            val safeIndex = startIndex.coerceIn(0, songs.lastIndex)
             attachListener(controller)
-            controller.setMediaItems(songs.map { it.toMediaItem() }, startIndex, 0)
+            controller.setMediaItems(songs.map { it.toMediaItem() }, safeIndex, 0)
             controller.prepare()
             controller.play()
-            _state.value = PlayerState(songs.getOrNull(startIndex), true, queue = songs, index = startIndex, mode = _state.value.mode)
+            _state.value = PlayerState(songs[safeIndex], true, queue = songs, index = safeIndex, mode = _state.value.mode)
             progressJob?.cancel()
             progressJob = scope.launch {
                 while (isActive) {
@@ -84,7 +86,7 @@ class PlayerController(context: Context) {
 
     fun toggle() {
         controllerFuture.addListener({
-            val controller = controllerFuture.get()
+            val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
             if (controller.isPlaying) controller.pause() else controller.play()
             _state.value = _state.value.copy(playing = controller.isPlaying)
         }, executor)

@@ -2,6 +2,7 @@ package life.xstar.music.player.data.local
 
 import androidx.room.Entity
 import androidx.room.ForeignKey
+import androidx.room.Index
 
 @Entity(tableName = "playlists")
 data class PlaylistEntity(
@@ -14,6 +15,7 @@ data class PlaylistEntity(
 @Entity(
     tableName = "playlist_songs",
     primaryKeys = ["playlistId", "songId"],
+    indices = [Index(value = ["songId"])],
     foreignKeys = [
         ForeignKey(entity = PlaylistEntity::class, parentColumns = ["id"], childColumns = ["playlistId"], onDelete = ForeignKey.CASCADE),
         ForeignKey(entity = SongEntity::class, parentColumns = ["mediaStoreId"], childColumns = ["songId"], onDelete = ForeignKey.CASCADE)

@@ -11,6 +11,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -27,6 +29,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -74,7 +78,12 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         viewModelScope.launch { preferences.read().let { saved -> if (saved.queue.isNotEmpty()) player.restoreQueue(repo.findByIds(saved.queue), saved.index, saved.position) } }
     }
 
-    fun scan() = viewModelScope.launch { scanning.value = true; runCatching { repo.scan(folders.value) }; scanning.value = false }
+    fun scan() = viewModelScope.launch {
+        scanning.value = true
+        runCatching { repo.scan(folders.value) }
+        scanning.value = false
+        launch { runCatching { repo.enrichMissingArtwork() } }
+    }
     fun addFolder(uri: String) = viewModelScope.launch { preferences.addFolder(uri); repo.scan(folders.value + uri) }
     fun removeFolder(uri: String) = viewModelScope.launch { preferences.removeFolder(uri); repo.scan(folders.value - uri) }
     fun setTheme(theme: ThemeAccent) = viewModelScope.launch { preferences.setTheme(theme) }
@@ -144,6 +153,7 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     val pulseColors = remember(theme) { theme.pulseColors() }
     var ambientTarget by remember(theme) { mutableStateOf(pulseColors.first()) }
     var pulseScale by remember { mutableFloatStateOf(1f) }
+    val discRotation = remember { Animatable(0f) }
     LaunchedEffect(state.playing, state.song?.mediaStoreId, theme, beatEffect) {
         if (!state.playing || !beatEffect) {
             ambientTarget = theme.color()
@@ -156,6 +166,14 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
             kotlinx.coroutines.delay(Random.nextLong(380, 900))
         }
     }
+    LaunchedEffect(state.playing, state.song?.mediaStoreId) {
+        while (state.playing) {
+            discRotation.animateTo(
+                discRotation.value + 360f,
+                animationSpec = tween(18_000, easing = LinearEasing)
+            )
+        }
+    }
     val ambient by animateColorAsState(ambientTarget, tween(650), label = "ambient")
     val artworkScale by animateFloatAsState(pulseScale, tween(420), label = "artworkPulse")
     val song = state.song
@@ -165,9 +183,18 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
         Spacer(Modifier.weight(.45f))
         BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
             val artworkSize = minOf(maxWidth - 48.dp, 330.dp)
-            Surface(Modifier.size(artworkSize).scale(artworkScale).clip(CircleShape), shape = CircleShape, tonalElevation = 12.dp, shadowElevation = 18.dp, color = Color(0xFF242B37)) {
-                if (song?.albumArtUri != null) AsyncImage(song.albumArtUri, null, Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop)
-                else Box(Modifier.fillMaxSize().clip(CircleShape).background(Brush.linearGradient(listOf(ambient.copy(alpha = .7f), Color(0xFF171C25)))), Alignment.Center) { Icon(Icons.Default.MusicNote, null, Modifier.size(72.dp), tint = Color.White.copy(alpha = .8f)) }
+            Box(
+                Modifier.size(artworkSize).scale(artworkScale).graphicsLayer { rotationZ = discRotation.value },
+                contentAlignment = Alignment.Center
+            ) {
+                Surface(Modifier.fillMaxSize().clip(CircleShape), shape = CircleShape, tonalElevation = 12.dp, shadowElevation = 18.dp, color = Color(0xFF242B37)) {
+                    if (song?.albumArtUri != null) AsyncImage(song.albumArtUri, null, Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop)
+                    else Box(Modifier.fillMaxSize().clip(CircleShape).background(Brush.linearGradient(listOf(ambient.copy(alpha = .7f), Color(0xFF171C25)))), Alignment.Center) { Icon(Icons.Default.MusicNote, null, Modifier.size(72.dp), tint = Color.White.copy(alpha = .8f)) }
+                }
+                Box(Modifier.fillMaxSize().padding(10.dp).border(1.dp, Color.White.copy(alpha = .22f), CircleShape))
+                Surface(Modifier.size(34.dp), shape = CircleShape, color = Color(0xFF111722), tonalElevation = 3.dp) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Box(Modifier.size(8.dp).clip(CircleShape).background(Color(0xFF7C8798))) }
+                }
             }
         }
         Spacer(Modifier.height(30.dp))
@@ -175,13 +202,28 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
         Spacer(Modifier.height(6.dp)); Text(song?.artist ?: "从音乐库开始播放", color = Color(0xFFAAB2C0), fontSize = 16.sp)
         if (song != null) Text(formatName(song.mimeType), color = Color(0xFF71809A), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
         Spacer(Modifier.height(22.dp))
-        Slider(value = if (state.duration > 0) state.position.toFloat() / state.duration else 0f, onValueChange = { vm.player.seek((it * state.duration).toLong()) }, colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.White, inactiveTrackColor = Color(0xFF38404D)))
+        Slider(
+            value = if (state.duration > 0) state.position.toFloat() / state.duration else 0f,
+            onValueChange = { vm.player.seek((it * state.duration).toLong()) },
+            modifier = Modifier.height(20.dp),
+            colors = SliderDefaults.colors(
+                thumbColor = Color.White,
+                activeTrackColor = Color.White.copy(alpha = .9f),
+                inactiveTrackColor = Color.White.copy(alpha = .18f)
+            ),
+            thumb = { Box(Modifier.size(8.dp).clip(CircleShape).background(Color.White)) },
+            track = { sliderPositions ->
+                Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = .18f))) {
+                    Box(Modifier.fillMaxWidth(sliderPositions.value).fillMaxHeight().clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = .9f)))
+                }
+            }
+        )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(time(state.position), color = Color(0xFF8A94A5), fontSize = 12.sp); Text(time(state.duration), color = Color(0xFF8A94A5), fontSize = 12.sp) }
         Spacer(Modifier.height(16.dp))
         Row(Modifier.fillMaxWidth().height(76.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
             PlaybackModeButton(state.mode) { vm.player.setPlaybackMode(state.mode.next()) }
             IconButton(onClick = vm.player::previous, Modifier.size(52.dp)) { Icon(Icons.Default.SkipPrevious, "上一首", Modifier.size(32.dp), tint = Color.White) }
-            FilledIconButton(onClick = vm.player::toggle, Modifier.size(64.dp), colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color.White, contentColor = Color(0xFF0D1016))) { Icon(if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow, "播放或暂停", Modifier.size(34.dp)) }
+            IconButton(onClick = vm.player::toggle, Modifier.size(64.dp)) { Icon(if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow, "播放或暂停", Modifier.size(38.dp), tint = Color.White) }
             IconButton(onClick = vm.player::next, Modifier.size(52.dp)) { Icon(Icons.Default.SkipNext, "下一首", Modifier.size(32.dp), tint = Color.White) }
             IconButton(onClick = { showQueue = true }, Modifier.size(52.dp)) { Icon(Icons.Default.QueueMusic, "播放列表", tint = Color(0xFFB3BDCC)) }
         }
