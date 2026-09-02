@@ -195,6 +195,7 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     val ambient by animateColorAsState(ambientTarget, tween(650), label = "ambient")
     val artworkScale by animateFloatAsState(pulseScale, tween(420), label = "artworkPulse")
     val song = state.song
+    var showArtworkPicker by remember { mutableStateOf(false) }
     Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(ambient.copy(alpha = .55f), ambient.copy(alpha = .13f), Color(0xFF090B10)), radius = 1250f))) {
     IconButton(openMenu, Modifier.statusBarsPadding().padding(10.dp).align(Alignment.TopStart)) { Icon(Icons.Default.Menu, "菜单", tint = Color.White) }
     Column(Modifier.fillMaxSize().padding(horizontal = 22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -206,7 +207,12 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
                 contentAlignment = Alignment.Center
             ) {
                 Surface(Modifier.fillMaxSize().clip(CircleShape), shape = CircleShape, tonalElevation = 12.dp, shadowElevation = 18.dp, color = Color(0xFF242B37)) {
-                    ArtworkImage(song?.albumArtUri, ambient)
+                    Box(Modifier.fillMaxSize()) {
+                        ArtworkImage(song?.albumArtUri, ambient)
+                        if (!song?.albumArtUri.isNullOrBlank()) {
+                            Box(Modifier.fillMaxSize().background(ambient.copy(alpha = .18f)))
+                        }
+                    }
                 }
                 Box(Modifier.fillMaxSize().padding(10.dp).border(1.dp, Color.White.copy(alpha = .22f), CircleShape))
                 Surface(Modifier.size(34.dp), shape = CircleShape, color = Color(0xFF111722), tonalElevation = 3.dp) {
@@ -217,7 +223,16 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
         Spacer(Modifier.height(30.dp))
         Text(song?.title ?: "选择一首歌曲", color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Spacer(Modifier.height(6.dp)); Text(song?.artist ?: "从音乐库开始播放", color = Color(0xFFAAB2C0), fontSize = 16.sp)
-        if (song != null) Text(formatName(song.mimeType), color = Color(0xFF71809A), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+        if (song != null) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(formatName(song.mimeType), color = Color(0xFF71809A), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                TextButton(onClick = { showArtworkPicker = true }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                    Icon(Icons.Default.Image, "获取封面", Modifier.size(15.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (song.albumArtUri.isNullOrBlank()) "获取封面" else "更换封面", fontSize = 12.sp)
+                }
+            }
+        }
         Spacer(Modifier.height(22.dp))
         Slider(
             value = if (state.duration > 0) state.position.toFloat() / state.duration else 0f,
@@ -249,6 +264,7 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     }
     }
     if (showQueue) QueueSheet(state, vm) { showQueue = false }
+    if (showArtworkPicker && song != null) AlbumArtworkSheet(song.album, listOf(song), vm, allowReplace = true) { showArtworkPicker = false }
 }
 
 @Composable private fun PlaybackModeButton(mode: PlaybackMode, onClick: () -> Unit) {
@@ -293,7 +309,7 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
 @Composable private fun GroupsList(groups: Map<String, List<SongEntity>>, vm: MusicViewModel, onOpen: (String, List<SongEntity>) -> Unit = { _, _ -> }) { LazyColumn(Modifier.fillMaxSize()) { groups.forEach { (name, songs) -> item(name) { ListItem(modifier = Modifier.clickable { onOpen(name, songs) }, colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(name, color = Color.White) }, supportingContent = { Text("${songs.size} 首歌曲 · 点击查看专辑", color = Color.Gray) }, trailingContent = { IconButton({ vm.play(songs.first(), songs) }) { Icon(Icons.Default.PlayArrow, "播放") } }) } } } }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun AlbumArtworkSheet(name: String, songs: List<SongEntity>, vm: MusicViewModel, close: () -> Unit) {
+@Composable private fun AlbumArtworkSheet(name: String, songs: List<SongEntity>, vm: MusicViewModel, allowReplace: Boolean = false, close: () -> Unit) {
     val enabled by vm.onlineArtworkEnabled.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var candidates by remember { mutableStateOf<List<ArtworkCandidate>>(emptyList()) }
@@ -304,7 +320,20 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
         Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Text(name, color = Color.White, style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(18.dp))
-            if (existing != null) SubcomposeAsyncImage(model = existing, contentDescription = "专辑封面", modifier = Modifier.size(220.dp).clip(RoundedCornerShape(20.dp)), contentScale = ContentScale.Crop)
+            if (existing != null && !allowReplace) SubcomposeAsyncImage(model = existing, contentDescription = "专辑封面", modifier = Modifier.size(220.dp).clip(RoundedCornerShape(20.dp)), contentScale = ContentScale.Crop)
+            else if (existing != null && candidates.isEmpty()) {
+                SubcomposeAsyncImage(model = existing, contentDescription = "当前专辑封面", modifier = Modifier.size(220.dp).clip(RoundedCornerShape(20.dp)), contentScale = ContentScale.Crop)
+                TextButton(onClick = { candidates = listOf(); searchError = "点击下方按钮查找新的封面" }) { Text("查找新的封面") }
+                if (searchError != null) Button(enabled = !loading, onClick = {
+                    loading = true; searchError = null
+                    scope.launch {
+                        val result = runCatching { vm.artworkCandidates(songs.first().artist, name).await() }
+                        candidates = result.getOrDefault(emptyList())
+                        if (candidates.isEmpty()) searchError = "未找到可用封面，请稍后重试"
+                        loading = false
+                    }
+                }) { Text(if (loading) "正在查找..." else "获取候选封面") }
+            }
             else if (!enabled) Text("在线封面获取已在设置中关闭", color = Color.Gray, modifier = Modifier.padding(30.dp))
             else if (candidates.isEmpty()) {
                 searchError?.let { Text(it, color = Color(0xFFFF8A96), modifier = Modifier.padding(bottom = 10.dp)) }
