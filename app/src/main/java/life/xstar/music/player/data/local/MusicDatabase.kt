@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [SongEntity::class, PlaylistEntity::class, PlaylistSongEntity::class], version = 3, exportSchema = false)
+@Database(entities = [SongEntity::class, PlaylistEntity::class, PlaylistSongEntity::class], version = 4, exportSchema = false)
 abstract class MusicDatabase : RoomDatabase() {
     abstract fun songDao(): SongDao
     abstract fun playlistDao(): PlaylistDao
@@ -42,6 +42,17 @@ abstract class MusicDatabase : RoomDatabase() {
         }, object : Migration(2, 3) {
             override fun migrate(database: SupportSQLiteDatabase) {
                 database.execSQL("ALTER TABLE songs ADD COLUMN sourceFolderUri TEXT NOT NULL DEFAULT ''")
+            }
+        }, object : Migration(3, 4) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE songs ADD COLUMN codec TEXT")
+                database.execSQL("ALTER TABLE songs ADD COLUMN bitrate INTEGER")
+                database.execSQL("ALTER TABLE songs ADD COLUMN sampleRate INTEGER")
+                database.execSQL("ALTER TABLE songs ADD COLUMN bitDepth INTEGER")
+                database.execSQL("ALTER TABLE songs ADD COLUMN channelCount INTEGER")
+                database.execSQL("ALTER TABLE songs ADD COLUMN audioQuality TEXT NOT NULL DEFAULT 'Standard'")
+                database.execSQL("ALTER TABLE songs ADD COLUMN fileName TEXT")
+                database.execSQL("ALTER TABLE songs ADD COLUMN fileSize INTEGER")
             }
         }).build()
     }

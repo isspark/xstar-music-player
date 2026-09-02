@@ -49,6 +49,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.*
 import kotlin.random.Random
 import life.xstar.music.player.data.local.*
+import life.xstar.music.player.data.audio.AudioQuality
 import life.xstar.music.player.data.preferences.PlaybackPreferences
 import life.xstar.music.player.data.preferences.ThemeAccent
 import life.xstar.music.player.data.repository.MusicRepository
@@ -224,6 +225,7 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     val artworkScale by animateFloatAsState(pulseScale, tween(420), label = "artworkPulse")
     val song = state.song
     var showArtworkPicker by remember { mutableStateOf(false) }
+    var showSongDetails by remember { mutableStateOf(false) }
     var showLyrics by remember { mutableStateOf(false) }
     LaunchedEffect(song?.mediaStoreId) { showLyrics = false }
     Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(ambient.copy(alpha = .55f), ambient.copy(alpha = .13f), Color(0xFF090B10)), radius = 1250f))) {
@@ -251,16 +253,14 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
             }
         }
         Spacer(Modifier.height(30.dp))
-        Text(song?.title ?: "选择一首歌曲", color = Color.White, fontSize = 25.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Spacer(Modifier.height(6.dp)); Text(song?.artist ?: "从音乐库开始播放", color = Color(0xFFAAB2C0), fontSize = 16.sp)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = { showSongDetails = true }, Modifier.size(34.dp)) { Icon(Icons.Default.Info, "歌曲详情", Modifier.size(19.dp), tint = Color(0xFFB3BDCC)) }
+            Text(if (song == null) "选择一首歌曲" else "${song.artist} - ${song.title}", Modifier.weight(1f), color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            song?.let { QualityBadge(it.audioQuality) }
+        }
         if (song != null) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(formatName(song.mimeType), color = Color(0xFF71809A), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
-                TextButton(onClick = { showArtworkPicker = true }, contentPadding = PaddingValues(horizontal = 8.dp)) {
-                    Icon(Icons.Default.Image, "获取封面", Modifier.size(15.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text(if (song.albumArtUri.isNullOrBlank()) "获取封面" else "更换封面", fontSize = 12.sp)
-                }
+                Text("${formatName(song.mimeType)} · ${audioDetail(song)}", color = Color(0xFF71809A), fontSize = 12.sp, modifier = Modifier.padding(start = 34.dp, top = 4.dp))
             }
         }
         Spacer(Modifier.height(22.dp))
@@ -295,7 +295,39 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     }
     if (showQueue) QueueSheet(state, vm) { showQueue = false }
     if (showArtworkPicker && song != null) AlbumArtworkSheet(song.album, listOf(song), vm, allowReplace = true) { showArtworkPicker = false }
+    if (showSongDetails && song != null) SongDetailsSheet(song, vm, { showArtworkPicker = true }) { showSongDetails = false }
 }
+
+@Composable private fun QualityBadge(value: String) {
+    val quality = runCatching { AudioQuality.valueOf(value) }.getOrDefault(AudioQuality.Standard)
+    val (label, color, icon) = when (quality) {
+        AudioQuality.Standard -> Triple("普通", Color(0xFF8290A5), Icons.Default.GraphicEq)
+        AudioQuality.High -> Triple("高清", Color(0xFF78A9FF), Icons.Default.HighQuality)
+        AudioQuality.Lossless -> Triple("无损", Color(0xFFB18CFF), Icons.Default.Verified)
+        AudioQuality.HiRes -> Triple("Hi-Res", Color(0xFFFFBE5C), Icons.Default.WorkspacePremium)
+    }
+    Surface(shape = RoundedCornerShape(7.dp), color = color.copy(alpha = .18f)) { Row(Modifier.padding(horizontal = 7.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) { Icon(icon, label, Modifier.size(13.dp), tint = color); Spacer(Modifier.width(3.dp)); Text(label, color = color, fontSize = 10.sp, fontWeight = FontWeight.Bold) } }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun SongDetailsSheet(song: SongEntity, vm: MusicViewModel, getArtwork: () -> Unit, close: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = close, containerColor = Color(0xFF171B23)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 8.dp)) {
+            Text("歌曲详情", color = Color.White, style = MaterialTheme.typography.headlineSmall)
+            Spacer(Modifier.height(12.dp))
+            DetailRow("歌手", song.artist); DetailRow("歌曲", song.title); DetailRow("专辑", song.album)
+            DetailRow("格式", formatName(song.mimeType)); DetailRow("音质", qualityLabel(song.audioQuality))
+            DetailRow("编码", song.codec ?: "未知"); DetailRow("采样率", song.sampleRate?.let { "${it / 1000.0} kHz" } ?: "未知")
+            DetailRow("位深", song.bitDepth?.let { "$it bit" } ?: "未知"); DetailRow("码率", song.bitrate?.let { "${it / 1000} kbps" } ?: "无损/未知")
+            DetailRow("声道", song.channelCount?.let { if (it == 1) "单声道" else "${it} 声道" } ?: "未知"); DetailRow("时长", time(song.durationMs)); DetailRow("文件", song.fileName ?: "未知")
+            Spacer(Modifier.height(10.dp))
+            Button(onClick = { getArtwork(); close() }, Modifier.fillMaxWidth()) { Icon(Icons.Default.Image, null); Spacer(Modifier.width(8.dp)); Text(if (song.albumArtUri.isNullOrBlank()) "获取封面" else "更换封面") }
+            Spacer(Modifier.height(18.dp))
+        }
+    }
+}
+
+@Composable private fun DetailRow(label: String, value: String) { Row(Modifier.fillMaxWidth().padding(vertical = 7.dp), horizontalArrangement = Arrangement.SpaceBetween) { Text(label, color = Color(0xFF8F99A9)); Text(value, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(start = 20.dp)) } }
 
 @Composable private fun LyricsPanel(vm: MusicViewModel, size: androidx.compose.ui.unit.Dp, close: () -> Unit) {
     val state by vm.lyrics.collectAsStateWithLifecycle()
@@ -471,6 +503,12 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
 @Composable private fun EmptyState(title: String, text: String, action: String, click: () -> Unit) { Column(Modifier.fillMaxWidth().padding(42.dp), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Default.LibraryMusic, null, Modifier.size(58.dp), tint = Color(0xFF65738A)); Spacer(Modifier.height(18.dp)); Text(title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold); Text(text, color = Color.Gray, modifier = Modifier.padding(vertical = 12.dp)); Button(click) { Text(action) } } }
 private fun PlaybackMode.next() = when (this) { PlaybackMode.Sequential -> PlaybackMode.Shuffle; PlaybackMode.Shuffle -> PlaybackMode.RepeatOne; PlaybackMode.RepeatOne -> PlaybackMode.Sequential }
 private fun time(ms: Long) = "%d:%02d".format(ms.coerceAtLeast(0) / 60_000, (ms.coerceAtLeast(0) / 1_000) % 60)
+private fun audioDetail(song: SongEntity): String = buildList {
+    song.bitrate?.let { add("${it / 1000}kbps") }
+    if (song.sampleRate != null) add("${song.sampleRate / 1000.0}kHz")
+    song.bitDepth?.let { add("${it}bit") }
+}.joinToString("/").ifBlank { "音频" }
+private fun qualityLabel(value: String): String = runCatching { AudioQuality.valueOf(value) }.getOrDefault(AudioQuality.Standard).let { quality -> when (quality) { AudioQuality.Standard -> "普通"; AudioQuality.High -> "高清"; AudioQuality.Lossless -> "无损"; AudioQuality.HiRes -> "Hi-Res" } }
 private fun formatName(mime: String?) = mime?.substringAfter('/')?.uppercase()?.replace("MPEG", "MP3") ?: "AUDIO"
 private fun folderName(uri: String) = Uri.parse(uri).lastPathSegment?.substringAfterLast(':')?.ifBlank { "音乐文件夹" } ?: "音乐文件夹"
 private fun ThemeAccent.color() = when (this) { ThemeAccent.Blue -> Color(0xFF78A9FF); ThemeAccent.Violet -> Color(0xFFAE8CFF); ThemeAccent.Rose -> Color(0xFFFF7998); ThemeAccent.Emerald -> Color(0xFF55D6A9); ThemeAccent.Amber -> Color(0xFFFFBE5C) }

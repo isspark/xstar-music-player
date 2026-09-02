@@ -11,6 +11,7 @@ import java.net.URLEncoder
 import org.json.JSONObject
 import java.security.MessageDigest
 import life.xstar.music.player.data.local.*
+import life.xstar.music.player.data.audio.AudioAnalyzer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -103,6 +104,8 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
             retriever.setDataSource(context, file.uri)
             val fileName = file.name.orEmpty()
             val id = stableId(file.uri.toString())
+            val mimeType = file.type ?: context.contentResolver.getType(file.uri)
+            val audioInfo = AudioAnalyzer.analyze(context, file.uri, mimeType)
             val embeddedArtwork = retriever.embeddedPicture ?: readEmbeddedFromCopy(file.uri)
             SongEntity(
                 mediaStoreId = id,
@@ -111,7 +114,15 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
                 album = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM).orDefault("未知专辑"),
                 durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0,
                 uri = file.uri.toString(),
-                mimeType = file.type ?: context.contentResolver.getType(file.uri),
+                mimeType = mimeType,
+                codec = audioInfo.codec,
+                bitrate = audioInfo.bitrate,
+                sampleRate = audioInfo.sampleRate,
+                bitDepth = audioInfo.bitDepth,
+                channelCount = audioInfo.channelCount,
+                audioQuality = audioInfo.quality.name,
+                fileName = fileName,
+                fileSize = file.length(),
                 albumArtUri = cacheEmbeddedArtwork(id, embeddedArtwork),
                 sourceFolderUri = folderUri,
                 dateAdded = file.lastModified()

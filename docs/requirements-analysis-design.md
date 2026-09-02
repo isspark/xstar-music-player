@@ -26,6 +26,7 @@
 | 导航 | Compose ModalNavigationDrawer |
 | 品牌资源 | 自适应音乐符号 Launcher 图标 |
 | 歌词 | SAF 同目录 LRC + LRCLIB + 应用私有缓存 |
+| 音频质量 | MediaExtractor 音轨参数分析 + AudioQualityClassifier |
 
 ## 3. 当前产品决策
 
@@ -247,6 +248,14 @@ uri               String，SAF document URI
 mimeType          String?
 albumArtUri       String?，FileProvider URI
 sourceFolderUri   String，所属 tree URI
+codec             String?，规范化编码格式
+bitrate           Long?，码率，单位 bps
+sampleRate        Int?，采样率，单位 Hz
+bitDepth          Int?，位深
+channelCount      Int?，声道数
+audioQuality      String，Standard/High/Lossless/HiRes
+fileName          String?，原始文件名
+fileSize          Long?，文件大小，单位 byte
 dateAdded         Long，文档 lastModified
 isFavorite        Boolean
 playCount         Int
@@ -281,6 +290,7 @@ addedAt     Long
 | --- | --- |
 | 1→2 | `songs` 增加可空 `mimeType` |
 | 2→3 | `songs` 增加非空 `sourceFolderUri`，默认空字符串 |
+| 3→4 | `songs` 增加音频编码、码率、采样率、位深、声道、音质和文件信息 |
 
 禁止使用 destructive migration 覆盖用户收藏和播放列表。
 
@@ -354,7 +364,11 @@ error      String?
 - 页面无顶部标题，仅在左上角显示菜单按钮。
 - 封面容器使用明确相同的 width 和 height，并应用 `CircleShape`。
 - 封面最大 330dp，小屏按 `maxWidth - 48dp` 缩小，保证严格 1:1。
-- 歌曲下方显示艺术家和格式。
+- 歌曲摘要显示为“歌手 - 歌曲名称”，名称前显示详情图标，名称右侧显示 `QualityBadge`。
+- `QualityBadge` 支持普通、高清、无损和 Hi-Res，使用音质枚举对应颜色和图标。
+- 播放页主区域不展示完整音频参数，点击详情图标打开 `SongDetailsSheet`。
+- 详情面板展示歌手、专辑、歌曲名称、格式、编码、音质、采样率、位深、码率、声道、时长和文件名。
+- 封面获取/更换入口放在 `SongDetailsSheet`，不占用主播放信息区域。
 - 进度条下方显示当前时间和总时长。
 - 模式、上一首、播放暂停、下一首和队列按钮放在统一高度 76dp 的 Row 中。
 
@@ -366,6 +380,15 @@ error      String?
 - 封面在 1.0 与约 1.012–1.035 之间轻微缩放。
 - 暂停或关闭设置后，LaunchedEffect 退出循环，颜色回归主题色，缩放回归 1.0。
 - 当前实现是播放状态驱动的随机节拍，不分析真实音频 PCM 或频谱。
+
+### 12.2 音频质量识别
+
+- `AudioAnalyzer` 使用 `MediaExtractor` 定位音频轨道，读取 MIME、码率、采样率、声道和 PCM 编码。
+- `AudioQualityClassifier` 按以下顺序分类：`HiRes`、`Lossless`、`High`、`Standard`。
+- 位深 >= 24 或采样率 > 48kHz 为 Hi-Res。
+- FLAC、ALAC、APE、WAV、PCM 等无损编码为 Lossless。
+- 有损音频码率 >= 256kbps 为 High，其余为 Standard。
+- 扫描时保存音频参数；旧数据库通过 3→4 迁移使用 Standard 默认值，重新扫描后更新。
 
 ### 12.3 导航
 
@@ -483,14 +506,14 @@ online_lyrics_enabled: Boolean，默认 true
 | FR-010～FR-017 | MediaMetadataRetriever、stableId、FileProvider、Room upsert |
 | FR-018～FR-021 | AlbumArtworkSheet、ArtworkCandidate、iTunes Search API、Room album 更新 |
 | FR-030～FR-037 | SongsList、GroupsList、搜索过滤、openPlayer SharedFlow |
-| FR-030～FR-037 | SongsList、GroupsList、搜索过滤、openPlayer SharedFlow |
-| FR-040～FR-048 | PlayerScreen、NoActionBar、CircleShape、播放进度和水平控制 |
-| FR-050～FR-058 | PlayerController、PlaybackMode、QueueSheet、错误跳过 |
-| FR-060～FR-066 | ModalNavigationDrawer、ThemeAccent、edge-to-edge |
-| FR-070～FR-075 | pulseColors、Compose animation、beatEffect DataStore |
-| FR-080～FR-084 | SongDao、PlaylistDao、PlaylistSheet |
-| FR-090～FR-095 | PlaybackService、MediaSession、PlaybackPreferences |
-| FR-100～FR-102 | adaptive icon、普通和圆形 mipmap 资源 |
+| FR-040～FR-052 | PlayerScreen、NoActionBar、CircleShape、播放进度、详情面板和 QualityBadge |
+| FR-060～FR-068 | PlayerController、PlaybackMode、QueueSheet、错误跳过 |
+| FR-070～FR-076 | ModalNavigationDrawer、ThemeAccent、edge-to-edge |
+| FR-080～FR-085 | pulseColors、Compose animation、beatEffect DataStore |
+| FR-090～FR-094 | SongDao、PlaylistDao、PlaylistSheet |
+| FR-100～FR-105 | PlaybackService、MediaSession、PlaybackPreferences |
+| FR-110～FR-118 | LyricsRepository、LrcParser、LyricsView、LRCLIB、歌词缓存 |
+| FR-120～FR-122 | adaptive icon、普通和圆形 mipmap 资源 |
 
 ## 17. 测试设计
 
