@@ -5,7 +5,6 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.graphics.BitmapFactory
 import android.graphics.Bitmap
-import androidx.core.content.FileProvider
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
 import java.net.HttpURLConnection
@@ -37,6 +36,8 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
         }
     }
 
+    suspend fun getSong(id: Long): SongEntity? = dao.findById(id)
+
     suspend fun scan(folderUris: Set<String>): Int = withContext(Dispatchers.IO) {
         if (folderUris.isEmpty()) {
             dao.deleteAll()
@@ -48,7 +49,14 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
         }
         val ids = scanned.map { it.mediaStoreId }
         val existing = if (ids.isEmpty()) emptyMap() else dao.findByMediaIds(ids).associateBy { it.mediaStoreId }
-        val merged = scanned.map { song -> existing[song.mediaStoreId]?.let { old -> song.copy(isFavorite = old.isFavorite, playCount = old.playCount, lastPlayedAt = old.lastPlayedAt) } ?: song }
+        val merged = scanned.map { song -> existing[song.mediaStoreId]?.let { old ->
+            song.copy(
+                albumArtUri = song.albumArtUri ?: old.albumArtUri?.takeUnless { it.endsWith(".img") },
+                isFavorite = old.isFavorite,
+                playCount = old.playCount,
+                lastPlayedAt = old.lastPlayedAt
+            )
+        } ?: song }
         if (ids.isEmpty()) dao.deleteAll() else dao.deleteNotInMediaIds(ids)
         if (merged.isNotEmpty()) dao.upsertAll(merged)
         merged.size
@@ -74,6 +82,7 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
             retriever.setDataSource(context, file.uri)
             val fileName = file.name.orEmpty()
             val id = stableId(file.uri.toString())
+            val embeddedArtwork = retriever.embeddedPicture ?: readEmbeddedFromCopy(file.uri)
             SongEntity(
                 mediaStoreId = id,
                 title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE).orDefault(fileName.substringBeforeLast('.')),
@@ -82,35 +91,54 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
                 durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0,
                 uri = file.uri.toString(),
                 mimeType = file.type ?: context.contentResolver.getType(file.uri),
-                albumArtUri = cacheEmbeddedArtwork(id, retriever.embeddedPicture),
+                albumArtUri = cacheEmbeddedArtwork(id, embeddedArtwork),
                 sourceFolderUri = folderUri,
                 dateAdded = file.lastModified()
             )
         }.getOrNull().also { retriever.release() }
     }
 
+    private fun readEmbeddedFromCopy(uri: Uri): ByteArray? = runCatching {
+        val temporary = File.createTempFile("xstar_audio_", ".media", context.cacheDir)
+        context.contentResolver.openInputStream(uri)?.use { input -> temporary.outputStream().use { output -> input.copyTo(output) } }
+        val retriever = MediaMetadataRetriever()
+        val artwork = runCatching { retriever.setDataSource(temporary.absolutePath); retriever.embeddedPicture }.getOrNull()
+        retriever.release()
+        temporary.delete()
+        artwork
+    }.getOrNull()
+
     private fun cacheEmbeddedArtwork(id: Long, bytes: ByteArray?): String? {
         if (bytes == null || bytes.isEmpty()) return null
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
         val directory = File(context.cacheDir, "album_art").apply { mkdirs() }
-        val artwork = File(directory, "${id.toULong()}.img")
-        if (!artwork.exists() || artwork.length() != bytes.size.toLong()) artwork.writeBytes(bytes)
-        return FileProvider.getUriForFile(context, "${context.packageName}.files", artwork).toString()
+        val artwork = File(directory, "${id.toULong()}.jpg")
+        if (!artwork.exists() || artwork.length() == 0L) artwork.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+        bitmap.recycle()
+        return artwork.absolutePath
     }
 
     private fun findOnlineArtwork(artist: String, album: String): String? {
         if (artist == "未知艺术家" || album == "未知专辑") return null
-        val query = "artist:${artist.trim()} AND release:${album.trim()}"
-        val searchUrl = "https://musicbrainz.org/ws/2/release-group/?query=${URLEncoder.encode(query, "UTF-8")}&fmt=json&limit=5"
-        val json = getText(searchUrl) ?: return null
-        val groups = JSONObject(json).optJSONArray("release-groups") ?: return null
-        for (index in 0 until groups.length()) {
-            val group = groups.optJSONObject(index) ?: continue
-            val mbid = group.optString("id")
-            if (mbid.isBlank()) continue
-            val imageUrl = "https://coverartarchive.org/release-group/$mbid/front-500"
-            val bytes = getBytes(imageUrl) ?: continue
-            val cached = cacheDownloadedArtwork(artist, album, bytes) ?: continue
-            return cached
+        val query = "artist:\"${artist.trim()}\" AND release:\"${album.trim()}\""
+        val searchUrl = "https://musicbrainz.org/ws/2/release/?query=${URLEncoder.encode(query, "UTF-8")}&fmt=json&limit=5"
+        val releases = getText(searchUrl)?.let { JSONObject(it).optJSONArray("releases") }
+        if (releases != null) for (index in 0 until releases.length()) {
+            val releaseId = releases.optJSONObject(index)?.optString("id").orEmpty()
+            if (releaseId.isNotBlank()) {
+                getBytes("https://coverartarchive.org/release/$releaseId/front-500")?.let { bytes ->
+                    cacheDownloadedArtwork(artist, album, bytes)?.let { return it }
+                }
+            }
+        }
+        val groupsUrl = "https://musicbrainz.org/ws/2/release-group/?query=${URLEncoder.encode(query, "UTF-8")}&fmt=json&limit=5"
+        val groups = getText(groupsUrl)?.let { JSONObject(it).optJSONArray("release-groups") }
+        if (groups != null) for (index in 0 until groups.length()) {
+            val groupId = groups.optJSONObject(index)?.optString("id").orEmpty()
+            if (groupId.isBlank()) continue
+            getBytes("https://coverartarchive.org/release-group/$groupId/front-500")?.let { bytes ->
+                cacheDownloadedArtwork(artist, album, bytes)?.let { return it }
+            }
         }
         return null
     }
@@ -121,7 +149,7 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
         val file = File(directory, "online_${stableId("$artist\u0000$album")}.jpg")
         if (!file.exists()) file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 88, it) }
         bitmap.recycle()
-        return FileProvider.getUriForFile(context, "${context.packageName}.files", file).toString()
+        return file.absolutePath
     }
 
     private fun getText(address: String): String? = getConnection(address)?.let { connection ->
@@ -136,7 +164,8 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
             requestMethod = "GET"
             connectTimeout = 8_000
             readTimeout = 12_000
-            setRequestProperty("User-Agent", "XSTAR/0.1.0 (local-player; contact@example.invalid)")
+            setRequestProperty("User-Agent", "XSTAR/0.1.0 (local-player)")
+            setRequestProperty("Accept", "application/json, image/*")
             if (responseCode !in 200..299) { disconnect(); return null }
         }
     }.getOrNull()

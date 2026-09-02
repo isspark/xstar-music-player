@@ -2,6 +2,7 @@ package life.xstar.music.player
 
 import android.content.Intent
 import android.net.Uri
+import java.io.File
 import android.os.Bundle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.ComponentActivity
@@ -41,7 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.*
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlin.random.Random
@@ -76,6 +77,12 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     init {
         viewModelScope.launch { playback.debounce(1_000).collect { state -> if (state.queue.isNotEmpty()) preferences.save(state.queue.map { it.mediaStoreId }, state.index, state.position) } }
         viewModelScope.launch { preferences.read().let { saved -> if (saved.queue.isNotEmpty()) player.restoreQueue(repo.findByIds(saved.queue), saved.index, saved.position) } }
+        viewModelScope.launch { runCatching { repo.enrichMissingArtwork() } }
+        viewModelScope.launch {
+            combine(songs, playback) { library, state ->
+                state.song?.mediaStoreId?.let { id -> library.firstOrNull { it.mediaStoreId == id } }
+            }.filterNotNull().distinctUntilChanged().collect(player::updateSong)
+        }
     }
 
     fun scan() = viewModelScope.launch {
@@ -84,8 +91,15 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         scanning.value = false
         launch { runCatching { repo.enrichMissingArtwork() } }
     }
-    fun addFolder(uri: String) = viewModelScope.launch { preferences.addFolder(uri); repo.scan(folders.value + uri) }
-    fun removeFolder(uri: String) = viewModelScope.launch { preferences.removeFolder(uri); repo.scan(folders.value - uri) }
+    fun addFolder(uri: String) = viewModelScope.launch {
+        preferences.addFolder(uri)
+        repo.scan(folders.value + uri)
+        launch { runCatching { repo.enrichMissingArtwork() } }
+    }
+    fun removeFolder(uri: String) = viewModelScope.launch {
+        preferences.removeFolder(uri)
+        repo.scan(folders.value - uri)
+    }
     fun setTheme(theme: ThemeAccent) = viewModelScope.launch { preferences.setTheme(theme) }
     fun setBeatEffect(enabled: Boolean) = viewModelScope.launch { preferences.setBeatEffect(enabled) }
     fun play(song: SongEntity, source: List<SongEntity> = songs.value) {
@@ -188,8 +202,7 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
                 contentAlignment = Alignment.Center
             ) {
                 Surface(Modifier.fillMaxSize().clip(CircleShape), shape = CircleShape, tonalElevation = 12.dp, shadowElevation = 18.dp, color = Color(0xFF242B37)) {
-                    if (song?.albumArtUri != null) AsyncImage(song.albumArtUri, null, Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop)
-                    else Box(Modifier.fillMaxSize().clip(CircleShape).background(Brush.linearGradient(listOf(ambient.copy(alpha = .7f), Color(0xFF171C25)))), Alignment.Center) { Icon(Icons.Default.MusicNote, null, Modifier.size(72.dp), tint = Color.White.copy(alpha = .8f)) }
+                    ArtworkImage(song?.albumArtUri, ambient)
                 }
                 Box(Modifier.fillMaxSize().padding(10.dp).border(1.dp, Color.White.copy(alpha = .22f), CircleShape))
                 Surface(Modifier.size(34.dp), shape = CircleShape, color = Color(0xFF111722), tonalElevation = 3.dp) {
@@ -260,7 +273,17 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
 }
 
 @Composable private fun CollectionScreen(songs: List<SongEntity>, vm: MusicViewModel, openMenu: () -> Unit) { Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) { PageHeader(openMenu); if (songs.isEmpty()) EmptyState("还没有收藏", "在歌曲右侧点击爱心即可收藏。", "前往音乐库") {} else SongsList(songs, vm) } }
-@Composable private fun SongsList(songs: List<SongEntity>, vm: MusicViewModel) { LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 10.dp)) { items(songs, key = { it.mediaStoreId }) { song -> ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(song.title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) }, supportingContent = { Text("${song.artist} · ${formatName(song.mimeType)}", color = Color(0xFF8F99A9)) }, leadingContent = { Surface(Modifier.size(48.dp), RoundedCornerShape(13.dp), color = Color(0xFF252C38)) { AsyncImage(song.albumArtUri, null, contentScale = ContentScale.Crop) } }, trailingContent = { IconButton({ vm.favorite(song.mediaStoreId) }) { Icon(if (song.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, "收藏", tint = if (song.isFavorite) Color(0xFFFF708C) else Color.Gray) } }, modifier = Modifier.clickable { vm.play(song, songs) }) } } }
+@Composable private fun SongsList(songs: List<SongEntity>, vm: MusicViewModel) { LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 10.dp)) { items(songs, key = { it.mediaStoreId }) { song -> ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(song.title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) }, supportingContent = { Text("${song.artist} · ${formatName(song.mimeType)}", color = Color(0xFF8F99A9)) }, leadingContent = { Surface(Modifier.size(48.dp), RoundedCornerShape(13.dp), color = Color(0xFF252C38)) { ArtworkImage(song.albumArtUri, Color(0xFF252C38)) } }, trailingContent = { IconButton({ vm.favorite(song.mediaStoreId) }) { Icon(if (song.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, "收藏", tint = if (song.isFavorite) Color(0xFFFF708C) else Color.Gray) } }, modifier = Modifier.clickable { vm.play(song, songs) }) } } }
+
+@Composable private fun ArtworkImage(uri: String?, tint: Color) {
+    if (uri.isNullOrBlank()) DefaultArtwork(tint)
+    else {
+        val model = if (uri.startsWith("content://") || uri.startsWith("file://")) Uri.parse(uri) else Uri.fromFile(File(uri))
+        SubcomposeAsyncImage(model = model, contentDescription = "专辑封面", modifier = Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop, error = { DefaultArtwork(tint) }, loading = { DefaultArtwork(tint) })
+    }
+}
+
+@Composable private fun DefaultArtwork(tint: Color) { Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(tint.copy(alpha = .85f), Color(0xFF171C25)))), Alignment.Center) { Icon(Icons.Default.MusicNote, null, Modifier.size(34.dp), tint = Color.White.copy(alpha = .82f)) } }
 @Composable private fun GroupsList(groups: Map<String, List<SongEntity>>, vm: MusicViewModel) { LazyColumn(Modifier.fillMaxSize()) { groups.forEach { (name, songs) -> item(name) { ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(name, color = Color.White) }, supportingContent = { Text("${songs.size} 首歌曲", color = Color.Gray) }, trailingContent = { IconButton({ vm.play(songs.first(), songs) }) { Icon(Icons.Default.PlayArrow, "播放") } }) } } } }
 
 @Composable private fun PlaylistsScreen(vm: MusicViewModel, openMenu: () -> Unit) { val lists by vm.playlists.collectAsStateWithLifecycle(); var name by remember { mutableStateOf("") }; var selected by remember { mutableStateOf<PlaylistEntity?>(null) }; Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) { PageHeader(openMenu); Row(verticalAlignment = Alignment.CenterVertically) { OutlinedTextField(name, { name = it }, Modifier.weight(1f), label = { Text("新建播放列表") }, singleLine = true); IconButton({ vm.createPlaylist(name); name = "" }) { Icon(Icons.Default.Add, "创建", tint = Color.White) } }; LazyColumn { items(lists, key = { it.id }) { item -> ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(item.name, color = Color.White) }, leadingContent = { Icon(Icons.Default.QueueMusic, null) }, trailingContent = { IconButton({ vm.deletePlaylist(item) }) { Icon(Icons.Default.DeleteOutline, "删除") } }, modifier = Modifier.clickable { selected = item }) } } }; selected?.let { PlaylistSheet(vm, it) { selected = null } } }

@@ -3,6 +3,7 @@ package life.xstar.music.player.player
 import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
+import java.io.File
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -95,6 +96,10 @@ class PlayerController(context: Context) {
     fun next() = controllerFuture.addListener({ controllerFuture.get().seekToNextMediaItem() }, executor)
     fun previous() = controllerFuture.addListener({ controllerFuture.get().seekToPreviousMediaItem() }, executor)
     fun seek(position: Long) = controllerFuture.addListener({ controllerFuture.get().seekTo(position) }, executor)
+    fun updateSong(song: SongEntity) {
+        if (_state.value.song?.mediaStoreId != song.mediaStoreId) return
+        _state.value = _state.value.copy(song = song, queue = _state.value.queue.map { if (it.mediaStoreId == song.mediaStoreId) song else it })
+    }
     fun remove(index: Int) = controllerFuture.addListener({
         val controller = controllerFuture.get()
         if (index in 0 until controller.mediaItemCount) {
@@ -133,7 +138,7 @@ class PlayerController(context: Context) {
         .setMediaId(mediaStoreId.toString())
         .setUri(uri)
         .setMediaMetadata(MediaMetadata.Builder().setTitle(title).setArtist(artist).setAlbumTitle(album).apply {
-            albumArtUri?.let { setArtworkUri(Uri.parse(it)) }
+            albumArtUri?.let { setArtworkUri(if (it.startsWith("content://") || it.startsWith("file://")) Uri.parse(it) else Uri.fromFile(File(it))) }
         }.build())
         .build()
 }

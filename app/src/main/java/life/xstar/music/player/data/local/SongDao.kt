@@ -19,8 +19,11 @@ interface SongDao {
     @Query("SELECT * FROM songs WHERE isFavorite = 1 ORDER BY title COLLATE NOCASE")
     fun observeFavorites(): Flow<List<SongEntity>>
 
-    @Query("SELECT * FROM songs WHERE albumArtUri IS NULL OR albumArtUri = ''")
+    @Query("SELECT * FROM songs WHERE albumArtUri IS NULL OR albumArtUri = '' OR albumArtUri LIKE '%.img'")
     suspend fun findSongsWithoutArtwork(): List<SongEntity>
+
+    @Query("SELECT * FROM songs WHERE mediaStoreId = :id LIMIT 1")
+    suspend fun findById(id: Long): SongEntity?
 
     @Query("UPDATE songs SET albumArtUri = :artworkUri WHERE mediaStoreId = :songId")
     suspend fun updateArtwork(songId: Long, artworkUri: String)
