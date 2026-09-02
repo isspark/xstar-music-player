@@ -53,6 +53,9 @@ import life.xstar.music.player.data.preferences.PlaybackPreferences
 import life.xstar.music.player.data.preferences.ThemeAccent
 import life.xstar.music.player.data.repository.MusicRepository
 import life.xstar.music.player.data.repository.ArtworkCandidate
+import life.xstar.music.player.data.lyrics.LyricsRepository
+import life.xstar.music.player.data.lyrics.LyricsState
+import life.xstar.music.player.data.lyrics.LyricsCandidate
 import life.xstar.music.player.player.*
 
 class MainActivity : ComponentActivity() {
@@ -60,13 +63,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(state)
         enableEdgeToEdge()
         val app = application as XstarApplication
-        val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, PlayerController(this), app.playbackPreferences))[MusicViewModel::class.java]
+        val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, PlayerController(this), app.playbackPreferences, LyricsRepository(this)))[MusicViewModel::class.java]
         setContent { val theme by vm.theme.collectAsStateWithLifecycle(); XstarTheme(theme) { XstarApp(vm) } }
     }
 }
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
-class MusicViewModel(private val repo: MusicRepository, val player: PlayerController, private val preferences: PlaybackPreferences) : ViewModel() {
+class MusicViewModel(private val repo: MusicRepository, val player: PlayerController, private val preferences: PlaybackPreferences, private val lyricsRepository: LyricsRepository) : ViewModel() {
     val songs = repo.songs().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val favorites = repo.favorites().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val playlists = repo.playlists().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -76,7 +79,9 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val theme = preferences.theme.stateIn(viewModelScope, SharingStarted.Eagerly, ThemeAccent.Blue)
     val beatEffect = preferences.beatEffect.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val onlineArtworkEnabled = preferences.onlineArtworkEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    val onlineLyricsEnabled = preferences.onlineLyricsEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val openPlayer = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val lyrics = MutableStateFlow<LyricsState>(LyricsState.Idle)
 
     init {
         viewModelScope.launch { playback.debounce(1_000).collect { state -> if (state.queue.isNotEmpty()) preferences.save(state.queue.map { it.mediaStoreId }, state.index, state.position) } }
@@ -85,6 +90,14 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
             combine(songs, playback) { library, state ->
                 state.song?.mediaStoreId?.let { id -> library.firstOrNull { it.mediaStoreId == id } }
             }.filterNotNull().distinctUntilChanged().collect(player::updateSong)
+        }
+        viewModelScope.launch {
+            playback.map { it.song?.mediaStoreId }.distinctUntilChanged().collect { id ->
+                val song = id?.let { repo.getSong(it) }
+                lyrics.value = if (song == null) LyricsState.Idle else LyricsState.Loading
+                if (song != null) lyrics.value = runCatching { lyricsRepository.loadLocalOrEmbedded(song) }
+                    .getOrNull()?.let { LyricsState.Loaded(it) } ?: LyricsState.NotFound
+            }
         }
     }
 
@@ -104,8 +117,23 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     fun setTheme(theme: ThemeAccent) = viewModelScope.launch { preferences.setTheme(theme) }
     fun setBeatEffect(enabled: Boolean) = viewModelScope.launch { preferences.setBeatEffect(enabled) }
     fun setOnlineArtworkEnabled(enabled: Boolean) = viewModelScope.launch { preferences.setOnlineArtworkEnabled(enabled) }
+    fun setOnlineLyricsEnabled(enabled: Boolean) = viewModelScope.launch { preferences.setOnlineLyricsEnabled(enabled) }
     fun artworkCandidates(artist: String, album: String) = viewModelScope.async { repo.findArtworkCandidates(artist, album) }
     fun saveArtwork(artist: String, album: String, candidate: ArtworkCandidate) = viewModelScope.launch { repo.saveArtworkForAlbum(artist, album, candidate) }
+    fun findLyrics() = viewModelScope.launch {
+        val song = playback.value.song ?: return@launch
+        if (!onlineLyricsEnabled.value) {
+            lyrics.value = LyricsState.Error("在线歌词获取已在设置中关闭")
+            return@launch
+        }
+        lyrics.value = LyricsState.Loading
+        val candidates = runCatching { lyricsRepository.findOnline(song) }.getOrDefault(emptyList())
+        lyrics.value = if (candidates.isEmpty()) LyricsState.Error("未找到歌词，请检查歌曲标签或稍后重试") else LyricsState.Candidates(song, candidates)
+    }
+    fun saveLyrics(candidate: life.xstar.music.player.data.lyrics.LyricsCandidate) = viewModelScope.launch {
+        val song = playback.value.song ?: return@launch
+        lyrics.value = lyricsRepository.save(candidate, song)?.let { LyricsState.Loaded(it) } ?: LyricsState.Error("歌词保存失败")
+    }
     fun play(song: SongEntity, source: List<SongEntity> = songs.value) {
         player.playQueue(source.ifEmpty { listOf(song) }, source.indexOf(song).coerceAtLeast(0))
         openPlayer.tryEmit(Unit)
@@ -119,8 +147,8 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     fun removeFromPlaylist(playlistId: Long, songId: Long) = viewModelScope.launch { repo.removeFromPlaylist(playlistId, songId) }
     override fun onCleared() { player.release() }
 
-    companion object { fun factory(repo: MusicRepository, player: PlayerController, preferences: PlaybackPreferences) = object : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player, preferences) as T
+    companion object { fun factory(repo: MusicRepository, player: PlayerController, preferences: PlaybackPreferences, lyrics: LyricsRepository) = object : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player, preferences, lyrics) as T
     } }
 }
 
@@ -196,14 +224,16 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     val artworkScale by animateFloatAsState(pulseScale, tween(420), label = "artworkPulse")
     val song = state.song
     var showArtworkPicker by remember { mutableStateOf(false) }
+    var showLyrics by remember { mutableStateOf(false) }
+    LaunchedEffect(song?.mediaStoreId) { showLyrics = false }
     Box(Modifier.fillMaxSize().background(Brush.radialGradient(listOf(ambient.copy(alpha = .55f), ambient.copy(alpha = .13f), Color(0xFF090B10)), radius = 1250f))) {
     IconButton(openMenu, Modifier.statusBarsPadding().padding(10.dp).align(Alignment.TopStart)) { Icon(Icons.Default.Menu, "菜单", tint = Color.White) }
     Column(Modifier.fillMaxSize().padding(horizontal = 22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.weight(.45f))
         BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
             val artworkSize = minOf(maxWidth - 48.dp, 330.dp)
-            Box(
-                Modifier.size(artworkSize).scale(artworkScale).graphicsLayer { rotationZ = discRotation.value },
+            if (showLyrics) LyricsPanel(vm, artworkSize) { showLyrics = false } else Box(
+                Modifier.size(artworkSize).scale(artworkScale).graphicsLayer { rotationZ = discRotation.value }.clickable { showLyrics = true },
                 contentAlignment = Alignment.Center
             ) {
                 Surface(Modifier.fillMaxSize().clip(CircleShape), shape = CircleShape, tonalElevation = 12.dp, shadowElevation = 18.dp, color = Color(0xFF242B37)) {
@@ -265,6 +295,45 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     }
     if (showQueue) QueueSheet(state, vm) { showQueue = false }
     if (showArtworkPicker && song != null) AlbumArtworkSheet(song.album, listOf(song), vm, allowReplace = true) { showArtworkPicker = false }
+}
+
+@Composable private fun LyricsPanel(vm: MusicViewModel, size: androidx.compose.ui.unit.Dp, close: () -> Unit) {
+    val state by vm.lyrics.collectAsStateWithLifecycle()
+    val playback by vm.playback.collectAsStateWithLifecycle()
+    when (state) {
+        LyricsState.Loading -> CircularProgressIndicator()
+        LyricsState.NotFound -> LyricsEmpty("未找到本地歌词", vm::findLyrics, close)
+        is LyricsState.Error -> LyricsEmpty((state as LyricsState.Error).message, vm::findLyrics, close)
+        is LyricsState.Candidates -> LyricsCandidates((state as LyricsState.Candidates).items, vm, close)
+        is LyricsState.Loaded -> LyricsScroll((state as LyricsState.Loaded).document.lines, playback.position, close)
+        LyricsState.Idle -> LyricsEmpty("点击获取歌词", vm::findLyrics, close)
+    }
+}
+
+@Composable private fun LyricsEmpty(message: String, fetch: () -> Unit, close: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(24.dp).clickable(onClick = close), horizontalAlignment = Alignment.CenterHorizontally) {
+        Icon(Icons.Default.QueueMusic, null, Modifier.size(44.dp), tint = Color(0xFF8491A6))
+        Text(message, color = Color(0xFFB8C1CF), modifier = Modifier.padding(vertical = 12.dp))
+        Button(onClick = fetch) { Text("获取歌词") }
+    }
+}
+
+@Composable private fun LyricsCandidates(items: List<LyricsCandidate>, vm: MusicViewModel, close: () -> Unit) {
+    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 330.dp)) {
+        item { Text("选择歌词", color = Color.White, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(16.dp)) }
+        items(items, key = { it.id }) { candidate ->
+            ListItem(headlineContent = { Text(candidate.trackName.ifBlank { "未知歌曲" }) }, supportingContent = { Text("${candidate.artistName} · ${if (candidate.isSynced) "同步歌词" else "纯文本"}") }, modifier = Modifier.clickable { vm.saveLyrics(candidate); close() })
+        }
+    }
+}
+
+@Composable private fun LyricsScroll(lines: List<life.xstar.music.player.data.lyrics.LyricLine>, position: Long, close: () -> Unit) {
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    val current = lines.indexOfLast { it.timeMs?.let(position::compareTo) ?: -1 >= 0 }
+    LaunchedEffect(current) { if (current >= 0) listState.animateScrollToItem(current) }
+    LazyColumn(state = listState, modifier = Modifier.fillMaxWidth().heightIn(max = 370.dp).clickable(onClick = close), horizontalAlignment = Alignment.CenterHorizontally, contentPadding = PaddingValues(vertical = 90.dp)) {
+        items(lines) { line -> Text(line.text, color = if (lines.indexOf(line) == current) Color.White else Color.White.copy(alpha = .38f), fontSize = if (lines.indexOf(line) == current) 21.sp else 16.sp, fontWeight = if (lines.indexOf(line) == current) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.padding(vertical = 9.dp, horizontal = 16.dp)) }
+    }
 }
 
 @Composable private fun PlaybackModeButton(mode: PlaybackMode, onClick: () -> Unit) {
@@ -375,6 +444,13 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
             supportingContent = { Text("开启后可在专辑页面手动查询 iTunes 专辑封面", color = Color.Gray) },
             leadingContent = { Icon(Icons.Default.CloudDownload, null) },
             trailingContent = { Switch(checked = onlineArtwork, onCheckedChange = vm::setOnlineArtworkEnabled) }
+        )
+        ListItem(
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            headlineContent = { Text("允许获取在线歌词", color = Color.White) },
+            supportingContent = { Text("本地 LRC 仍会优先使用", color = Color.Gray) },
+            leadingContent = { Icon(Icons.Default.Notes, null) },
+            trailingContent = { Switch(checked = vm.onlineLyricsEnabled.collectAsStateWithLifecycle().value, onCheckedChange = vm::setOnlineLyricsEnabled) }
         )
         ListItem(
             colors = ListItemDefaults.colors(containerColor = Color.Transparent),

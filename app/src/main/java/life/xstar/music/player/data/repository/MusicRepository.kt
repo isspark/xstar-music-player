@@ -7,9 +7,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Bitmap
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
-import java.net.HttpURLConnection
 import java.net.URLEncoder
-import java.net.URL
 import org.json.JSONObject
 import java.security.MessageDigest
 import life.xstar.music.player.data.local.*
@@ -36,8 +34,8 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
     suspend fun findArtworkCandidates(artist: String, album: String): List<ArtworkCandidate> = withContext(Dispatchers.IO) {
         if (artist == "未知艺术家" || album == "未知专辑") return@withContext emptyList()
         val term = URLEncoder.encode("${artist.trim()} ${album.trim()}", "UTF-8")
-        val json = getText("https://itunes.apple.com/search?term=$term&entity=album&limit=10&country=cn")
-            ?: getText("https://itunes.apple.com/search?term=$term&entity=album&limit=10&country=us")
+        val json = HttpArtworkClient.getText("https://itunes.apple.com/search?term=$term&entity=album&limit=10&country=cn")
+            ?: HttpArtworkClient.getText("https://itunes.apple.com/search?term=$term&entity=album&limit=10&country=us")
             ?: return@withContext emptyList()
         val results = JSONObject(json).optJSONArray("results") ?: return@withContext emptyList()
         val candidates = mutableListOf<ArtworkCandidate>()
@@ -150,22 +148,17 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
         return file.absolutePath
     }
 
-    private fun getText(address: String): String? = getConnection(address)?.let { connection ->
-        try { connection.inputStream.bufferedReader().use { it.readText() } } finally { connection.disconnect() }
-    }
+    private fun getText(address: String): String? = HttpArtworkClient.getText(address)
 
-    private fun getBytes(address: String): ByteArray? = getConnection(address)?.let { connection ->
-        try { connection.inputStream.use { it.readBytes() } } finally { connection.disconnect() }
-    }
-    private fun getConnection(address: String): HttpURLConnection? = runCatching {
-        (URL(address).openConnection() as HttpURLConnection).apply {
+    private fun getBytes(address: String): ByteArray? = runCatching {
+        val connection = (java.net.URL(address).openConnection() as java.net.HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 8_000
             readTimeout = 12_000
             setRequestProperty("User-Agent", "XSTAR/0.1.0 (local-player)")
-            setRequestProperty("Accept", "application/json, image/*")
-            if (responseCode !in 200..299) { disconnect(); return null }
         }
+        try { if (connection.responseCode !in 200..299) null else connection.inputStream.use { it.readBytes() } }
+        finally { connection.disconnect() }
     }.getOrNull()
 
     private fun stableId(value: String): Long = MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).take(8).fold(0L) { result, byte -> (result shl 8) or (byte.toLong() and 0xff) }

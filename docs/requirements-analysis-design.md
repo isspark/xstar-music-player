@@ -25,6 +25,7 @@
 | 在线封面 | iTunes Search API，用户主动查询 |
 | 导航 | Compose ModalNavigationDrawer |
 | 品牌资源 | 自适应音乐符号 Launcher 图标 |
+| 歌词 | SAF 同目录 LRC + LRCLIB + 应用私有缓存 |
 
 ## 3. 当前产品决策
 
@@ -417,7 +418,51 @@ Amber
 
 旧版媒体读取权限若 Manifest 中仍保留，应在后续清理确认 SAF 扫描不再依赖后移除，减少权限申请面。
 
-## 15. 错误处理
+## 15. 歌词设计
+
+### 15.1 来源优先级
+
+```text
+filesDir/lyrics/{songId}.lrc
+        ↓ 没有
+音频同目录同名 .lrc
+        ↓ 没有
+播放页显示“获取歌词”
+        ↓ 用户主动点击
+LRCLIB /api/get 精确查询
+        ↓ 失败
+LRCLIB /api/search 候选查询
+        ↓ 用户选择
+保存歌词并显示滚动视图
+```
+
+当前 Android SDK 没有公开通用的 `MediaMetadataRetriever.METADATA_KEY_LYRICS` 常量，因此第一版不依赖该 API 读取内嵌歌词。`LyricsSource.Embedded` 模型保留用于后续接入专用标签解析库；当前实际可用来源为本地 LRC、缓存歌词和 LRCLIB。歌词层已预留内嵌歌词来源，不应影响本地 LRC 和在线歌词功能。
+
+### 15.2 LRC 解析
+
+`LrcParser` 支持 `[mm:ss.xx]`、`[mm:ss:xxx]`、一行多个时间标签、UTF-8 BOM、元数据标签过滤和时间排序。解析结果为 `LyricLine(timeMs, text)`；纯文本歌词使用 `timeMs = null`。
+
+### 15.3 播放页交互
+
+- 点击旋转 CD 切换到歌词视图。
+- 切换歌曲时重置为 CD 视图并重新加载歌词。
+- 当前行通过播放位置计算。
+- 当前行变化时使用 `LazyListState.animateScrollToItem`。
+- 无歌词时显示“获取歌词”按钮。
+- LRCLIB 多结果显示歌曲名、艺术家和同步/纯文本类型，用户选择后保存。
+- 在线歌词保存到 `filesDir/lyrics/{songId}.lrc`。
+
+### 15.4 在线歌词开关
+
+DataStore key：
+
+```text
+online_lyrics_enabled: Boolean，默认 true
+```
+
+关闭时不发起 LRCLIB 请求，但本地同名 LRC 和已缓存歌词仍可读取。
+
+## 16. 错误处理
 
 | 错误 | 用户行为 | 系统行为 |
 | --- | --- | --- |

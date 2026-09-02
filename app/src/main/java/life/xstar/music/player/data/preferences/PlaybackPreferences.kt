@@ -21,6 +21,7 @@ class PlaybackPreferences(private val context: Context) {
     private val themeKey = stringPreferencesKey("theme_accent")
     private val beatEffectKey = booleanPreferencesKey("beat_effect")
     private val onlineArtworkKey = booleanPreferencesKey("online_artwork_enabled")
+    private val onlineLyricsKey = booleanPreferencesKey("online_lyrics_enabled")
 
     val folders: Flow<Set<String>> = context.playbackDataStore.data.map { it[foldersKey].orEmpty() }
     val theme: Flow<ThemeAccent> = context.playbackDataStore.data.map { values ->
@@ -28,6 +29,7 @@ class PlaybackPreferences(private val context: Context) {
     }
     val beatEffect: Flow<Boolean> = context.playbackDataStore.data.map { it[beatEffectKey] ?: true }
     val onlineArtworkEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[onlineArtworkKey] ?: true }
+    val onlineLyricsEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[onlineLyricsKey] ?: true }
 
     suspend fun save(queue: List<Long>, index: Int, position: Long) {
         context.playbackDataStore.edit { values ->
@@ -54,6 +56,7 @@ class PlaybackPreferences(private val context: Context) {
     suspend fun setTheme(theme: ThemeAccent) = context.playbackDataStore.edit { it[themeKey] = theme.name }
     suspend fun setBeatEffect(enabled: Boolean) = context.playbackDataStore.edit { it[beatEffectKey] = enabled }
     suspend fun setOnlineArtworkEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineArtworkKey] = enabled }
+    suspend fun setOnlineLyricsEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineLyricsKey] = enabled }
 }
 
 data class SavedPlayback(val queue: List<Long>, val index: Int, val position: Long)
