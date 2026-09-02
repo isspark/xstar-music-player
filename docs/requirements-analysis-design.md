@@ -22,7 +22,7 @@
 | 数据库 | Room，当前 schema version 3 |
 | 设置 | DataStore Preferences |
 | 图片 | 内嵌封面缓存 + FileProvider + Coil |
-| 在线封面 | MusicBrainz Release Group + Cover Art Archive，后台异步补充 |
+| 在线封面 | iTunes Search API，用户主动查询 |
 | 导航 | Compose ModalNavigationDrawer |
 | 品牌资源 | 自适应音乐符号 Launcher 图标 |
 
@@ -35,7 +35,7 @@
 - 文件夹使用 SAF 长期只读 URI 授权，配置持久化在 DataStore。
 - 播放页采用正圆形内嵌封面、动态氛围背景和水平播放控制。
 - 用户可以关闭节拍动态效果，并选择主题色。
-- 播放核心离线可用；缺失封面时可选使用在线服务异步补充，不修改用户文件。
+- 播放核心离线可用；缺失封面时由用户在专辑详情中主动使用在线服务，不修改用户文件。
 
 ## 4. 领域模型
 
@@ -202,33 +202,35 @@ FileProvider 仅暴露 `cacheDir/album_art/`，不暴露应用其他私有文件
 
 ### 8.3 在线封面补充
 
-扫描完成并写入 Room 后，ViewModel 在独立协程中调用 `MusicRepository.enrichMissingArtwork()`。该任务不会阻塞扫描结果展示或播放器启动。
+应用不会在扫描完成或启动时自动调用在线封面查询。用户打开专辑详情并点击“获取封面”后，ViewModel 才调用候选查询接口。
 
 ```text
-找出 albumArtUri 为空的歌曲
+用户打开无封面的专辑详情
         |
-按 artist + album 去重
+点击“获取封面”
         |
-MusicBrainz Release Group Search
+iTunes Search API 查询专辑
         |
-获取 release-group MBID
+展示候选缩略图
         |
-Cover Art Archive /release-group/{mbid}/front-500
+用户选择一张
         |
-校验图片 → 压缩 JPEG → cacheDir/album_art
-        |
-更新 songs.albumArtUri
+下载、压缩 JPEG、更新专辑歌曲 albumArtUri
 ```
 
 实现约束：
 
 - 未知艺术家或未知专辑不发起请求。
 - 使用 URL 编码查询参数。
-- 每个艺术家和专辑组合最多执行一次补充流程。
+- 每次用户点击只查询当前专辑；候选结果仅保留在当前详情流程中。
 - 连接超时 8 秒、读取超时 12 秒。
-- 使用 `XSTAR/0.1.0` User-Agent。
+- 使用 `XSTAR/0.1.0 (local-player)` User-Agent。
 - 响应非 2xx、JSON 无 MBID、封面无法解码或下载失败均视为未找到。
 - 在线封面失败不影响本地扫描、数据库和播放。
+- 设置开关 `online_artwork_enabled` 为 false 时，不提供在线查询入口。
+- 使用 iTunes `entity=album` 查询，优先 `country=cn`，失败后尝试 `country=us`。
+- 将返回的 `artworkUrl100` 中的 `100x100` 替换为 `600x600`，获取更清晰的候选图。
+- 候选图片展示为远程缩略图，用户选择后才下载并写入 Room。
 
 ## 9. 数据库设计
 
@@ -291,8 +293,9 @@ addedAt     Long
 | `music_folders` | StringSet | 已授权目录 URI 集合 |
 | `theme_accent` | String | `ThemeAccent` 枚举名 |
 | `beat_effect` | Boolean | 节拍动态效果开关，默认 true |
+| `online_artwork_enabled` | Boolean | 是否允许用户主动获取在线封面，默认 true |
 
-在线封面当前在扫描完成后异步尝试；播放功能不依赖该任务。
+在线封面只在用户主动操作后查询；播放功能不依赖该任务。
 
 播放状态保存使用 1 秒 debounce，避免每 500ms 进度更新都写入磁盘。恢复时按保存 ID 顺序重建队列，并过滤已失效歌曲。
 
@@ -433,15 +436,16 @@ Amber
 | --- | --- |
 | FR-001～FR-009 | OpenDocumentTree、持久化 URI 权限、DataStore folders、DocumentFile |
 | FR-010～FR-017 | MediaMetadataRetriever、stableId、FileProvider、Room upsert |
-| FR-018～FR-019 | enrichMissingArtwork、MusicBrainz、Cover Art Archive、缓存和失败降级 |
-| FR-020～FR-026 | SongsList、GroupsList、搜索过滤、openPlayer SharedFlow |
-| FR-030～FR-038 | PlayerScreen、NoActionBar、CircleShape、PlaybackControls |
-| FR-040～FR-048 | PlayerController、PlaybackMode、QueueSheet、错误跳过 |
-| FR-050～FR-056 | ModalNavigationDrawer、ThemeAccent、edge-to-edge |
-| FR-060～FR-065 | pulseColors、Compose animation、beatEffect DataStore |
-| FR-070～FR-074 | SongDao、PlaylistDao、PlaylistSheet |
-| FR-080～FR-085 | PlaybackService、MediaSession、PlaybackPreferences |
-| FR-090～FR-092 | adaptive icon、普通和圆形 mipmap 资源 |
+| FR-018～FR-021 | AlbumArtworkSheet、ArtworkCandidate、iTunes Search API、Room album 更新 |
+| FR-030～FR-037 | SongsList、GroupsList、搜索过滤、openPlayer SharedFlow |
+| FR-030～FR-037 | SongsList、GroupsList、搜索过滤、openPlayer SharedFlow |
+| FR-040～FR-048 | PlayerScreen、NoActionBar、CircleShape、播放进度和水平控制 |
+| FR-050～FR-058 | PlayerController、PlaybackMode、QueueSheet、错误跳过 |
+| FR-060～FR-066 | ModalNavigationDrawer、ThemeAccent、edge-to-edge |
+| FR-070～FR-075 | pulseColors、Compose animation、beatEffect DataStore |
+| FR-080～FR-084 | SongDao、PlaylistDao、PlaylistSheet |
+| FR-090～FR-095 | PlaybackService、MediaSession、PlaybackPreferences |
+| FR-100～FR-102 | adaptive icon、普通和圆形 mipmap 资源 |
 
 ## 17. 测试设计
 

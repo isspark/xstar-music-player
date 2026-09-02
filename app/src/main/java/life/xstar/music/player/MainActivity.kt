@@ -44,12 +44,15 @@ import androidx.lifecycle.*
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.SubcomposeAsyncImage
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
 import kotlin.random.Random
 import life.xstar.music.player.data.local.*
 import life.xstar.music.player.data.preferences.PlaybackPreferences
 import life.xstar.music.player.data.preferences.ThemeAccent
 import life.xstar.music.player.data.repository.MusicRepository
+import life.xstar.music.player.data.repository.ArtworkCandidate
 import life.xstar.music.player.player.*
 
 class MainActivity : ComponentActivity() {
@@ -72,12 +75,12 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val folders = preferences.folders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val theme = preferences.theme.stateIn(viewModelScope, SharingStarted.Eagerly, ThemeAccent.Blue)
     val beatEffect = preferences.beatEffect.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    val onlineArtworkEnabled = preferences.onlineArtworkEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val openPlayer = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
     init {
         viewModelScope.launch { playback.debounce(1_000).collect { state -> if (state.queue.isNotEmpty()) preferences.save(state.queue.map { it.mediaStoreId }, state.index, state.position) } }
         viewModelScope.launch { preferences.read().let { saved -> if (saved.queue.isNotEmpty()) player.restoreQueue(repo.findByIds(saved.queue), saved.index, saved.position) } }
-        viewModelScope.launch { runCatching { repo.enrichMissingArtwork() } }
         viewModelScope.launch {
             combine(songs, playback) { library, state ->
                 state.song?.mediaStoreId?.let { id -> library.firstOrNull { it.mediaStoreId == id } }
@@ -89,12 +92,10 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         scanning.value = true
         runCatching { repo.scan(folders.value) }
         scanning.value = false
-        launch { runCatching { repo.enrichMissingArtwork() } }
     }
     fun addFolder(uri: String) = viewModelScope.launch {
         preferences.addFolder(uri)
         repo.scan(folders.value + uri)
-        launch { runCatching { repo.enrichMissingArtwork() } }
     }
     fun removeFolder(uri: String) = viewModelScope.launch {
         preferences.removeFolder(uri)
@@ -102,6 +103,9 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     }
     fun setTheme(theme: ThemeAccent) = viewModelScope.launch { preferences.setTheme(theme) }
     fun setBeatEffect(enabled: Boolean) = viewModelScope.launch { preferences.setBeatEffect(enabled) }
+    fun setOnlineArtworkEnabled(enabled: Boolean) = viewModelScope.launch { preferences.setOnlineArtworkEnabled(enabled) }
+    fun artworkCandidates(artist: String, album: String) = viewModelScope.async { repo.findArtworkCandidates(artist, album) }
+    fun saveArtwork(artist: String, album: String, candidate: ArtworkCandidate) = viewModelScope.launch { repo.saveArtworkForAlbum(artist, album, candidate) }
     fun play(song: SongEntity, source: List<SongEntity> = songs.value) {
         player.playQueue(source.ifEmpty { listOf(song) }, source.indexOf(song).coerceAtLeast(0))
         openPlayer.tryEmit(Unit)
@@ -269,7 +273,9 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     val context = LocalContext.current
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> uri?.let { runCatching { context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }; vm.addFolder(it.toString()) } }
     val songs by vm.songs.collectAsStateWithLifecycle(); val folders by vm.folders.collectAsStateWithLifecycle(); val scanning by vm.scanning.collectAsStateWithLifecycle(); var query by remember { mutableStateOf("") }; var group by remember { mutableIntStateOf(0) }
-    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) { PageHeader(openMenu, { IconButton({ folderPicker.launch(null) }) { Icon(Icons.Default.CreateNewFolder, "添加文件夹", tint = Color.White) }; IconButton(vm::scan) { Icon(Icons.Default.Refresh, "扫描", tint = Color.White) } }); OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), leadingIcon = { Icon(Icons.Default.Search, null) }, placeholder = { Text("搜索歌曲、艺术家或专辑") }, singleLine = true, shape = RoundedCornerShape(18.dp)); Spacer(Modifier.height(12.dp)); if (folders.isEmpty()) EmptyState("选择音乐文件夹", "可以连续选择多个目录，XSTAR 只扫描这些目录中的音频。", "选择文件夹") { folderPicker.launch(null) } else if (scanning) Box(Modifier.fillMaxSize(), Alignment.Center) { CircularProgressIndicator() } else { val filtered = songs.filter { query.isBlank() || "${it.title}${it.artist}${it.album}".contains(query, true) }; TabRow(group, containerColor = Color.Transparent) { listOf("歌曲", "专辑", "艺术家").forEachIndexed { i, text -> Tab(group == i, { group = i }, text = { Text(text) }) } }; if (group == 0) SongsList(filtered, vm) else GroupsList(filtered.groupBy { if (group == 1) it.album else it.artist }, vm) } }
+    var selectedAlbum by remember { mutableStateOf<Pair<String, List<SongEntity>>?>(null) }
+    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) { PageHeader(openMenu, { IconButton({ folderPicker.launch(null) }) { Icon(Icons.Default.CreateNewFolder, "添加文件夹", tint = Color.White) }; IconButton(vm::scan) { Icon(Icons.Default.Refresh, "扫描", tint = Color.White) } }); OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), leadingIcon = { Icon(Icons.Default.Search, null) }, placeholder = { Text("搜索歌曲、艺术家或专辑") }, singleLine = true, shape = RoundedCornerShape(18.dp)); Spacer(Modifier.height(12.dp)); if (folders.isEmpty()) EmptyState("选择音乐文件夹", "可以连续选择多个目录，XSTAR 只扫描这些目录中的音频。", "选择文件夹") { folderPicker.launch(null) } else if (scanning) Box(Modifier.fillMaxSize(), Alignment.Center) { CircularProgressIndicator() } else { val filtered = songs.filter { query.isBlank() || "${it.title}${it.artist}${it.album}".contains(query, true) }; TabRow(group, containerColor = Color.Transparent) { listOf("歌曲", "专辑", "艺术家").forEachIndexed { i, text -> Tab(group == i, { group = i }, text = { Text(text) }) } }; if (group == 0) SongsList(filtered, vm) else GroupsList(filtered.groupBy { if (group == 1) it.album else it.artist }, vm) { name, entries -> if (group == 1) selectedAlbum = name to entries } } }
+    selectedAlbum?.let { (name, entries) -> AlbumArtworkSheet(name, entries, vm) { selectedAlbum = null } }
 }
 
 @Composable private fun CollectionScreen(songs: List<SongEntity>, vm: MusicViewModel, openMenu: () -> Unit) { Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) { PageHeader(openMenu); if (songs.isEmpty()) EmptyState("还没有收藏", "在歌曲右侧点击爱心即可收藏。", "前往音乐库") {} else SongsList(songs, vm) } }
@@ -284,7 +290,40 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
 }
 
 @Composable private fun DefaultArtwork(tint: Color) { Box(Modifier.fillMaxSize().background(Brush.linearGradient(listOf(tint.copy(alpha = .85f), Color(0xFF171C25)))), Alignment.Center) { Icon(Icons.Default.MusicNote, null, Modifier.size(34.dp), tint = Color.White.copy(alpha = .82f)) } }
-@Composable private fun GroupsList(groups: Map<String, List<SongEntity>>, vm: MusicViewModel) { LazyColumn(Modifier.fillMaxSize()) { groups.forEach { (name, songs) -> item(name) { ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(name, color = Color.White) }, supportingContent = { Text("${songs.size} 首歌曲", color = Color.Gray) }, trailingContent = { IconButton({ vm.play(songs.first(), songs) }) { Icon(Icons.Default.PlayArrow, "播放") } }) } } } }
+@Composable private fun GroupsList(groups: Map<String, List<SongEntity>>, vm: MusicViewModel, onOpen: (String, List<SongEntity>) -> Unit = { _, _ -> }) { LazyColumn(Modifier.fillMaxSize()) { groups.forEach { (name, songs) -> item(name) { ListItem(modifier = Modifier.clickable { onOpen(name, songs) }, colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(name, color = Color.White) }, supportingContent = { Text("${songs.size} 首歌曲 · 点击查看专辑", color = Color.Gray) }, trailingContent = { IconButton({ vm.play(songs.first(), songs) }) { Icon(Icons.Default.PlayArrow, "播放") } }) } } } }
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun AlbumArtworkSheet(name: String, songs: List<SongEntity>, vm: MusicViewModel, close: () -> Unit) {
+    val enabled by vm.onlineArtworkEnabled.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    var candidates by remember { mutableStateOf<List<ArtworkCandidate>>(emptyList()) }
+    var loading by remember { mutableStateOf(false) }
+    var searchError by remember { mutableStateOf<String?>(null) }
+    val existing = songs.firstOrNull { !it.albumArtUri.isNullOrBlank() }?.albumArtUri
+    ModalBottomSheet(onDismissRequest = close, containerColor = Color(0xFF171B23)) {
+        Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(name, color = Color.White, style = MaterialTheme.typography.headlineSmall)
+            Spacer(Modifier.height(18.dp))
+            if (existing != null) SubcomposeAsyncImage(model = existing, contentDescription = "专辑封面", modifier = Modifier.size(220.dp).clip(RoundedCornerShape(20.dp)), contentScale = ContentScale.Crop)
+            else if (!enabled) Text("在线封面获取已在设置中关闭", color = Color.Gray, modifier = Modifier.padding(30.dp))
+            else if (candidates.isEmpty()) {
+                searchError?.let { Text(it, color = Color(0xFFFF8A96), modifier = Modifier.padding(bottom = 10.dp)) }
+                Button(enabled = !loading, onClick = {
+                    loading = true
+                    searchError = null
+                    scope.launch {
+                        val result = runCatching { vm.artworkCandidates(songs.first().artist, name).await() }
+                        candidates = result.getOrDefault(emptyList())
+                        if (candidates.isEmpty()) searchError = "未找到可用封面，请检查艺术家和专辑标签或稍后重试"
+                        loading = false
+                    }
+                }) { Text(if (loading) "正在查找..." else "获取封面") }
+            }
+            else { Text("选择一个封面", color = Color.Gray); LazyColumn(Modifier.heightIn(max = 420.dp)) { items(candidates, key = { it.url }) { candidate -> ListItem(headlineContent = { Text(candidate.label) }, leadingContent = { SubcomposeAsyncImage(model = candidate.url, contentDescription = "候选封面", modifier = Modifier.size(64.dp), contentScale = ContentScale.Crop) }, modifier = Modifier.clickable { vm.saveArtwork(songs.first().artist, name, candidate); close() }) } } }
+            Spacer(Modifier.height(20.dp)); Text("${songs.size} 首歌曲", color = Color.Gray)
+        }
+    }
+}
 
 @Composable private fun PlaylistsScreen(vm: MusicViewModel, openMenu: () -> Unit) { val lists by vm.playlists.collectAsStateWithLifecycle(); var name by remember { mutableStateOf("") }; var selected by remember { mutableStateOf<PlaylistEntity?>(null) }; Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) { PageHeader(openMenu); Row(verticalAlignment = Alignment.CenterVertically) { OutlinedTextField(name, { name = it }, Modifier.weight(1f), label = { Text("新建播放列表") }, singleLine = true); IconButton({ vm.createPlaylist(name); name = "" }) { Icon(Icons.Default.Add, "创建", tint = Color.White) } }; LazyColumn { items(lists, key = { it.id }) { item -> ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(item.name, color = Color.White) }, leadingContent = { Icon(Icons.Default.QueueMusic, null) }, trailingContent = { IconButton({ vm.deletePlaylist(item) }) { Icon(Icons.Default.DeleteOutline, "删除") } }, modifier = Modifier.clickable { selected = item }) } } }; selected?.let { PlaylistSheet(vm, it) { selected = null } } }
 
@@ -295,11 +334,19 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     val context = LocalContext.current
     val folders by vm.folders.collectAsStateWithLifecycle()
     val beatEffect by vm.beatEffect.collectAsStateWithLifecycle()
+    val onlineArtwork by vm.onlineArtworkEnabled.collectAsStateWithLifecycle()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let { runCatching { context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }; vm.addFolder(it.toString()) }
     }
     Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) {
         PageHeader(openMenu)
+        ListItem(
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            headlineContent = { Text("允许获取在线专辑封面", color = Color.White) },
+            supportingContent = { Text("开启后可在专辑页面手动查询 iTunes 专辑封面", color = Color.Gray) },
+            leadingContent = { Icon(Icons.Default.CloudDownload, null) },
+            trailingContent = { Switch(checked = onlineArtwork, onCheckedChange = vm::setOnlineArtworkEnabled) }
+        )
         ListItem(
             colors = ListItemDefaults.colors(containerColor = Color.Transparent),
             headlineContent = { Text("音乐节拍动态效果", color = Color.White) },

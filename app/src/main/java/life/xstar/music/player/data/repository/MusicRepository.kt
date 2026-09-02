@@ -29,14 +29,37 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
     suspend fun addToPlaylist(playlistId: Long, songId: Long) = playlistDao.addSong(PlaylistSongEntity(playlistId, songId, playlistDao.nextPosition(playlistId)))
     suspend fun removeFromPlaylist(playlistId: Long, songId: Long) = playlistDao.remove(playlistId, songId)
     suspend fun renamePlaylist(id: Long, name: String) = playlistDao.rename(id, name.trim())
-    suspend fun enrichMissingArtwork() = withContext(Dispatchers.IO) {
-        dao.findSongsWithoutArtwork().groupBy { it.artist to it.album }.forEach { (key, songs) ->
-            val artwork = findOnlineArtwork(key.first, key.second) ?: return@forEach
-            songs.forEach { dao.updateArtwork(it.mediaStoreId, artwork) }
-        }
-    }
+    suspend fun enrichMissingArtwork() = Unit
 
     suspend fun getSong(id: Long): SongEntity? = dao.findById(id)
+
+    suspend fun findArtworkCandidates(artist: String, album: String): List<ArtworkCandidate> = withContext(Dispatchers.IO) {
+        if (artist == "未知艺术家" || album == "未知专辑") return@withContext emptyList()
+        val term = URLEncoder.encode("${artist.trim()} ${album.trim()}", "UTF-8")
+        val json = getText("https://itunes.apple.com/search?term=$term&entity=album&limit=10&country=cn")
+            ?: getText("https://itunes.apple.com/search?term=$term&entity=album&limit=10&country=us")
+            ?: return@withContext emptyList()
+        val results = JSONObject(json).optJSONArray("results") ?: return@withContext emptyList()
+        val candidates = mutableListOf<ArtworkCandidate>()
+        for (i in 0 until results.length()) {
+            val result = results.optJSONObject(i) ?: continue
+            val image = result.optString("artworkUrl100").replace("100x100", "600x600")
+            if (image.isNotBlank() && candidates.none { it.url == image }) {
+                val title = result.optString("collectionName", album)
+                val resultArtist = result.optString("artistName", artist)
+                val label = "$resultArtist · $title"
+                candidates += ArtworkCandidate(image, label)
+            }
+        }
+        candidates
+    }
+
+    suspend fun saveArtworkForAlbum(artist: String, album: String, candidate: ArtworkCandidate) = withContext(Dispatchers.IO) {
+        val bytes = getBytes(candidate.url) ?: return@withContext false
+        val artwork = cacheDownloadedArtwork(artist, album, bytes) ?: return@withContext false
+        dao.updateArtworkForAlbum(artist, album, artwork)
+        true
+    }
 
     suspend fun scan(folderUris: Set<String>): Int = withContext(Dispatchers.IO) {
         if (folderUris.isEmpty()) {
@@ -118,31 +141,6 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
         return artwork.absolutePath
     }
 
-    private fun findOnlineArtwork(artist: String, album: String): String? {
-        if (artist == "未知艺术家" || album == "未知专辑") return null
-        val query = "artist:\"${artist.trim()}\" AND release:\"${album.trim()}\""
-        val searchUrl = "https://musicbrainz.org/ws/2/release/?query=${URLEncoder.encode(query, "UTF-8")}&fmt=json&limit=5"
-        val releases = getText(searchUrl)?.let { JSONObject(it).optJSONArray("releases") }
-        if (releases != null) for (index in 0 until releases.length()) {
-            val releaseId = releases.optJSONObject(index)?.optString("id").orEmpty()
-            if (releaseId.isNotBlank()) {
-                getBytes("https://coverartarchive.org/release/$releaseId/front-500")?.let { bytes ->
-                    cacheDownloadedArtwork(artist, album, bytes)?.let { return it }
-                }
-            }
-        }
-        val groupsUrl = "https://musicbrainz.org/ws/2/release-group/?query=${URLEncoder.encode(query, "UTF-8")}&fmt=json&limit=5"
-        val groups = getText(groupsUrl)?.let { JSONObject(it).optJSONArray("release-groups") }
-        if (groups != null) for (index in 0 until groups.length()) {
-            val groupId = groups.optJSONObject(index)?.optString("id").orEmpty()
-            if (groupId.isBlank()) continue
-            getBytes("https://coverartarchive.org/release-group/$groupId/front-500")?.let { bytes ->
-                cacheDownloadedArtwork(artist, album, bytes)?.let { return it }
-            }
-        }
-        return null
-    }
-
     private fun cacheDownloadedArtwork(artist: String, album: String, bytes: ByteArray): String? {
         val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
         val directory = File(context.cacheDir, "album_art").apply { mkdirs() }
@@ -174,3 +172,5 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
     suspend fun findByIds(ids: List<Long>): List<SongEntity> { val songs = dao.findByMediaIds(ids).associateBy { it.mediaStoreId }; return ids.mapNotNull(songs::get) }
     private fun String?.orDefault(default: String) = if (isNullOrBlank() || this == "<unknown>") default else this
 }
+
+data class ArtworkCandidate(val url: String, val label: String)
