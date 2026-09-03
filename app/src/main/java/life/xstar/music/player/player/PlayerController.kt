@@ -52,38 +52,55 @@ class PlayerController(context: Context) {
 
     fun play(song: SongEntity) = playQueue(listOf(song), 0)
 
-    fun restoreQueue(songs: List<SongEntity>, index: Int, position: Long) {
+    fun restoreQueue(
+        songs: List<SongEntity>,
+        index: Int,
+        position: Long,
+        mode: PlaybackMode = PlaybackMode.Sequential,
+        playing: Boolean = false,
+        fmMode: Boolean = false
+    ) {
         if (songs.isNotEmpty()) {
             controllerFuture.addListener({
                 val controller = controllerFuture.get()
                 val restoredIndex = index.coerceIn(0, songs.lastIndex)
                 attachListener(controller)
                 controller.setMediaItems(songs.map { it.toMediaItem() }, restoredIndex, position)
+                applyPlaybackMode(controller, mode, fmMode)
                 controller.prepare()
-                _state.value = PlayerState(songs[restoredIndex], false, position, queue = songs, index = restoredIndex)
+                if (playing) controller.play()
+                _state.value = PlayerState(songs[restoredIndex], playing, position, queue = songs, index = restoredIndex, mode = mode)
+                startProgressUpdates(controller)
             }, executor)
         }
     }
 
-    fun playQueue(songs: List<SongEntity>, startIndex: Int) {
+    fun playQueue(songs: List<SongEntity>, startIndex: Int, mode: PlaybackMode = _state.value.mode) {
         if (songs.isEmpty()) return
         controllerFuture.addListener({
             val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
             val safeIndex = startIndex.coerceIn(0, songs.lastIndex)
             attachListener(controller)
             controller.setMediaItems(songs.map { it.toMediaItem() }, safeIndex, 0)
+            applyPlaybackMode(controller, mode, fmMode = false)
             controller.prepare()
             controller.play()
-            _state.value = PlayerState(songs[safeIndex], true, queue = songs, index = safeIndex, mode = _state.value.mode)
-            progressJob?.cancel()
-            progressJob = scope.launch {
-                while (isActive) {
-                    _state.value = _state.value.copy(playing = controller.isPlaying, position = controller.currentPosition, duration = controller.duration.coerceAtLeast(0))
-                    delay(500)
-                }
-            }
+            _state.value = PlayerState(songs[safeIndex], true, queue = songs, index = safeIndex, mode = mode)
+            startProgressUpdates(controller)
         }, executor)
     }
+
+    fun playFmQueue(songs: List<SongEntity>, startIndex: Int = 0, position: Long = 0, playing: Boolean = true) =
+        restoreQueue(songs, startIndex, position, PlaybackMode.Sequential, playing, fmMode = true)
+
+    fun randomSong() = controllerFuture.addListener({
+        val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
+        if (controller.mediaItemCount <= 1) return@addListener
+        var target = kotlin.random.Random.nextInt(controller.mediaItemCount)
+        while (target == controller.currentMediaItemIndex) target = kotlin.random.Random.nextInt(controller.mediaItemCount)
+        controller.seekTo(target, 0)
+        controller.play()
+    }, executor)
 
     fun toggle() {
         controllerFuture.addListener({
@@ -122,12 +139,7 @@ class PlayerController(context: Context) {
     fun clear() = controllerFuture.addListener({ controllerFuture.get().clearMediaItems(); _state.value = PlayerState() }, executor)
     fun setPlaybackMode(mode: PlaybackMode) = controllerFuture.addListener({
         val controller = controllerFuture.get()
-        controller.shuffleModeEnabled = mode == PlaybackMode.Shuffle
-        controller.repeatMode = when (mode) {
-            PlaybackMode.RepeatOne -> Player.REPEAT_MODE_ONE
-            PlaybackMode.Shuffle -> Player.REPEAT_MODE_ALL
-            PlaybackMode.Sequential -> Player.REPEAT_MODE_OFF
-        }
+        applyPlaybackMode(controller, mode, fmMode = false)
         _state.value = _state.value.copy(mode = mode)
     }, executor)
 
@@ -137,6 +149,26 @@ class PlayerController(context: Context) {
         if (!listenerAttached) {
             controller.addListener(listener)
             listenerAttached = true
+        }
+    }
+
+    private fun applyPlaybackMode(controller: MediaController, mode: PlaybackMode, fmMode: Boolean) {
+        controller.shuffleModeEnabled = mode == PlaybackMode.Shuffle
+        controller.repeatMode = when {
+            fmMode -> Player.REPEAT_MODE_ALL
+            mode == PlaybackMode.RepeatOne -> Player.REPEAT_MODE_ONE
+            mode == PlaybackMode.Shuffle -> Player.REPEAT_MODE_ALL
+            else -> Player.REPEAT_MODE_OFF
+        }
+    }
+
+    private fun startProgressUpdates(controller: MediaController) {
+        progressJob?.cancel()
+        progressJob = scope.launch {
+            while (isActive) {
+                _state.value = _state.value.copy(playing = controller.isPlaying, position = controller.currentPosition, duration = controller.duration.coerceAtLeast(0))
+                delay(500)
+            }
         }
     }
 

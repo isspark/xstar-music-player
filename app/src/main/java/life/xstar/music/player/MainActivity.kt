@@ -19,33 +19,46 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.*
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -56,6 +69,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.*
 import kotlin.random.Random
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import life.xstar.music.player.data.local.*
 import life.xstar.music.player.data.audio.AudioQuality
 import life.xstar.music.player.data.preferences.PlaybackPreferences
@@ -91,28 +106,74 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     private val _sleepTimerRemaining = MutableStateFlow<Long?>(null)
     val sleepTimerRemaining = _sleepTimerRemaining.asStateFlow()
     private var sleepTimerJob: Job? = null
+    private var suppressPlaybackPersistence = false
     val folders = preferences.folders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val theme = preferences.theme.stateIn(viewModelScope, SharingStarted.Eagerly, ThemeAccent.Blue)
     val beatEffect = preferences.beatEffect.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val onlineArtworkEnabled = preferences.onlineArtworkEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val onlineLyricsEnabled = preferences.onlineLyricsEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    val fmModeEnabled = preferences.fmModeEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val openPlayer = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val lyrics = MutableStateFlow<LyricsState>(LyricsState.Idle)
 
     init {
-        viewModelScope.launch { playback.debounce(1_000).collect { state -> if (state.queue.isNotEmpty()) preferences.save(state.queue.map { it.mediaStoreId }, state.index, state.position) } }
-        viewModelScope.launch { preferences.read().let { saved -> if (saved.queue.isNotEmpty()) player.restoreQueue(repo.findByIds(saved.queue), saved.index, saved.position) } }
+        viewModelScope.launch {
+            playback.debounce(1_000).collect { state ->
+                if (suppressPlaybackPersistence || state.queue.isEmpty()) return@collect
+                if (preferences.isFmModeEnabled()) preferences.saveFm(state.queue.map { it.mediaStoreId }, state.index, state.position, state.playing)
+                else preferences.save(state.queue.map { it.mediaStoreId }, state.index, state.position, state.mode.name, state.playing)
+            }
+        }
+        viewModelScope.launch {
+            if (preferences.isFmModeEnabled()) {
+                val saved = preferences.readFm()
+                val restored = restoreSongs(saved)
+                val queue = if (restored.songs.isNotEmpty()) restored.songs else repo.songs().first().shuffled()
+                if (queue.isEmpty()) preferences.setFmModeEnabled(false)
+                else {
+                    val index = if (restored.songs.isNotEmpty()) restored.index else 0
+                    player.playFmQueue(queue, index, if (restored.songs.isNotEmpty()) saved.position else 0, saved.playing)
+                }
+            } else {
+                val saved = preferences.read()
+                val restored = restoreSongs(saved)
+                if (restored.songs.isNotEmpty()) player.restoreQueue(restored.songs, restored.index, saved.position, saved.mode.toPlaybackMode(), playing = false)
+            }
+        }
         viewModelScope.launch {
             combine(songs, playback) { library, state ->
                 state.song?.mediaStoreId?.let { id -> library.firstOrNull { it.mediaStoreId == id } }
             }.filterNotNull().distinctUntilChanged().collect(player::updateSong)
         }
         viewModelScope.launch {
-            playback.map { it.song?.mediaStoreId }.distinctUntilChanged().collect { id ->
+            combine(playback.map { it.song?.mediaStoreId }, fmModeEnabled, onlineLyricsEnabled) { id, fm, online -> Triple(id, fm, online) }
+                .distinctUntilChanged().collect { (id, fm, online) ->
                 val song = id?.let { repo.getSong(it) }
                 lyrics.value = if (song == null) LyricsState.Idle else LyricsState.Loading
-                if (song != null) lyrics.value = runCatching { lyricsRepository.loadLocalOrEmbedded(song) }
-                    .getOrNull()?.let { LyricsState.Loaded(it) } ?: LyricsState.NotFound
+                if (song != null) {
+                    val local = runCatching { lyricsRepository.loadLocalOrEmbedded(song) }.getOrNull()
+                    if (local != null) {
+                        lyrics.value = LyricsState.Loaded(local)
+                    } else if (fm && online) {
+                        val candidate = runCatching { lyricsRepository.findOnline(song).firstOrNull() }.getOrNull()
+                        val document = candidate?.let { lyricsRepository.save(it, song) }
+                        if (playback.value.song?.mediaStoreId == song.mediaStoreId) {
+                            lyrics.value = document?.let { LyricsState.Loaded(it) } ?: LyricsState.NotFound
+                        }
+                    } else {
+                        lyrics.value = LyricsState.NotFound
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            combine(playback.map { it.song?.mediaStoreId }, fmModeEnabled, onlineArtworkEnabled) { id, fm, online -> Triple(id, fm, online) }
+                .distinctUntilChanged().collect { (id, fm, online) ->
+                val song = id?.let { repo.getSong(it) } ?: return@collect
+                if (fm && online && song.albumArtUri.isNullOrBlank()) {
+                    runCatching { repo.findArtworkCandidates(song.artist, song.album).firstOrNull() }
+                        .getOrNull()?.let { repo.saveArtworkForAlbum(song.artist, song.album, it) }
+                }
             }
         }
     }
@@ -170,9 +231,53 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         lyrics.value = lyricsRepository.save(candidate, song)?.let { LyricsState.Loaded(it) } ?: LyricsState.Error("歌词保存失败")
     }
     fun play(song: SongEntity, source: List<SongEntity> = songs.value) {
-        player.playQueue(source.ifEmpty { listOf(song) }, source.indexOf(song).coerceAtLeast(0))
-        openPlayer.tryEmit(Unit)
+        viewModelScope.launch {
+            val queue = source.ifEmpty { listOf(song) }
+            val wasFmMode = preferences.isFmModeEnabled()
+            val mode = if (wasFmMode) preferences.read().mode.toPlaybackMode() else playback.value.mode
+            if (wasFmMode) {
+                suppressPlaybackPersistence = true
+                preferences.setFmModeEnabled(false)
+            }
+            player.playQueue(queue, queue.indexOf(song).coerceAtLeast(0), mode)
+            withTimeoutOrNull(3_000) { playback.first { it.song?.mediaStoreId == song.mediaStoreId } }
+            suppressPlaybackPersistence = false
+            openPlayer.emit(Unit)
+        }
     }
+    fun setFmMode(enabled: Boolean) = viewModelScope.launch {
+        if (enabled == preferences.isFmModeEnabled()) return@launch
+        if (enabled) {
+            val library = songs.value
+            if (library.isEmpty()) return@launch
+            suppressPlaybackPersistence = true
+            val state = playback.value
+            preferences.save(state.queue.map { it.mediaStoreId }, state.index, state.position, state.mode.name, state.playing)
+            preferences.setFmModeEnabled(true)
+            val queue = library.shuffled()
+            preferences.saveFm(queue.map { it.mediaStoreId }, 0, 0, playing = true)
+            player.playFmQueue(queue, 0, playing = true)
+            withTimeoutOrNull(3_000) { playback.first { it.song?.mediaStoreId == queue.first().mediaStoreId } }
+            suppressPlaybackPersistence = false
+            openPlayer.emit(Unit)
+        } else {
+            suppressPlaybackPersistence = true
+            preferences.setFmModeEnabled(false)
+            val saved = preferences.read()
+            val restored = restoreSongs(saved)
+            val expectedId = restored.songs.getOrNull(restored.index)?.mediaStoreId
+            if (restored.songs.isEmpty()) {
+                player.clear()
+                withTimeoutOrNull(3_000) { playback.first { it.queue.isEmpty() } }
+            } else {
+                player.restoreQueue(restored.songs, restored.index, saved.position, saved.mode.toPlaybackMode(), saved.playing)
+                withTimeoutOrNull(3_000) { playback.first { it.song?.mediaStoreId == expectedId } }
+            }
+            suppressPlaybackPersistence = false
+            openPlayer.emit(Unit)
+        }
+    }
+    fun fmRandomSong() = player.randomSong()
     fun favorite(id: Long) = viewModelScope.launch { repo.toggleFavorite(id) }
     fun createPlaylist(name: String) = viewModelScope.launch { if (name.isNotBlank()) repo.createPlaylist(name.trim()) }
     fun deletePlaylist(item: PlaylistEntity) = viewModelScope.launch { repo.deletePlaylist(item) }
@@ -199,12 +304,20 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         sleepTimerJob = null
         _sleepTimerRemaining.value = null
     }
+    private suspend fun restoreSongs(saved: life.xstar.music.player.data.preferences.SavedPlayback): RestoredQueue {
+        val songs = repo.findByIds(saved.queue)
+        val currentId = saved.queue.getOrNull(saved.index)
+        return RestoredQueue(songs, songs.indexOfFirst { it.mediaStoreId == currentId }.coerceAtLeast(0))
+    }
     override fun onCleared() { player.release() }
 
     companion object { fun factory(repo: MusicRepository, player: PlayerController, preferences: PlaybackPreferences, lyrics: LyricsRepository) = object : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player, preferences, lyrics) as T
     } }
 }
+
+private data class RestoredQueue(val songs: List<SongEntity>, val index: Int)
+private fun String.toPlaybackMode() = runCatching { PlaybackMode.valueOf(this) }.getOrDefault(PlaybackMode.Sequential)
 
 data class ScanState(
     val running: Boolean = false,
@@ -223,6 +336,8 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     var screen by remember { mutableStateOf(Screen.Player) }
     val theme by vm.theme.collectAsStateWithLifecycle()
     val sleepTimerRemaining by vm.sleepTimerRemaining.collectAsStateWithLifecycle()
+    val fmMode by vm.fmModeEnabled.collectAsStateWithLifecycle()
+    val songs by vm.songs.collectAsStateWithLifecycle()
     val accent = theme.color()
     LaunchedEffect(vm) { vm.openPlayer.collect { screen = Screen.Player; drawerState.close() } }
     ModalNavigationDrawer(drawerState = drawerState, gesturesEnabled = true, drawerContent = {
@@ -233,6 +348,25 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
                     NavigationDrawerItem(label = { Text(item.first.title) }, icon = { Icon(item.second, null) }, selected = screen == item.first, onClick = { screen = item.first; scope.launch { drawerState.close() } }, modifier = Modifier.padding(vertical = 3.dp))
                 }
                 Spacer(Modifier.height(16.dp))
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = .06f)) {
+                    Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Radio, null, Modifier.size(21.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("FM 模式", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text(if (songs.isEmpty()) "请先扫描音乐" else "随机电台 · 极简手势", color = Color(0xFF818C9C), fontSize = 11.sp)
+                        }
+                        Switch(
+                            checked = fmMode,
+                            enabled = songs.isNotEmpty() || fmMode,
+                            onCheckedChange = {
+                                vm.setFmMode(it)
+                                if (it) scope.launch { drawerState.close() }
+                            }
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
                 Text("定时关闭", color = Color(0xFF9BA5B5), fontSize = 13.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
                 Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = .06f)) {
                     Column(Modifier.padding(12.dp)) {
@@ -277,6 +411,14 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun PlayerScreen(vm: MusicViewModel, openMenu: () -> Unit) {
+    val fmMode by vm.fmModeEnabled.collectAsStateWithLifecycle()
+    AnimatedContent(fmMode, label = "playerMode") { fm ->
+        if (fm) FmPlayerScreen(vm, openMenu) else TraditionalPlayerScreen(vm, openMenu)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun TraditionalPlayerScreen(vm: MusicViewModel, openMenu: () -> Unit) {
     val state by vm.playback.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var showQueue by remember { mutableStateOf(false) }
@@ -409,6 +551,216 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
         getLyrics = { showSongDetails = false; showLyrics = true; vm.findLyrics() },
         close = { showSongDetails = false }
     )
+}
+
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@Composable private fun FmPlayerScreen(vm: MusicViewModel, openMenu: () -> Unit) {
+    val state by vm.playback.collectAsStateWithLifecycle()
+    val theme by vm.theme.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val artworkColors by produceState(initialValue = ArtworkColors.fallback(theme), state.song?.albumArtUri, theme) {
+        value = loadArtworkColors(context, state.song?.albumArtUri, theme)
+    }
+    val discRotation = remember { Animatable(0f) }
+    var horizontalDrag by remember { mutableFloatStateOf(0f) }
+    var showDetails by remember { mutableStateOf(false) }
+    var showArtworkPicker by remember { mutableStateOf(false) }
+    val song = state.song
+    val progress = if (state.duration > 0) (state.position.toFloat() / state.duration).coerceIn(0f, 1f) else 0f
+
+    LaunchedEffect(state.playing, song?.mediaStoreId) {
+        while (state.playing) {
+            discRotation.animateTo(discRotation.value + 360f, tween(22_000, easing = LinearEasing))
+        }
+    }
+    LaunchedEffect(song?.mediaStoreId) {
+        horizontalDrag = 0f
+    }
+
+    Box(
+        Modifier.fillMaxSize()
+            .background(artworkColors.dark)
+            .background(Brush.radialGradient(listOf(artworkColors.primary.copy(alpha = .56f), Color.Transparent), center = Offset(860f, 360f), radius = 1150f))
+            .background(Brush.radialGradient(listOf(artworkColors.light.copy(alpha = .28f), Color.Transparent, Color(0xFF05070A).copy(alpha = .78f)), center = Offset(80f, 80f), radius = 1350f))
+            .combinedClickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = vm.player::toggle,
+                onLongClick = { if (song != null) showDetails = true }
+            )
+            .pointerInput(song?.mediaStoreId) {
+                detectHorizontalDragGestures(
+                    onDragEnd = {
+                        if (abs(horizontalDrag) > 80f) vm.fmRandomSong()
+                        horizontalDrag = 0f
+                    },
+                    onDragCancel = { horizontalDrag = 0f }
+                ) { change, amount ->
+                    change.consume()
+                    horizontalDrag += amount
+                }
+            }
+    ) {
+        IconButton(openMenu, Modifier.statusBarsPadding().padding(10.dp).align(Alignment.TopStart).zIndex(2f)) {
+            Icon(Icons.Default.Menu, "菜单", tint = Color.White)
+        }
+        Column(
+            Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 24.dp, vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Spacer(Modifier.height(42.dp))
+            BoxWithConstraints(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                val artworkSize = minOf(maxWidth * .92f, maxHeight * .94f, 430.dp)
+                FmVinylRecord(
+                    artworkUri = song?.albumArtUri,
+                    colors = artworkColors,
+                    progress = progress,
+                    rotation = discRotation.value,
+                    horizontalDrag = horizontalDrag,
+                    playing = state.playing,
+                    modifier = Modifier.size(artworkSize)
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            FmLyricsPreview(vm, Modifier.fillMaxWidth().height(106.dp))
+            Spacer(Modifier.height(10.dp))
+            Text(
+                song?.title ?: "FM",
+                color = Color.White,
+                fontSize = 26.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(7.dp))
+            Text(song?.artist ?: "从你的音乐库随机播放", color = Color.White.copy(alpha = .62f), fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.height(12.dp))
+            Text("${time(state.position)}  /  ${time(state.duration)}", color = Color.White.copy(alpha = .4f), fontSize = 11.sp)
+            state.error?.let { Text(it, color = Color(0xFFFF8A96), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)) }
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+    if (showDetails && song != null) SongDetailsSheet(
+        song,
+        getArtwork = { showDetails = false; showArtworkPicker = true },
+        getLyrics = { showDetails = false; vm.findLyrics() },
+        close = { showDetails = false }
+    )
+    if (showArtworkPicker && song != null) AlbumArtworkSheet(song.album, listOf(song), vm, allowReplace = true) { showArtworkPicker = false }
+}
+
+@Composable private fun FmVinylRecord(
+    artworkUri: String?,
+    colors: ArtworkColors,
+    progress: Float,
+    rotation: Float,
+    horizontalDrag: Float,
+    playing: Boolean,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier.offset { IntOffset(horizontalDrag.roundToInt(), 0) }.graphicsLayer {
+            val travel = abs(horizontalDrag) / 600f
+            scaleX = (1f - travel).coerceAtLeast(.92f)
+            scaleY = scaleX
+            alpha = (1f - travel * .5f).coerceAtLeast(.72f)
+        },
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(Modifier.fillMaxSize().padding(8.dp), shape = CircleShape, shadowElevation = 28.dp, color = Color(0xFF080A0E)) {
+            Box(Modifier.fillMaxSize().graphicsLayer { rotationZ = rotation }, contentAlignment = Alignment.Center) {
+                Canvas(Modifier.fillMaxSize()) {
+                    drawCircle(Brush.radialGradient(listOf(Color(0xFF24272D), Color(0xFF090B0E), Color.Black)))
+                    val grooveColor = Color.White.copy(alpha = .075f)
+                    repeat(9) { index ->
+                        val fraction = .58f + index * .045f
+                        drawCircle(grooveColor, radius = size.minDimension * fraction / 2f, style = Stroke(width = 1f))
+                    }
+                    drawArc(
+                        Brush.sweepGradient(listOf(Color.Transparent, Color.White.copy(alpha = .2f), Color.Transparent, Color.White.copy(alpha = .08f), Color.Transparent)),
+                        startAngle = 204f,
+                        sweepAngle = 128f,
+                        useCenter = false,
+                        style = Stroke(width = size.minDimension * .018f, cap = StrokeCap.Round)
+                    )
+                }
+                Surface(
+                    Modifier.fillMaxSize(.57f).border(1.dp, Color.White.copy(alpha = .18f), CircleShape),
+                    shape = CircleShape,
+                    color = colors.primary
+                ) {
+                    ArtworkImage(artworkUri, colors.primary)
+                }
+                Box(Modifier.size(32.dp).clip(CircleShape).background(Color(0xFF0A0C10)).border(1.dp, Color.White.copy(alpha = .2f), CircleShape), contentAlignment = Alignment.Center) {
+                    Box(Modifier.size(7.dp).clip(CircleShape).background(Color.White.copy(alpha = .52f)))
+                }
+            }
+        }
+        Canvas(Modifier.fillMaxSize()) {
+            val stroke = size.minDimension * .012f
+            val inset = stroke / 2f + 1f
+            drawArc(
+                color = Color.White.copy(alpha = .13f),
+                startAngle = -90f,
+                sweepAngle = 360f,
+                useCenter = false,
+                topLeft = Offset(inset, inset),
+                size = androidx.compose.ui.geometry.Size(size.width - inset * 2, size.height - inset * 2),
+                style = Stroke(stroke, cap = StrokeCap.Round)
+            )
+            drawArc(
+                brush = Brush.sweepGradient(listOf(colors.light, Color.White, colors.primary, colors.light)),
+                startAngle = -90f,
+                sweepAngle = 360f * progress,
+                useCenter = false,
+                topLeft = Offset(inset, inset),
+                size = androidx.compose.ui.geometry.Size(size.width - inset * 2, size.height - inset * 2),
+                style = Stroke(stroke, cap = StrokeCap.Round)
+            )
+        }
+        if (!playing) {
+            Surface(Modifier.size(76.dp), shape = CircleShape, color = Color.Black.copy(alpha = .34f)) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.Pause, "已暂停，点击继续播放", Modifier.size(38.dp), tint = Color.White.copy(alpha = .72f))
+                }
+            }
+        }
+    }
+}
+
+@Composable private fun FmLyricsPreview(vm: MusicViewModel, modifier: Modifier = Modifier) {
+    val lyrics by vm.lyrics.collectAsStateWithLifecycle()
+    val playback by vm.playback.collectAsStateWithLifecycle()
+    val document = (lyrics as? LyricsState.Loaded)?.document
+    val lines = document?.lines.orEmpty()
+    val current = lines.indexOfLast { it.timeMs?.let(playback.position::compareTo) ?: -1 >= 0 }.coerceAtLeast(0)
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(current, playback.song?.mediaStoreId) {
+        if (lines.isNotEmpty() && !listState.isScrollInProgress) listState.animateScrollToItem(current)
+    }
+    when {
+        lyrics == LyricsState.Loading -> Box(modifier, contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = Color.White.copy(alpha = .5f)) }
+        lines.isEmpty() -> Box(modifier, contentAlignment = Alignment.Center) { Text("纯音乐 / 暂无歌词", color = Color.White.copy(alpha = .32f), fontSize = 14.sp) }
+        else -> LazyColumn(
+            state = listState,
+            modifier = modifier,
+            horizontalAlignment = Alignment.CenterHorizontally,
+            contentPadding = PaddingValues(vertical = 38.dp)
+        ) {
+            itemsIndexed(lines) { index, line ->
+                Text(
+                    line.text,
+                    color = Color.White.copy(alpha = if (index == current) .88f else .3f),
+                    fontSize = if (index == current) 17.sp else 14.sp,
+                    fontWeight = if (index == current) FontWeight.SemiBold else FontWeight.Normal,
+                    textAlign = TextAlign.Center,
+                    maxLines = 2,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 5.dp)
+                )
+            }
+        }
+    }
 }
 
 @Composable private fun QualityBadge(value: String) {
@@ -651,7 +1003,7 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let { runCatching { context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }; vm.addFolder(it.toString()) }
     }
-    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) {
+    Column(Modifier.fillMaxSize().systemBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
         PageHeader(openMenu)
         ListItem(
             colors = ListItemDefaults.colors(containerColor = Color.Transparent),

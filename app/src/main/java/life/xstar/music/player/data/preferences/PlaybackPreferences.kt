@@ -22,6 +22,13 @@ class PlaybackPreferences(private val context: Context) {
     private val beatEffectKey = booleanPreferencesKey("beat_effect")
     private val onlineArtworkKey = booleanPreferencesKey("online_artwork_enabled")
     private val onlineLyricsKey = booleanPreferencesKey("online_lyrics_enabled")
+    private val playbackModeKey = stringPreferencesKey("playback_mode")
+    private val wasPlayingKey = booleanPreferencesKey("was_playing")
+    private val fmModeKey = booleanPreferencesKey("fm_mode_enabled")
+    private val fmQueueKey = stringPreferencesKey("fm_queue_ids")
+    private val fmIndexKey = longPreferencesKey("fm_queue_index")
+    private val fmPositionKey = longPreferencesKey("fm_position_ms")
+    private val fmWasPlayingKey = booleanPreferencesKey("fm_was_playing")
 
     val folders: Flow<Set<String>> = context.playbackDataStore.data.map { it[foldersKey].orEmpty() }
     val theme: Flow<ThemeAccent> = context.playbackDataStore.data.map { values ->
@@ -30,20 +37,48 @@ class PlaybackPreferences(private val context: Context) {
     val beatEffect: Flow<Boolean> = context.playbackDataStore.data.map { it[beatEffectKey] ?: true }
     val onlineArtworkEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[onlineArtworkKey] ?: true }
     val onlineLyricsEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[onlineLyricsKey] ?: true }
+    val fmModeEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[fmModeKey] ?: false }
 
-    suspend fun save(queue: List<Long>, index: Int, position: Long) {
+    suspend fun save(queue: List<Long>, index: Int, position: Long, mode: String, playing: Boolean) {
         context.playbackDataStore.edit { values ->
             values[queueKey] = queue.joinToString(",")
             values[indexKey] = index.toLong()
             values[positionKey] = position
+            values[playbackModeKey] = mode
+            values[wasPlayingKey] = playing
         }
     }
 
     suspend fun read(): SavedPlayback {
         val values = context.playbackDataStore.data.first()
-        val queue = values[queueKey].orEmpty().split(',').mapNotNull { it.toLongOrNull() }
-        return SavedPlayback(queue, values[indexKey]?.toInt() ?: 0, values[positionKey] ?: 0)
+        return SavedPlayback(
+            queue = values[queueKey].toIds(),
+            index = values[indexKey]?.toInt() ?: 0,
+            position = values[positionKey] ?: 0,
+            mode = values[playbackModeKey] ?: "Sequential",
+            playing = values[wasPlayingKey] ?: false
+        )
     }
+
+    suspend fun saveFm(queue: List<Long>, index: Int, position: Long, playing: Boolean) = context.playbackDataStore.edit { values ->
+        values[fmQueueKey] = queue.joinToString(",")
+        values[fmIndexKey] = index.toLong()
+        values[fmPositionKey] = position
+        values[fmWasPlayingKey] = playing
+    }
+
+    suspend fun readFm(): SavedPlayback {
+        val values = context.playbackDataStore.data.first()
+        return SavedPlayback(
+            queue = values[fmQueueKey].toIds(),
+            index = values[fmIndexKey]?.toInt() ?: 0,
+            position = values[fmPositionKey] ?: 0,
+            playing = values[fmWasPlayingKey] ?: false
+        )
+    }
+
+    suspend fun isFmModeEnabled(): Boolean = context.playbackDataStore.data.first()[fmModeKey] ?: false
+    suspend fun setFmModeEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[fmModeKey] = enabled }
 
     suspend fun addFolder(uri: String) = context.playbackDataStore.edit { values ->
         values[foldersKey] = values[foldersKey].orEmpty() + uri
@@ -59,5 +94,13 @@ class PlaybackPreferences(private val context: Context) {
     suspend fun setOnlineLyricsEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineLyricsKey] = enabled }
 }
 
-data class SavedPlayback(val queue: List<Long>, val index: Int, val position: Long)
+private fun String?.toIds() = orEmpty().split(',').mapNotNull { it.toLongOrNull() }
+
+data class SavedPlayback(
+    val queue: List<Long>,
+    val index: Int,
+    val position: Long,
+    val mode: String = "Sequential",
+    val playing: Boolean = false
+)
 enum class ThemeAccent { Blue, Violet, Rose, Emerald, Amber }

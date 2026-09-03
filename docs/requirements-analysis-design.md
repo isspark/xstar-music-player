@@ -53,6 +53,7 @@ PlayerState      当前歌曲、进度、模式、队列和错误
 PlaybackPrefs    队列恢复数据
 ThemeAccent      主题色枚举
 BeatEffect       节拍动态效果开关
+FmMode           独立随机电台状态与极简播放界面
 ```
 
 Album 和 Artist 不单独建表，通过 `songs` 聚合，避免目录重新扫描时维护冗余关系。
@@ -78,6 +79,8 @@ DataStore
    ├── 节拍效果开关
    └── 队列、索引和播放位置
 ```
+
+普通播放与 FM 各自维护播放快照。模式切换期间暂停自动快照写入，避免异步播放器事件将 FM 状态写入普通快照。
 
 ### 5.1 UI 层
 
@@ -305,6 +308,13 @@ addedAt     Long
 | `theme_accent` | String | `ThemeAccent` 枚举名 |
 | `beat_effect` | Boolean | 节拍动态效果开关，默认 true |
 | `online_artwork_enabled` | Boolean | 是否允许用户主动获取在线封面，默认 true |
+| `fm_mode_enabled` | Boolean | 是否启用本地 FM 模式，默认 false |
+| `playback_mode` | String | 普通模式播放规则 |
+| `was_playing` | Boolean | 进入 FM 前的普通播放状态 |
+| `fm_queue_ids` | String | FM 随机队列歌曲 ID |
+| `fm_queue_index` | Long | FM 当前索引 |
+| `fm_position_ms` | Long | FM 当前进度 |
+| `fm_was_playing` | Boolean | FM 最近播放状态 |
 
 在线封面只在用户主动操作后查询；播放功能不依赖该任务。
 
@@ -421,6 +431,20 @@ Amber
 - 重新扫描。
 - 应用版本信息。
 
+### 12.6 FM 模式
+
+- 侧滑导航菜单中开启 FM 时，先原子保存普通队列、索引、进度、播放模式和播放状态。
+- 从整个音乐库打乱生成 FM 队列，使用循环播放但不向界面暴露队列。
+- FM 播放页采用全屏黑胶画布，整个页面单击播放暂停、左右滑动随机换歌、长按打开详情。
+- 黑胶视觉由独立旋转层构成，包含唱片沟槽、内圈封面标签、边缘高光、柔和阴影和中心轴；点击不显示 Material 涟漪蒙版。
+- 播放进度在不旋转的唱片外缘绘制为闭合圆环；暂停时中心显示半透明暂停标识，播放后消失。
+- 标题上方常驻可滚动歌词区域，根据播放进度高亮和自动定位当前行。
+- FM 切歌后在本地封面或歌词缺失时自动查询在线候选并保存第一项；在线请求分别受封面和歌词开关约束。
+- 播放模式和队列管理入口隐藏。
+- FM 与普通模式使用独立 DataStore 快照，重启时根据 `fm_mode_enabled` 恢复对应现场。
+- 关闭 FM 时过滤已失效歌曲并恢复普通现场；普通队列全部失效时恢复为空播放器。
+- FM 中从音乐库主动选歌代表离开电台：关闭 FM，但不先恢复旧队列，直接播放用户选择的来源列表。
+
 ## 13. 应用图标设计
 
 - Manifest 同时配置 `android:icon` 和 `android:roundIcon`。
@@ -514,6 +538,7 @@ online_lyrics_enabled: Boolean，默认 true
 | FR-100～FR-105 | PlaybackService、MediaSession、PlaybackPreferences |
 | FR-110～FR-118 | LyricsRepository、LrcParser、LyricsView、LRCLIB、歌词缓存 |
 | FR-120～FR-122 | adaptive icon、普通和圆形 mipmap 资源 |
+| FR-130～FR-141 | FmMode、双播放快照、FM 随机队列、FmPlayerScreen、黑胶画布、环形进度、歌词预览、自动补充资源 |
 
 ## 17. 测试设计
 
@@ -550,6 +575,17 @@ online_lyrics_enabled: Boolean，默认 true
 - 普通 Launcher 和圆形 Launcher 显示单一小音乐符号。
 - 图标在不同厂商蒙版下不裁切、不拉伸。
 - Debug 和 Release Manifest 均使用 NoActionBar 主题。
+
+### 17.5 FM 模式
+
+- 空音乐库不可开启 FM，单曲音乐库随机切换保持当前歌曲。
+- 开启 FM 后立即播放并返回播放页，普通现场不被 FM 进度覆盖。
+- 左右滑动均切换到不同随机歌曲，整页单击、长按和歌词纵向滚动不互相误触。
+- 黑胶沟槽、标签、高光、阴影和环形进度保持同心，播放与暂停状态显示正确。
+- 缺失封面或歌词时自动保存第一候选；关闭对应在线开关后不发起请求。
+- FM 中应用重启后继续 FM；随后关闭 FM 仍可恢复进入前的普通现场。
+- FM 中从音乐库选歌后退出 FM，并直接播放所选歌曲。
+- 扫描移除部分歌曲后，普通与 FM 快照都过滤失效歌曲并修正索引。
 
 ## 18. 当前风险与后续优化
 
