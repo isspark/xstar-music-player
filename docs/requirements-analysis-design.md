@@ -445,6 +445,18 @@ Amber
 - 关闭 FM 时过滤已失效歌曲并恢复普通现场；普通队列全部失效时恢复为空播放器。
 - FM 中从音乐库主动选歌代表离开电台：关闭 FM，但不先恢复旧队列，直接播放用户选择的来源列表。
 
+### 12.7 DLNA 投屏
+
+- 入口位于侧滑导航菜单“投屏”卡片，FM 模式下禁用并提示。
+- 设备发现使用 SSDP M-SEARCH/NOTIFY，MulticastLock 保证组播接收，过滤 `MediaRenderer:1` 且含 `AVTransport:1` 控制服务的设备。
+- 设备描述解析友好名称、型号与控制 URL；控制 URL 相对地址基于设备描述来源地址解析。
+- 音频投流由 `LocalMusicServer` 提供：绑定本机随机端口，URL 带随机 token 并校验 songId 白名单；响应支持 GET/HEAD 与 Range/206 用于渲染器 seek；数据通过 `ContentResolver.openInputStream` 读取 SAF 授权文件。
+- `RendererClient` 封装 SOAP `AVTransport:1` 的 SetAVTransportURI、Play、Pause、Stop、Seek、GetTransportInfo、GetPositionInfo，接口化以便替换实现。
+- `CastSessionController` 维护会话状态机：Idle→Connecting→Connected(Playing/Paused)→Disconnected；2.5 秒轮询同步进度与播放态，曲目结束按顺序/随机/单曲自动继续或结束。
+- 投屏激活时暂停本地 ExoPlayer 并保留现场，断开后恢复；激活期间音乐库等播放入口改写为投屏队列。
+- `CastSessionService` 以 `mediaPlayback` 前台服务保活，通知可一键断开。
+- 明文局域网 http 通过 `res/xml/network_security_config.xml` 允许；新增 `CHANGE_WIFI_MULTICAST_STATE` 权限。
+
 ## 13. 应用图标设计
 
 - Manifest 同时配置 `android:icon` 和 `android:roundIcon`。
@@ -539,6 +551,7 @@ online_lyrics_enabled: Boolean，默认 true
 | FR-110～FR-118 | LyricsRepository、LrcParser、LyricsView、LRCLIB、歌词缓存 |
 | FR-120～FR-122 | adaptive icon、普通和圆形 mipmap 资源 |
 | FR-130～FR-141 | FmMode、双播放快照、FM 随机队列、FmPlayerScreen、黑胶画布、环形进度、歌词预览、自动补充资源 |
+| FR-150～FR-158 | SsdpDiscovery、LocalMusicServer、RendererClient、CastSessionController、CastSessionService、投屏入口与胶囊 |
 
 ## 17. 测试设计
 
@@ -608,3 +621,11 @@ online_lyrics_enabled: Boolean，默认 true
 ### R-005：遗留命名
 
 `SongEntity.mediaStoreId` 当前已不再表示 MediaStore ID。后续 schema 大版本应迁移为 `songId`，避免语义误导。
+
+### R-006：DLNA 厂商兼容差异
+
+不同渲染器对 SOAP 命名空间、是否要求 DIDL-Lite、`InstanceID`、Seek 单位与响应包结构实现不一致；播放器 seek 依赖渲染器支持 Range。自研协议便于逐条抓包调试，需要按真实设备（坚果 N1 Pro）联调并记录兼容矩阵。投屏播放格式解码取决于渲染器能力，无损格式可能需要在后续加入转码提示或转码流。
+
+### R-007：明文局域网流量
+
+投屏依赖局域网内 HTTP 与 SOAP，`network_security_config.xml` 允许明文。该配置不区分局域网与公网，后续可在投屏链路内对 URL 来源做白名单校验，避免对任意地址发起请求。

@@ -53,6 +53,21 @@ XSTAR 是一款面向 Android 的本地音乐播放器。应用以用户主动�
 - 应用重启后继续 FM；关闭 FM 时恢复进入前的普通队列、歌曲、位置、播放模式和播放状态。
 - FM 中从音乐库主动选择歌曲会退出 FM，并按所选来源建立普通播放队列。
 
+### 投屏（DLNA/UPnP）
+
+- 侧滑导航菜单提供“投屏”入口，仅传统播放器模式可用（FM 模式下禁用）。
+- 手机作为 Control Point，向同一 Wi-Fi 的 DLNA/UPnP 渲染器推送当前播放队列歌曲。
+- 自研 SSDP 发现 + SOAP AVTransport 控制，不依赖第三方 UPnP 库。
+- 手机启动本地 HTTP 音频服务，将 SAF 授权歌曲以带随机 token 的流地址提供给渲染器；支持 Range/206 以便 seek。
+- 投屏期间手机继续负责队列、播放模式、进度、歌词与封面。
+- 音乐库、播放列表等入口点歌时自动切到投屏队列。
+- 进度与播放状态通过定期查询渲染器同步。
+- 曲目结束自动按当前模式继续下一首或结束。
+- 投屏时本地 ExoPlayer 暂停并保留现场，断开后自动恢复。
+- 投屏期间启动前台服务，锁屏或切到后台仍可持续播放与控制。
+- 播放页右上角显示“正在投到 <设备名>”胶囊，可随时打开控制面板或断开。
+- 音频格式最终解码能力取决于投影仪/音箱；MP3/AAC 兼容性最好。
+
 ### 音乐库
 
 - 使用 Storage Access Framework 的 `OpenDocumentTree` 选择音乐文件夹。
@@ -148,6 +163,7 @@ LRCLIB 在线歌词
 | 图片 | Coil、BitmapFactory |
 | 在线封面 | iTunes Search API |
 | 在线歌词 | LRCLIB |
+| 投屏 | 自研 SSDP 发现 + SOAP AVTransport + 本地 HTTP 流 |
 | 构建 | Gradle Kotlin DSL、Android Gradle Plugin |
 
 ## 工程信息
@@ -176,6 +192,13 @@ Room:          2.6.1
 │       ├── java/life/xstar/music/player/
 │       │   ├── MainActivity.kt
 │       │   ├── XstarApplication.kt
+│       │   ├── cast/
+│       │   │   ├── CastSessionController.kt
+│       │   │   ├── CastSessionService.kt
+│       │   │   ├── CastDevice.kt
+│       │   │   ├── SsdpDiscovery.kt
+│       │   │   ├── RendererClient.kt
+│       │   │   └── LocalMusicServer.kt
 │       │   ├── player/
 │       │   │   ├── PlaybackService.kt
 │       │   │   └── PlayerController.kt
@@ -454,6 +477,8 @@ D:\Code\Tools\Gradle\gradle-8.9\bin\gradle.bat clean --no-daemon
 - `DocumentFile` 递归扫描大型目录时可能较慢，后续可增加增量扫描、进度和取消。
 - `SongEntity.mediaStoreId` 名称是早期遗留，当前实际语义是基于 URI 计算的稳定歌曲 ID。
 - 封面和歌词缓存位于应用缓存或私有目录，系统清理缓存后可能需要重新获取。
+- 投屏仅限同一 Wi-Fi，且格式解码能力取决于目标渲染器；不同厂商 DLNA 实现存在兼容差异，正在按真实设备（坚果 N1 Pro）联调打磨。
+- 投屏状态使用 2.5 秒轮询同步，seek 与切歌响应受渲染器实现影响。
 
 ## 文档
 

@@ -86,6 +86,10 @@ import life.xstar.music.player.data.repository.ScanProgress
 import life.xstar.music.player.data.lyrics.LyricsRepository
 import life.xstar.music.player.data.lyrics.LyricsState
 import life.xstar.music.player.data.lyrics.LyricsCandidate
+import life.xstar.music.player.cast.CastSessionController
+import life.xstar.music.player.cast.CastSessionState
+import life.xstar.music.player.cast.CastDevice
+import life.xstar.music.player.cast.CastSessionService
 import life.xstar.music.player.navigation.*
 import life.xstar.music.player.player.*
 
@@ -94,18 +98,20 @@ class MainActivity : ComponentActivity() {
         super.onCreate(state)
         enableEdgeToEdge()
         val app = application as XstarApplication
-        val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, PlayerController(this), app.playbackPreferences, LyricsRepository(this)))[MusicViewModel::class.java]
+        val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, PlayerController(this), app.playbackPreferences, LyricsRepository(this), app.castController))[MusicViewModel::class.java]
         setContent { val theme by vm.theme.collectAsStateWithLifecycle(); XstarTheme(theme) { XstarApp(vm) } }
     }
 }
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
-class MusicViewModel(private val repo: MusicRepository, val player: PlayerController, private val preferences: PlaybackPreferences, private val lyricsRepository: LyricsRepository) : ViewModel() {
+class MusicViewModel(private val repo: MusicRepository, val player: PlayerController, private val preferences: PlaybackPreferences, private val lyricsRepository: LyricsRepository, val castController: CastSessionController) : ViewModel() {
     val songs = repo.songs().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val favorites = repo.favorites().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val playlists = repo.playlists().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val playback = player.state
+    val castState: StateFlow<CastSessionState> = castController.state
     val equalizerState = player.equalizerState
+    private var castResumeAfterStop = false
     private val _scanState = MutableStateFlow(ScanState())
     val scanState = _scanState.asStateFlow()
     private var scanJob: Job? = null
@@ -152,8 +158,11 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
                 state.song?.mediaStoreId?.let { id -> library.firstOrNull { it.mediaStoreId == id } }
             }.filterNotNull().distinctUntilChanged().collect(player::updateSong)
         }
+        val activeTrackId = combine(castState, playback) { cast, local ->
+            if (cast.connection == CastSessionController.Connection.Connected) cast.song?.mediaStoreId else local.song?.mediaStoreId
+        }.distinctUntilChanged()
         viewModelScope.launch {
-            combine(playback.map { it.song?.mediaStoreId }, fmModeEnabled, onlineLyricsEnabled) { id, fm, online -> Triple(id, fm, online) }
+            combine(activeTrackId, fmModeEnabled, onlineLyricsEnabled) { id, fm, online -> Triple(id, fm, online) }
                 .distinctUntilChanged().collect { (id, fm, online) ->
                 val song = id?.let { repo.getSong(it) }
                 lyrics.value = if (song == null) LyricsState.Idle else LyricsState.Loading
@@ -164,7 +173,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
                     } else if (fm && online) {
                         val candidate = runCatching { lyricsRepository.findOnline(song).firstOrNull() }.getOrNull()
                         val document = candidate?.let { lyricsRepository.save(it, song) }
-                        if (playback.value.song?.mediaStoreId == song.mediaStoreId) {
+                        if (id == song.mediaStoreId) {
                             lyrics.value = document?.let { LyricsState.Loaded(it) } ?: LyricsState.NotFound
                         }
                     } else {
@@ -174,7 +183,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
             }
         }
         viewModelScope.launch {
-            combine(playback.map { it.song?.mediaStoreId }, fmModeEnabled, onlineArtworkEnabled) { id, fm, online -> Triple(id, fm, online) }
+            combine(activeTrackId, fmModeEnabled, onlineArtworkEnabled) { id, fm, online -> Triple(id, fm, online) }
                 .distinctUntilChanged().collect { (id, fm, online) ->
                 val song = id?.let { repo.getSong(it) } ?: return@collect
                 if (fm && online && song.albumArtUri.isNullOrBlank()) {
@@ -223,8 +232,11 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     fun setOnlineLyricsEnabled(enabled: Boolean) = viewModelScope.launch { preferences.setOnlineLyricsEnabled(enabled) }
     fun artworkCandidates(artist: String, album: String) = viewModelScope.async { repo.findArtworkCandidates(artist, album) }
     fun saveArtwork(artist: String, album: String, candidate: ArtworkCandidate) = viewModelScope.launch { repo.saveArtworkForAlbum(artist, album, candidate) }
-    fun findLyrics() = viewModelScope.launch {
-        val song = playback.value.song ?: return@launch
+    fun findLyrics(songOverride: SongEntity? = null) = viewModelScope.launch {
+        val song = songOverride ?: when (castState.value.connection) {
+            CastSessionController.Connection.Connected -> castState.value.song
+            else -> playback.value.song
+        } ?: return@launch
         if (!onlineLyricsEnabled.value) {
             lyrics.value = LyricsState.Error("在线歌词获取已在设置中关闭")
             return@launch
@@ -234,12 +246,20 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         lyrics.value = if (candidates.isEmpty()) LyricsState.Error("未找到歌词，请检查歌曲标签或稍后重试") else LyricsState.Candidates(song, candidates)
     }
     fun saveLyrics(candidate: life.xstar.music.player.data.lyrics.LyricsCandidate) = viewModelScope.launch {
-        val song = playback.value.song ?: return@launch
+        val candidateSong = (lyrics.value as? LyricsState.Candidates)?.song
+        val focusedSong = if (castState.value.connection == CastSessionController.Connection.Connected) castState.value.song else playback.value.song
+        val song = candidateSong ?: focusedSong ?: return@launch
         lyrics.value = lyricsRepository.save(candidate, song)?.let { LyricsState.Loaded(it) } ?: LyricsState.Error("歌词保存失败")
     }
     fun play(song: SongEntity, source: List<SongEntity> = songs.value) {
         viewModelScope.launch {
             val queue = source.ifEmpty { listOf(song) }
+            val castSnap = castState.value
+            if (castSnap.connection == CastSessionController.Connection.Connected && !preferences.isFmModeEnabled()) {
+                castController.playQueueOnCast(queue, queue.indexOf(song).coerceAtLeast(0))
+                openPlayer.emit(Unit)
+                return@launch
+            }
             val wasFmMode = preferences.isFmModeEnabled()
             val mode = if (wasFmMode) preferences.read().mode.toPlaybackMode() else playback.value.mode
             if (wasFmMode) {
@@ -252,9 +272,34 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
             openPlayer.emit(Unit)
         }
     }
+    fun discoverCastDevices() = viewModelScope.async { castController.discoverDevices() }
+    fun connectCast(device: CastDevice) {
+        if (fmModeEnabled.value) return
+        val snap = playback.value
+        if (snap.queue.isEmpty() || snap.index !in snap.queue.indices) return
+        castResumeAfterStop = snap.playing
+        player.pause()
+        castController.connect(device, snap.queue, snap.index.coerceAtLeast(0), snap.mode, playing = true)
+    }
+    fun stopCastAndResume() {
+        viewModelScope.launch {
+            castController.disconnect()
+            withTimeoutOrNull(2_000) { castController.state.first { it.connection == CastSessionController.Connection.Disconnected } }
+            if (castResumeAfterStop) {
+                if (!playback.value.playing) player.toggle()
+                castResumeAfterStop = false
+            }
+        }
+    }
+    fun castTogglePlayPause() = castController.togglePlayPause()
+    fun castNext() = castController.next()
+    fun castPrevious() = castController.previous()
+    fun castSeek(ms: Long) = castController.seekTo(ms)
     fun setFmMode(enabled: Boolean) = viewModelScope.launch {
         if (enabled == preferences.isFmModeEnabled()) return@launch
         if (enabled) {
+            if (castState.value.connection != CastSessionController.Connection.Disconnected) castController.disconnect()
+            castResumeAfterStop = false
             val library = songs.value
             if (library.isEmpty()) return@launch
             suppressPlaybackPersistence = true
@@ -323,8 +368,8 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     }
     override fun onCleared() { player.release() }
 
-    companion object { fun factory(repo: MusicRepository, player: PlayerController, preferences: PlaybackPreferences, lyrics: LyricsRepository) = object : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player, preferences, lyrics) as T
+    companion object { fun factory(repo: MusicRepository, player: PlayerController, preferences: PlaybackPreferences, lyrics: LyricsRepository, cast: CastSessionController) = object : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player, preferences, lyrics, cast) as T
     } }
 }
 
@@ -348,12 +393,14 @@ data class ScanState(
     val theme by vm.theme.collectAsStateWithLifecycle()
     val sleepTimerRemaining by vm.sleepTimerRemaining.collectAsStateWithLifecycle()
     val fmMode by vm.fmModeEnabled.collectAsStateWithLifecycle()
+    val castState by vm.castState.collectAsStateWithLifecycle()
     val songs by vm.songs.collectAsStateWithLifecycle()
+    var showCastSheet by remember { mutableStateOf(false) }
     val accent = theme.color()
     LaunchedEffect(vm) { vm.openPlayer.collect { navigator.navigate(PlayerRoute); drawerState.close() } }
     val openMenu: () -> Unit = { scope.launch { drawerState.open() } }
     val entryProvider = entryProvider<NavKey> {
-        entry<PlayerRoute> { PlayerScreen(vm, openMenu) }
+        entry<PlayerRoute> { PlayerScreen(vm, openMenu, onOpenCastSheet = { showCastSheet = true }) }
         entry<LibraryRoute> { LibraryScreen(vm, openMenu) }
         entry<FavoritesRoute> { CollectionScreen(vm.favorites.collectAsStateWithLifecycle().value, vm, openMenu, goToLibrary = { navigator.navigate(LibraryRoute) }) }
         entry<PlaylistsRoute> { PlaylistsScreen(vm, openMenu) }
@@ -376,6 +423,39 @@ data class ScanState(
                     NavigationDrawerItem(label = { Text(item.second) }, icon = { Icon(item.first, null) }, selected = route == navigationState.topLevelRoute, onClick = { navigator.navigate(route); scope.launch { drawerState.close() } }, modifier = Modifier.padding(vertical = 3.dp))
                 }
                 Spacer(Modifier.height(16.dp))
+                val castActive = castState.connection != CastSessionController.Connection.Disconnected
+                val castCardEnabled = !fmMode
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = if (castCardEnabled) .06f else .03f)) {
+                    Row(
+                        Modifier.padding(horizontal = 14.dp, vertical = 10.dp).clickable(enabled = castCardEnabled) {
+                            showCastSheet = true
+                            scope.launch { drawerState.close() }
+                        },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.Cast, null, Modifier.size(21.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("投屏", color = if (castCardEnabled) Color.White else Color.White.copy(alpha = .5f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                when {
+                                    !castCardEnabled -> "FM 模式不可用"
+                                    castActive -> "正在投到 ${castState.device?.friendlyName ?: "设备"}"
+                                    else -> "搜索同一 Wi-Fi 的投影设备"
+                                },
+                                color = Color(0xFF818C9C),
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Icon(
+                            Icons.Default.ArrowForwardIos, null, Modifier.size(14.dp),
+                            tint = if (castActive) MaterialTheme.colorScheme.primary else Color(0xFF5B6577)
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
                 Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = .06f)) {
                     Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.Radio, null, Modifier.size(21.dp), tint = MaterialTheme.colorScheme.primary)
@@ -432,25 +512,174 @@ data class ScanState(
                 modifier = Modifier.fillMaxSize()
             )
             BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
+            if (showCastSheet) CastControlSheet(vm) { showCastSheet = false }
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun PlayerScreen(vm: MusicViewModel, openMenu: () -> Unit) {
+@Composable private fun CastControlSheet(vm: MusicViewModel, close: () -> Unit) {
+    val context = LocalContext.current
+    val castState by vm.castState.collectAsStateWithLifecycle()
+    val playback by vm.playback.collectAsStateWithLifecycle()
     val fmMode by vm.fmModeEnabled.collectAsStateWithLifecycle()
-    AnimatedContent(fmMode, label = "playerMode") { fm ->
-        if (fm) FmPlayerScreen(vm, openMenu) else TraditionalPlayerScreen(vm, openMenu)
+    val scope = rememberCoroutineScope()
+    var devices by remember { mutableStateOf<List<CastDevice>>(emptyList()) }
+    var scanning by remember { mutableStateOf(false) }
+    var scanError by remember { mutableStateOf<String?>(null) }
+
+    fun scanDevices() {
+        if (scanning) return
+        scanning = true
+        scanError = null
+        scope.launch {
+            val result = runCatching { vm.discoverCastDevices().await() }
+            devices = result.getOrDefault(emptyList())
+            if (devices.isEmpty() && scanError == null) scanError = "未发现设备，请确认手机与投影仪在同一 Wi-Fi"
+            scanning = false
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (castState.connection == CastSessionController.Connection.Disconnected) scanDevices()
+    }
+
+    ModalBottomSheet(onDismissRequest = close, containerColor = Color(0xFF171B23)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp)) {
+            Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("投屏", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        when {
+                            fmMode -> "FM 模式下不可用"
+                            castState.connection == CastSessionController.Connection.Connected -> "正在投到 ${castState.device?.friendlyName ?: "设备"}"
+                            castState.connection == CastSessionController.Connection.Connecting -> "正在连接设备…"
+                            else -> "选择要播放的 DLNA 设备"
+                        },
+                        color = Color(0xFF8F99A9), fontSize = 12.sp
+                    )
+                }
+                if (castState.connection == CastSessionController.Connection.Connected) {
+                    TextButton(onClick = {
+                        CastSessionService.stop(context)
+                        vm.stopCastAndResume()
+                        close()
+                    }) { Text("断开投屏", color = Color(0xFFFF8A96)) }
+                }
+            }
+            when {
+                fmMode -> Box(Modifier.fillMaxWidth().padding(vertical = 40.dp), contentAlignment = Alignment.Center) {
+                    Text("请先退出 FM 模式再投屏", color = Color.Gray)
+                }
+                playback.queue.isEmpty() && castState.connection == CastSessionController.Connection.Disconnected -> Box(Modifier.fillMaxWidth().padding(vertical = 40.dp), contentAlignment = Alignment.Center) {
+                    Text("先在播放器选择一首歌曲，再开始投屏", color = Color(0xFF8F99A9), textAlign = TextAlign.Center)
+                }
+                castState.connection == CastSessionController.Connection.Connected -> CastSessionBody(vm, castState)
+                else -> Column {
+                    scanError?.let { Text(it, color = Color(0xFFFF8A96), fontSize = 12.sp, modifier = Modifier.padding(bottom = 10.dp)) }
+                    if (scanning) Box(Modifier.fillMaxWidth().padding(28.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(Modifier.size(26.dp), strokeWidth = 3.dp)
+                    }
+                    LazyColumn(Modifier.heightIn(max = 380.dp)) {
+                        items(devices, key = { it.id }) { device ->
+                            ListItem(
+                                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                                headlineContent = { Text(device.friendlyName, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                supportingContent = { Text(device.modelName?.ifBlank { null } ?: "DLNA 渲染器", color = Color(0xFF8F99A9), maxLines = 1) },
+                                leadingContent = { Icon(Icons.Default.Cast, null, tint = MaterialTheme.colorScheme.primary) },
+                                modifier = Modifier.clickable {
+                                    CastSessionService.start(context)
+                                    vm.connectCast(device)
+                                }
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(onClick = { scanDevices() }, enabled = !scanning, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Default.Refresh, null, Modifier.size(17.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (scanning) "正在搜索…" else "重新搜索设备")
+                    }
+                }
+            }
+            Spacer(Modifier.height(18.dp))
+        }
+    }
+}
+
+@Composable private fun CastSessionBody(vm: MusicViewModel, castState: CastSessionState) {
+    val lyrics by vm.lyrics.collectAsStateWithLifecycle()
+    val song = castState.song
+    var dragMs by remember { mutableStateOf<Float?>(null) }
+    val duration = castState.durationMs.coerceAtLeast(1).toFloat()
+    val progressValue = ((dragMs ?: castState.positionMs.toFloat()) / duration).coerceIn(0f, 1f)
+
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        castState.error?.let { error -> Text(error, color = Color(0xFFFF8A96), fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) }
+        if (song != null) {
+            Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                Surface(Modifier.size(56.dp), RoundedCornerShape(14.dp), color = Color(0xFF252C38)) { ArtworkImage(song.albumArtUri, Color(0xFF252C38)) }
+                Spacer(Modifier.width(14.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(song.title, color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(song.artist, color = Color(0xFF9AA3B2), fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+        val lyricLine = (lyrics as? LyricsState.Loaded)?.document?.lines
+            ?.let { lines -> lines.lastOrNull { it.timeMs?.let(castState.positionMs::compareTo) ?: -1 >= 0 } }
+        when {
+            lyricLine != null && lyricLine.text.isNotBlank() -> Text(
+                lyricLine.text,
+                color = Color.White.copy(alpha = .85f),
+                fontSize = 15.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
+            )
+            (lyrics is LyricsState.NotFound || lyrics is LyricsState.Idle || lyrics is LyricsState.Error) && song != null -> TextButton(onClick = { vm.findLyrics(song) }) {
+                Text("获取歌词")
+            }
+        }
+        Slider(
+            value = progressValue,
+            onValueChange = { dragMs = it * duration },
+            onValueChangeFinished = {
+                dragMs?.let { vm.castSeek(it.toLong()) }
+                dragMs = null
+            },
+            colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = MaterialTheme.colorScheme.primary, inactiveTrackColor = Color.White.copy(alpha = .18f))
+        )
+        Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(time(castState.positionMs), color = Color(0xFF8A94A5), fontSize = 11.sp)
+            Text(time(castState.durationMs), color = Color(0xFF8A94A5), fontSize = 11.sp)
+        }
+        Row(Modifier.fillMaxWidth().height(72.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
+            IconButton(onClick = vm::castPrevious, Modifier.size(52.dp)) { Icon(Icons.Default.SkipPrevious, "上一首", Modifier.size(30.dp), tint = Color.White) }
+            IconButton(onClick = vm::castTogglePlayPause, Modifier.size(64.dp)) {
+                Icon(if (castState.playing) Icons.Default.Pause else Icons.Default.PlayArrow, "播放或暂停", Modifier.size(38.dp), tint = Color.White)
+            }
+            IconButton(onClick = vm::castNext, Modifier.size(52.dp)) { Icon(Icons.Default.SkipNext, "下一首", Modifier.size(30.dp), tint = Color.White) }
+        }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun TraditionalPlayerScreen(vm: MusicViewModel, openMenu: () -> Unit) {
+@Composable private fun PlayerScreen(vm: MusicViewModel, openMenu: () -> Unit, onOpenCastSheet: () -> Unit) {
+    val fmMode by vm.fmModeEnabled.collectAsStateWithLifecycle()
+    AnimatedContent(fmMode, label = "playerMode") { fm ->
+        if (fm) FmPlayerScreen(vm, openMenu) else TraditionalPlayerScreen(vm, openMenu, onOpenCastSheet)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun TraditionalPlayerScreen(vm: MusicViewModel, openMenu: () -> Unit, onOpenCastSheet: () -> Unit) {
     val state by vm.playback.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var showQueue by remember { mutableStateOf(false) }
     val theme by vm.theme.collectAsStateWithLifecycle()
     val beatEffect by vm.beatEffect.collectAsStateWithLifecycle()
+    val castState by vm.castState.collectAsStateWithLifecycle()
     val artworkColors by produceState(initialValue = ArtworkColors.fallback(theme), state.song?.albumArtUri, theme) {
         value = loadArtworkColors(context, state.song?.albumArtUri, theme)
     }
@@ -480,6 +709,8 @@ data class ScanState(
     }
     val ambient by animateColorAsState(ambientTarget, tween(650), label = "ambient")
     val artworkScale by animateFloatAsState(pulseScale, tween(420), label = "artworkPulse")
+    val castConnected = castState.connection == CastSessionController.Connection.Connected
+    val displayPlaying = if (castConnected) castState.playing else state.playing
     val song = state.song
     var showArtworkPicker by remember { mutableStateOf(false) }
     var showSongDetails by remember { mutableStateOf(false) }
@@ -493,6 +724,28 @@ data class ScanState(
             .background(Brush.radialGradient(listOf(artworkColors.primary.copy(alpha = .24f), Color.Transparent, artworkColors.dark.copy(alpha = .72f)), center = Offset(520f, 430f), radius = 1300f))
     ) {
     IconButton(openMenu, Modifier.statusBarsPadding().padding(10.dp).align(Alignment.TopStart)) { Icon(Icons.Default.Menu, "菜单", tint = Color.White) }
+    val castConnection = castState.connection
+    if (castConnection != CastSessionController.Connection.Disconnected) {
+        Surface(
+            Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 12.dp, end = 12.dp).clickable(onClick = onOpenCastSheet),
+            shape = RoundedCornerShape(50.dp),
+            color = Color(0xFF1E2531).copy(alpha = .94f),
+            shadowElevation = 6.dp
+        ) {
+            Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Cast, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(7.dp))
+                Text(
+                    if (castConnection == CastSessionController.Connection.Connected) (castState.device?.friendlyName ?: "投屏中") else "正在连接",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 150.dp)
+                )
+            }
+        }
+    }
     Column(Modifier.fillMaxSize().padding(horizontal = 22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.weight(if (showLyrics) .12f else .45f))
         BoxWithConstraints(
@@ -541,9 +794,14 @@ data class ScanState(
             }
         }
         Spacer(Modifier.height(22.dp))
+        val sliderDuration = if (castConnected) castState.durationMs else state.duration
+        val sliderPosition = if (castConnected) castState.positionMs else state.position
         Slider(
-            value = if (state.duration > 0) state.position.toFloat() / state.duration else 0f,
-            onValueChange = { vm.player.seek((it * state.duration).toLong()) },
+            value = if (sliderDuration > 0) sliderPosition.toFloat() / sliderDuration else 0f,
+            onValueChange = {
+                val target = (it * sliderDuration).toLong()
+                if (castConnected) vm.castSeek(target) else vm.player.seek(target)
+            },
             modifier = Modifier.height(20.dp),
             colors = SliderDefaults.colors(
                 thumbColor = Color.White,
@@ -557,14 +815,14 @@ data class ScanState(
                 }
             }
         )
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(time(state.position), color = Color(0xFF8A94A5), fontSize = 12.sp); Text(time(state.duration), color = Color(0xFF8A94A5), fontSize = 12.sp) }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(time(sliderPosition), color = Color(0xFF8A94A5), fontSize = 12.sp); Text(time(sliderDuration), color = Color(0xFF8A94A5), fontSize = 12.sp) }
         Spacer(Modifier.height(16.dp))
         Row(Modifier.fillMaxWidth().height(76.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
-            PlaybackModeButton(state.mode) { vm.player.setPlaybackMode(state.mode.next()) }
-            IconButton(onClick = vm.player::previous, Modifier.size(52.dp)) { Icon(Icons.Default.SkipPrevious, "上一首", Modifier.size(32.dp), tint = Color.White) }
-            IconButton(onClick = vm.player::toggle, Modifier.size(64.dp)) { Icon(if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow, "播放或暂停", Modifier.size(38.dp), tint = Color.White) }
-            IconButton(onClick = vm.player::next, Modifier.size(52.dp)) { Icon(Icons.Default.SkipNext, "下一首", Modifier.size(32.dp), tint = Color.White) }
-            IconButton(onClick = { showQueue = true }, Modifier.size(52.dp)) { Icon(Icons.Default.QueueMusic, "播放列表", tint = Color(0xFFB3BDCC)) }
+            PlaybackModeButton(state.mode, enabled = !castConnected) { vm.player.setPlaybackMode(state.mode.next()) }
+            IconButton(onClick = { if (castConnected) vm.castPrevious() else vm.player.previous() }, Modifier.size(52.dp)) { Icon(Icons.Default.SkipPrevious, "上一首", Modifier.size(32.dp), tint = Color.White) }
+            IconButton(onClick = { if (castConnected) vm.castTogglePlayPause() else vm.player.toggle() }, Modifier.size(64.dp)) { Icon(if (displayPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, "播放或暂停", Modifier.size(38.dp), tint = Color.White) }
+            IconButton(onClick = { if (castConnected) vm.castNext() else vm.player.next() }, Modifier.size(52.dp)) { Icon(Icons.Default.SkipNext, "下一首", Modifier.size(32.dp), tint = Color.White) }
+            IconButton(onClick = { showQueue = true }, modifier = Modifier.size(52.dp), enabled = !castConnected) { Icon(Icons.Default.QueueMusic, "播放列表", tint = if (castConnected) Color(0xFF5B6577) else Color(0xFFB3BDCC)) }
         }
         state.error?.let { Text(it, color = Color(0xFFFF8A96), fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp)) }
         Spacer(Modifier.weight(if (showLyrics) .08f else .5f))
@@ -872,9 +1130,10 @@ data class ScanState(
     }
 }
 
-@Composable private fun PlaybackModeButton(mode: PlaybackMode, onClick: () -> Unit) {
+@Composable private fun PlaybackModeButton(mode: PlaybackMode, enabled: Boolean = true, onClick: () -> Unit) {
     val label = when (mode) { PlaybackMode.Shuffle -> "随机"; PlaybackMode.RepeatOne -> "单曲"; PlaybackMode.Sequential -> "顺序" }
-    IconButton(onClick, Modifier.size(52.dp)) { Icon(when (mode) { PlaybackMode.Shuffle -> Icons.Default.Shuffle; PlaybackMode.RepeatOne -> Icons.Default.RepeatOne; PlaybackMode.Sequential -> Icons.Default.FormatListNumbered }, label, tint = if (mode == PlaybackMode.Sequential) Color(0xFFB3BDCC) else MaterialTheme.colorScheme.primary) }
+    val tint = if (!enabled) Color(0xFF4B5464) else if (mode == PlaybackMode.Sequential) Color(0xFFB3BDCC) else MaterialTheme.colorScheme.primary
+    IconButton(onClick = onClick, modifier = Modifier.size(52.dp), enabled = enabled) { Icon(when (mode) { PlaybackMode.Shuffle -> Icons.Default.Shuffle; PlaybackMode.RepeatOne -> Icons.Default.RepeatOne; PlaybackMode.Sequential -> Icons.Default.FormatListNumbered }, label, tint = tint) }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
