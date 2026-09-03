@@ -44,6 +44,10 @@
 ```text
 Song             授权目录中的本地音频及用户属性
 SourceFolder     用户授权的 SAF tree URI
+OnlineTrack      在线搜索结果（平台内歌曲 ID、标题、歌手、专辑、封面标识）
+OnlineDownload   单个在线歌曲的下载状态（进行中/成功/失败）
+DownloadFolder   用户选择并持久化读写的 SAF 下载目录
+OnlineSource     在线音乐 Provider 抽象（GDStudio 默认实现，平台可切换）
 Album            由 Song.album 聚合得到
 Artist           由 Song.artist 聚合得到
 Playlist         用户持久化播放列表
@@ -64,19 +68,20 @@ Album 和 Artist 不单独建表，通过 `songs` 聚合，避免目录重新扫
 Compose UI
    |
 MusicViewModel
-   |---------------------------|
-MusicRepository          PlayerController
-   |                           |
-Room / DocumentFile      MediaController
-   |                           |
-MediaMetadataRetriever   PlaybackService
-   |                           |
-FileProvider / Coil          ExoPlayer
+   |------------------------------------|
+MusicRepository   OnlineMusicRepository  PlayerController
+   |                    |                    |
+Room / DocumentFile  GDStudio Provider    MediaController
+   |                    |                    |
+MediaMetadataRetriever  HttpURLConnection  PlaybackService
+   |                                         |
+FileProvider / Coil                        ExoPlayer
 
 DataStore
    ├── 文件夹 URI 集合
+   ├── 下载目录 URI / 在线平台 / 服务地址
    ├── 主题色
-   ├── 节拍效果开关
+   ├── 节拍效果开关 / 在线功能开关
    └── 队列、索引和播放位置
 ```
 
@@ -96,6 +101,7 @@ DataStore
 - `SongDao` 提供歌曲、搜索、收藏和批量同步。
 - `PlaylistDao` 提供播放列表关系管理。
 - `PlaybackPreferences` 统一保存目录、主题、动效和播放恢复数据。
+- `OnlineMusicRepository` 负责在线搜索、直链解析、流式下载与入库；下载由 Repository 内部协程执行，可独立取消。
 
 ### 5.3 播放层
 
@@ -111,6 +117,16 @@ life.xstar.music.player
 ├── MainActivity.kt
 ├── XstarApplication.kt
 ├── data
+│   ├── audio
+│   │   ├── AudioAnalyzer.kt
+│   │   ├── AudioQuality.kt
+│   │   ├── SongId.kt            # URI → 稳定歌曲 ID
+│   │   └── ArtworkCache.kt      # 下载封面落盘缓存
+│   ├── online
+│   │   ├── OnlineMusicProvider.kt   # Provider 接口与 OnlineTrack 模型
+│   │   ├── GdstudioProvider.kt      # 公共聚合服务实现
+│   │   ├── OnlineHttp.kt            # 轻量 HTTP 文本/字节请求
+│   │   └── OnlineMusicRepository.kt # 搜索/下载/入库/状态
 │   ├── local
 │   │   ├── MusicDatabase.kt
 │   │   ├── SongEntity.kt
@@ -263,6 +279,7 @@ dateAdded         Long，文档 lastModified
 isFavorite        Boolean
 playCount         Int
 lastPlayedAt      Long?
+onlineId          String?，在线来源标识（如 `netease:123`），用于重复下载识别
 ```
 
 字段名 `mediaStoreId` 是早期设计遗留，当前语义为歌曲稳定 ID，后续数据库大版本可重命名为 `songId`。
@@ -294,6 +311,7 @@ addedAt     Long
 | 1→2 | `songs` 增加可空 `mimeType` |
 | 2→3 | `songs` 增加非空 `sourceFolderUri`，默认空字符串 |
 | 3→4 | `songs` 增加音频编码、码率、采样率、位深、声道、音质和文件信息 |
+| 4→5 | `songs` 增加可空 `onlineId`（在线来源标识） |
 
 禁止使用 destructive migration 覆盖用户收藏和播放列表。
 
@@ -308,6 +326,11 @@ addedAt     Long
 | `theme_accent` | String | `ThemeAccent` 枚举名 |
 | `beat_effect` | Boolean | 节拍动态效果开关，默认 true |
 | `online_artwork_enabled` | Boolean | 是否允许用户主动获取在线封面，默认 true |
+| `online_lyrics_enabled` | Boolean | 是否允许用户主动获取在线歌词，默认 true |
+| `online_search_enabled` | Boolean | 是否允许在线搜歌下载，默认 true |
+| `online_platform` | String | 在线搜索平台，默认 `netease` |
+| `online_api_base` | String | 自定义在线服务地址，空字符串表示公共实例 |
+| `download_folder` | String | 在线下载目录 tree URI，空表示未设置 |
 | `fm_mode_enabled` | Boolean | 是否启用本地 FM 模式，默认 false |
 | `playback_mode` | String | 普通模式播放规则 |
 | `was_playing` | Boolean | 进入 FM 前的普通播放状态 |
@@ -533,6 +556,10 @@ online_lyrics_enabled: Boolean，默认 true
 | 音频解码失败 | 显示无法播放提示 | 有下一首时自动跳过 |
 | URI 已失效 | 提示歌曲不可用 | 重新扫描后清理索引 |
 | 服务连接失败 | 控件暂不可用 | Controller 按系统连接流程恢复 |
+| 在线服务不可达/限流 | 在线搜歌页显示可读错误 | 重试或切换平台 |
+| 在线歌曲无可用直链 | 提示可能受会员/版权限制 | 换平台重试 |
+| 下载目录无写入权限 | 提示重新选择下载目录 | 重新授权后重试 |
+| 下载中断/取消 | 清理半截文件并更新状态 | 用户重试 |
 
 ## 16. 需求追踪
 
@@ -552,6 +579,7 @@ online_lyrics_enabled: Boolean，默认 true
 | FR-120～FR-122 | adaptive icon、普通和圆形 mipmap 资源 |
 | FR-130～FR-141 | FmMode、双播放快照、FM 随机队列、FmPlayerScreen、黑胶画布、环形进度、歌词预览、自动补充资源 |
 | FR-150～FR-158 | SsdpDiscovery、LocalMusicServer、RendererClient、CastSessionController、CastSessionService、投屏入口与胶囊 |
+| FR-160～FR-169 | OnlineScreen、OnlineRoute、MusicSourceProvider/GdstudioProvider、OnlineMusicRepository、download_folder/online_* DataStore、songs.onlineId、扫描纳入下载目录 |
 
 ## 17. 测试设计
 
@@ -600,6 +628,17 @@ online_lyrics_enabled: Boolean，默认 true
 - FM 中从音乐库选歌后退出 FM，并直接播放所选歌曲。
 - 扫描移除部分歌曲后，普通与 FM 快照都过滤失效歌曲并修正索引。
 
+### 17.6 在线搜歌下载
+
+- 各平台中文/英文关键词搜索与空结果处理。
+- 未设置下载目录时点下载自动拉起目录选择器；取消选择不触发下载。
+- 下载进度展示、取消与失败重试；取消后下载目录无半截文件。
+- 下载完成后歌曲进入音乐库并可直接播放/收藏/加播放列表。
+- 同一歌曲重复下载被拦截；不同平台同曲目允许作为不同版本。
+- 公共服务不可达或返回异常时的可读提示。
+- 重新扫描后已下载歌曲保留、不重复入库且 `onlineId` 不丢失。
+- 数据库 v4→v5 升级后收藏、播放列表与既有歌曲保留。
+
 ## 18. 当前风险与后续优化
 
 ### R-001：递归扫描性能
@@ -616,7 +655,7 @@ online_lyrics_enabled: Boolean，默认 true
 
 ### R-004：Windows Gradle 文件锁
 
-构建超时或中断可能遗留 Gradle Daemon 并锁定 `app/build`。开发环境应统一 Gradle 8.9，必要时执行 `gradle --stop` 与 `clean --no-daemon`。
+构建超时或中断可能遗留 Gradle Daemon 并锁定 `app/build`。仓库使用 Gradle Wrapper（9.2.1），必要时执行 `gradlew --stop` 与 `gradlew clean`。
 
 ### R-005：遗留命名
 
@@ -629,3 +668,15 @@ online_lyrics_enabled: Boolean，默认 true
 ### R-007：明文局域网流量
 
 投屏依赖局域网内 HTTP 与 SOAP，`network_security_config.xml` 允许明文。该配置不区分局域网与公网，后续可在投屏链路内对 URL 来源做白名单校验，避免对任意地址发起请求。
+
+### R-008：公共在线服务可用性
+
+在线搜歌依赖第三方公共聚合服务（默认 music-api.gdstudio.xyz），无 SLA，可能限流、变更或停用。已通过 Provider 抽象与可配置服务地址隔离影响；失败时引导切换平台、重试或填写自定义地址。
+
+### R-009：在线音质与版权
+
+无需登录通常仅能解析标准音质直链，无损/高清取决于平台账号与版权；VIP/版权受限歌曲可能无可用直链。下载行为本身依赖第三方逆向接口，仅供个人学习与本地使用，存在版权与合规风险，不应商用分发。
+
+### R-010：直链时效
+
+公共服务的歌曲直链带时效（约 20 分钟）。应用只在用户点击下载时解析并立即流式落盘，不持久化远端地址；下载中断后需重新解析。

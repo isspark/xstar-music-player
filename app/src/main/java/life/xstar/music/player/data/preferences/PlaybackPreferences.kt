@@ -34,6 +34,10 @@ class PlaybackPreferences(private val context: Context) {
     private val karaokeEnabledKey = booleanPreferencesKey("karaoke_enabled")
     private val karaokeVocalKey = stringPreferencesKey("karaoke_vocal")
     private val karaokePitchKey = longPreferencesKey("karaoke_pitch")
+    private val onlineSearchEnabledKey = booleanPreferencesKey("online_search_enabled")
+    private val onlinePlatformKey = stringPreferencesKey("online_platform")
+    private val onlineApiBaseKey = stringPreferencesKey("online_api_base")
+    private val downloadFolderKey = stringPreferencesKey("download_folder")
     private val equalizerEnabledKey = booleanPreferencesKey("equalizer_enabled")
     private val equalizerPresetKey = longPreferencesKey("equalizer_preset")
     private val equalizerLevelsKey = stringPreferencesKey("equalizer_levels")
@@ -47,6 +51,10 @@ class PlaybackPreferences(private val context: Context) {
     val onlineLyricsEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[onlineLyricsKey] ?: true }
     val fmModeEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[fmModeKey] ?: false }
     val karaokeModeEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[karaokeEnabledKey] ?: false }
+    val onlineSearchEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[onlineSearchEnabledKey] ?: true }
+    val onlinePlatform: Flow<String> = context.playbackDataStore.data.map { it[onlinePlatformKey] ?: "netease" }
+    val onlineApiBase: Flow<String> = context.playbackDataStore.data.map { it[onlineApiBaseKey].orEmpty() }
+    val downloadFolder: Flow<String> = context.playbackDataStore.data.map { it[downloadFolderKey].orEmpty() }
 
     suspend fun save(queue: List<Long>, index: Int, position: Long, mode: String, playing: Boolean) {
         context.playbackDataStore.edit { values ->
@@ -117,6 +125,14 @@ class PlaybackPreferences(private val context: Context) {
     suspend fun setBeatEffect(enabled: Boolean) = context.playbackDataStore.edit { it[beatEffectKey] = enabled }
     suspend fun setOnlineArtworkEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineArtworkKey] = enabled }
     suspend fun setOnlineLyricsEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineLyricsKey] = enabled }
+    suspend fun setOnlineSearchEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineSearchEnabledKey] = enabled }
+    suspend fun setOnlinePlatform(platform: String) = context.playbackDataStore.edit { it[onlinePlatformKey] = platform }
+    suspend fun setOnlineApiBase(base: String) = context.playbackDataStore.edit { it[onlineApiBaseKey] = base.trim() }
+    suspend fun setDownloadFolder(uri: String?) = context.playbackDataStore.edit { values ->
+        if (uri.isNullOrBlank()) values.remove(downloadFolderKey) else values[downloadFolderKey] = uri
+    }
+    suspend fun currentOnlinePlatform(): String = context.playbackDataStore.data.first()[onlinePlatformKey] ?: "netease"
+    suspend fun currentOnlineApiBase(): String = context.playbackDataStore.data.first()[onlineApiBaseKey].orEmpty()
 
     suspend fun readEqualizer(): EqualizerSettings {
         val values = context.playbackDataStore.data.first()

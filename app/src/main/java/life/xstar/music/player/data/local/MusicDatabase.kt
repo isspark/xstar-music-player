@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [SongEntity::class, PlaylistEntity::class, PlaylistSongEntity::class], version = 4, exportSchema = false)
+@Database(entities = [SongEntity::class, PlaylistEntity::class, PlaylistSongEntity::class], version = 5, exportSchema = false)
 abstract class MusicDatabase : RoomDatabase() {
     abstract fun songDao(): SongDao
     abstract fun playlistDao(): PlaylistDao
@@ -53,6 +53,10 @@ abstract class MusicDatabase : RoomDatabase() {
                 database.execSQL("ALTER TABLE songs ADD COLUMN audioQuality TEXT NOT NULL DEFAULT 'Standard'")
                 database.execSQL("ALTER TABLE songs ADD COLUMN fileName TEXT")
                 database.execSQL("ALTER TABLE songs ADD COLUMN fileSize INTEGER")
+            }
+        }, object : Migration(4, 5) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE songs ADD COLUMN onlineId TEXT")
             }
         }).build()
     }

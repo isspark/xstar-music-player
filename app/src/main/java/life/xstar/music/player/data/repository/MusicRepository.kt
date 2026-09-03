@@ -9,9 +9,9 @@ import androidx.documentfile.provider.DocumentFile
 import java.io.File
 import java.net.URLEncoder
 import org.json.JSONObject
-import java.security.MessageDigest
 import life.xstar.music.player.data.local.*
 import life.xstar.music.player.data.audio.AudioAnalyzer
+import life.xstar.music.player.data.audio.stableSongId
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -78,7 +78,8 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
                 albumArtUri = song.albumArtUri ?: old.albumArtUri?.takeUnless { it.endsWith(".img") },
                 isFavorite = old.isFavorite,
                 playCount = old.playCount,
-                lastPlayedAt = old.lastPlayedAt
+                lastPlayedAt = old.lastPlayedAt,
+                onlineId = old.onlineId
             )
         } ?: song }
         if (ids.isEmpty()) dao.deleteAll() else dao.deleteNotInMediaIds(ids)
@@ -179,7 +180,7 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
         finally { connection.disconnect() }
     }.getOrNull()
 
-    private fun stableId(value: String): Long = MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).take(8).fold(0L) { result, byte -> (result shl 8) or (byte.toLong() and 0xff) }
+    private fun stableId(value: String): Long = stableSongId(value)
     suspend fun findByIds(ids: List<Long>): List<SongEntity> { val songs = dao.findByMediaIds(ids).associateBy { it.mediaStoreId }; return ids.mapNotNull(songs::get) }
     private fun String?.orDefault(default: String) = if (isNullOrBlank() || this == "<unknown>") default else this
 }

@@ -30,6 +30,9 @@ data object FavoritesRoute : NavKey
 data object PlaylistsRoute : NavKey
 
 @Serializable
+data object OnlineRoute : NavKey
+
+@Serializable
 data object EqualizerRoute : NavKey
 
 @Serializable
@@ -42,6 +45,7 @@ val topLevelRoutes: Set<NavKey> = setOf(
     LibraryRoute,
     FavoritesRoute,
     PlaylistsRoute,
+    OnlineRoute,
     EqualizerRoute,
     SettingsRoute
 )

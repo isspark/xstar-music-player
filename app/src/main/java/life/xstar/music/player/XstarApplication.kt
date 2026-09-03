@@ -3,6 +3,7 @@ package life.xstar.music.player
 import android.app.Application
 import life.xstar.music.player.cast.CastSessionController
 import life.xstar.music.player.data.local.MusicDatabase
+import life.xstar.music.player.data.online.OnlineMusicRepository
 import life.xstar.music.player.data.repository.MusicRepository
 import life.xstar.music.player.data.preferences.PlaybackPreferences
 
@@ -11,4 +12,5 @@ class XstarApplication : Application() {
     val repository by lazy { MusicRepository(this, database.songDao(), database.playlistDao()) }
     val playbackPreferences by lazy { PlaybackPreferences(this) }
     val castController by lazy { CastSessionController(this) }
+    val onlineMusicRepository by lazy { OnlineMusicRepository(this, database.songDao(), playbackPreferences) }
 }

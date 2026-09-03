@@ -146,6 +146,19 @@ LRCLIB 在线歌词
 
 当前版本不直接依赖 `MediaMetadataRetriever.METADATA_KEY_LYRICS`，因为该常量并不是当前 Android SDK 的公开通用 API。`LyricsSource.Embedded` 已预留，但当前稳定可用的本地来源是同目录 LRC 和已缓存歌词。
 
+### 在线搜歌与下载
+
+- 侧滑菜单提供“在线搜歌”页面，无需配置即可使用公共音乐聚合服务搜索歌曲。
+- 支持在网易云、QQ音乐、酷狗、酷我、咪咕等平台之间切换搜索。
+- 搜索结果展示歌曲标题、歌手、专辑与来源平台。
+- 点击歌曲或下载按钮即下载最佳可用音质到用户选择的下载目录。
+- 首次下载前引导用户选择下载目录（SAF，持久化读写权限）。
+- 下载进度、取消、失败重试与已下载状态清晰展示。
+- 下载完成后自动写入音乐库，可立即播放、收藏、加入播放列表或进入 FM 随机播放。
+- 重复下载同一歌曲会被识别并跳过。
+- 可在设置中关闭在线搜歌下载、切换平台或填写自定义服务地址。
+- 已下载文件在“重新扫描音乐库”后不会被删除或重复入库。
+
 ## 技术栈
 
 | 层次 | 技术 |
@@ -163,6 +176,7 @@ LRCLIB 在线歌词
 | 图片 | Coil、BitmapFactory |
 | 在线封面 | iTunes Search API |
 | 在线歌词 | LRCLIB |
+| 在线搜歌下载 | GDStudio 公共音乐聚合 API（music-api.gdstudio.xyz，可切换平台/自定义实例） |
 | 投屏 | 自研 SSDP 发现 + SOAP AVTransport + 本地 HTTP 流 |
 | 构建 | Gradle Kotlin DSL、Android Gradle Plugin |
 
@@ -201,11 +215,16 @@ Room:          2.6.1
 │       │   │   └── LocalMusicServer.kt
 │       │   ├── player/
 │       │   │   ├── PlaybackService.kt
-│       │   │   └── PlayerController.kt
+│       │   │   ├── PlayerController.kt
+│       │   │   ├── KaraokeDsp.kt
+│       │   │   ├── KaraokeModels.kt
+│       │   │   └── VocalMixAudioProcessor.kt
 │       │   └── data/
 │       │       ├── audio/
 │       │       │   ├── AudioAnalyzer.kt
-│       │       │   └── AudioQuality.kt
+│       │       │   ├── AudioQuality.kt
+│       │       │   ├── SongId.kt
+│       │       │   └── ArtworkCache.kt
 │       │       ├── local/
 │       │       │   ├── MusicDatabase.kt
 │       │       │   ├── SongEntity.kt
@@ -216,6 +235,11 @@ Room:          2.6.1
 │       │       │   ├── LyricsModels.kt
 │       │       │   ├── LrcParser.kt
 │       │       │   └── LyricsRepository.kt
+│       │       ├── online/
+│       │       │   ├── OnlineMusicProvider.kt
+│       │       │   ├── GdstudioProvider.kt
+│       │       │   ├── OnlineHttp.kt
+│       │       │   └── OnlineMusicRepository.kt
 │       │       ├── preferences/
 │       │       │   └── PlaybackPreferences.kt
 │       │       └── repository/
@@ -315,9 +339,29 @@ LRCLIB 查询
 根据播放进度滚动
 ```
 
+### 在线搜歌与下载
+
+```text
+在线搜歌页输入关键词（平台可切换）
+    ↓
+GDStudio 公共音乐聚合 API 搜索
+    ↓
+歌曲候选列表
+    ↓
+用户选择下载（首次需选择 SAF 下载目录）
+    ↓
+获取歌曲直链（br=999 最佳可用音质）并流式下载
+    ↓
+AudioAnalyzer 分析真实文件格式 + 抓取专辑封面
+    ↓
+写入 Room songs（onlineId 标记来源）
+    ↓
+自动出现在音乐库 / 收藏 / 播放列表 / FM
+```
+
 ## 数据库
 
-当前 Room 数据库版本为 `4`。
+当前 Room 数据库版本为 `5`。
 
 ### `songs`
 
@@ -331,6 +375,7 @@ LRCLIB 查询
 - 封面路径。
 - 收藏、播放次数和最近播放时间。
 - 文件名和文件大小。
+- 在线下载来源标识 `onlineId`（如 `netease:12345`），用于重复下载识别。
 
 ### `playlists`
 
@@ -346,6 +391,7 @@ LRCLIB 查询
 1 → 2：增加 mimeType，并创建播放列表相关表
 2 → 3：增加 sourceFolderUri
 3 → 4：增加音频质量和文件详情字段
+4 → 5：增加 onlineId（在线下载来源标识）
 ```
 
 禁止使用 destructive migration 覆盖用户收藏、播放列表和播放状态。
@@ -354,7 +400,7 @@ LRCLIB 查询
 
 ### Manifest 权限
 
-- `INTERNET`：iTunes 封面和 LRCLIB 歌词请求。
+- `INTERNET`：iTunes 封面、LRCLIB 歌词以及在线搜歌下载请求。
 - `READ_EXTERNAL_STORAGE`：旧 Android 版本兼容保留。
 - `READ_MEDIA_AUDIO`：Android 13 及以上兼容声明保留。
 - `POST_NOTIFICATIONS`：Android 13 及以上媒体通知。
@@ -370,7 +416,9 @@ LRCLIB 查询
 - 不修改或删除用户原始文件。
 - iTunes 查询会发送艺术家和专辑信息。
 - LRCLIB 查询会发送歌曲标题、艺术家、专辑和时长信息。
-- 用户关闭在线封面或在线歌词后，不会发起对应网络请求。
+- 在线搜歌会向公共音乐聚合服务发送搜索关键词，仅在用户主动搜索时发生。
+- 在线下载的音频文件写入用户主动选择的 SAF 下载目录，下载完全由用户触发。
+- 用户关闭在线封面、在线歌词或在线搜歌下载后，不会发起对应网络请求。
 - 在线封面和歌词保存在应用私有目录或缓存中。
 
 ## 构建
@@ -381,18 +429,18 @@ LRCLIB 查询
 - JDK 17。
 - Android SDK Platform 35。
 - Android SDK Build Tools 与当前 Android Gradle Plugin 兼容。
-- Gradle 8.9 或 Android Studio 自带 Gradle。
+- Gradle Wrapper（仓库自带，distributionUrl 指向 Gradle 9.2.1）。
 
-当前项目使用的 Gradle 可执行文件示例：
+推荐使用仓库自带的 Gradle Wrapper 执行构建：
 
 ```powershell
-D:\Code\Tools\Gradle\gradle-8.9\bin\gradle.bat
+.\gradlew.bat
 ```
 
 ### 编译 Debug APK
 
 ```powershell
-D:\Code\Tools\Gradle\gradle-8.9\bin\gradle.bat :app:assembleDebug --no-daemon
+.\gradlew.bat :app:assembleDebug
 ```
 
 APK 输出位置：
@@ -404,7 +452,7 @@ app/build/outputs/apk/debug/app-debug.apk
 ### 仅编译 Kotlin
 
 ```powershell
-D:\Code\Tools\Gradle\gradle-8.9\bin\gradle.bat :app:compileDebugKotlin --no-daemon
+.\gradlew.bat :app:compileDebugKotlin
 ```
 
 ### Windows 构建目录锁定
@@ -412,8 +460,8 @@ D:\Code\Tools\Gradle\gradle-8.9\bin\gradle.bat :app:compileDebugKotlin --no-daem
 如果出现无法删除 `app/build` 或 `mergeDebugResources`、`dexBuilderDebug` 目录，通常是 Gradle Daemon 或 Java 进程仍占用文件。可以执行：
 
 ```powershell
-D:\Code\Tools\Gradle\gradle-8.9\bin\gradle.bat --stop
-D:\Code\Tools\Gradle\gradle-8.9\bin\gradle.bat clean --no-daemon
+.\gradlew.bat --stop
+.\gradlew.bat clean
 ```
 
 如果仍被占用，关闭 Android Studio 后检查残留的 `java.exe` Gradle 进程，再重新执行构建。
@@ -466,6 +514,19 @@ D:\Code\Tools\Gradle\gradle-8.9\bin\gradle.bat clean --no-daemon
 - 24bit/96kHz FLAC：Hi-Res。
 - WAV、AAC、未知编码的默认分类。
 
+### 在线搜歌下载
+
+- 无网络、公共服务不可达、返回异常的提示与重试。
+- 中文/英文/混合关键词搜索。
+- 切换平台后重新搜索。
+- 首次下载时未设置目录自动拉起选择器；取消选择不触发下载。
+- 下载过程中取消，目标目录不残留半截文件。
+- 下载失败可重试；VIP/版权受限歌曲提示无可用链接。
+- 下载完成后歌曲出现在音乐库并可直接播放。
+- 再次下载同一歌曲被去重拦截。
+- 重新扫描音乐库后已下载歌曲保留、不重复入库、onlineId 标记不丢失。
+- 从数据库 v4 升级到 v5 后收藏与播放列表不丢失。
+
 ## 当前限制
 
 - 当前没有正式 Release 签名配置。
@@ -479,6 +540,10 @@ D:\Code\Tools\Gradle\gradle-8.9\bin\gradle.bat clean --no-daemon
 - 封面和歌词缓存位于应用缓存或私有目录，系统清理缓存后可能需要重新获取。
 - 投屏仅限同一 Wi-Fi，且格式解码能力取决于目标渲染器；不同厂商 DLNA 实现存在兼容差异，正在按真实设备（坚果 N1 Pro）联调打磨。
 - 投屏状态使用 2.5 秒轮询同步，seek 与切歌响应受渲染器实现影响。
+- 在线搜歌使用公共音乐聚合服务（music-api.gdstudio.xyz），无 SLA、可能限流或变更接口，失败时请切换平台或稍后重试。
+- 在线下载音质取决于公共服务能解析到的直链：无需登录通常可获得标准音质，无损/高清受歌曲会员与版权限制，无法保证。
+- 在线音乐服务的直链有时效（约 20 分钟），应用仅在“点击下载”时立即解析并使用，不持久化远端地址。
+- 在线搜歌与下载依赖逆向的第三方聚合接口，仅限个人学习与本地使用，请遵守版权与平台条款，勿用于商业分发。
 
 ## 文档
 

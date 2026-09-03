@@ -25,6 +25,12 @@ interface SongDao {
     @Query("SELECT * FROM songs WHERE mediaStoreId = :id LIMIT 1")
     suspend fun findById(id: Long): SongEntity?
 
+    @Query("SELECT * FROM songs WHERE onlineId = :onlineId LIMIT 1")
+    suspend fun findByOnlineId(onlineId: String): SongEntity?
+
+    @Query("SELECT onlineId FROM songs WHERE onlineId IN (:ids)")
+    suspend fun findOnlineIds(ids: List<String>): List<String>
+
     @Query("UPDATE songs SET albumArtUri = :artworkUri WHERE mediaStoreId = :songId")
     suspend fun updateArtwork(songId: Long, artworkUri: String)
 

@@ -32,6 +32,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -66,6 +68,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
@@ -97,6 +100,11 @@ import life.xstar.music.player.cast.CastSessionController
 import life.xstar.music.player.cast.CastSessionState
 import life.xstar.music.player.cast.CastDevice
 import life.xstar.music.player.cast.CastSessionService
+import life.xstar.music.player.data.online.OnlineMusicRepository
+import life.xstar.music.player.data.online.OnlineTrack
+import life.xstar.music.player.data.online.OnlineDownloadState
+import life.xstar.music.player.data.online.supportedOnlinePlatforms
+import life.xstar.music.player.data.online.platformLabel
 import life.xstar.music.player.navigation.*
 import life.xstar.music.player.player.*
 
@@ -105,13 +113,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(state)
         enableEdgeToEdge()
         val app = application as XstarApplication
-        val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, PlayerController(this), app.playbackPreferences, LyricsRepository(this), app.castController))[MusicViewModel::class.java]
+        val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, PlayerController(this), app.playbackPreferences, LyricsRepository(this), app.castController, app.onlineMusicRepository))[MusicViewModel::class.java]
         setContent { val theme by vm.theme.collectAsStateWithLifecycle(); XstarTheme(theme) { XstarApp(vm) } }
     }
 }
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
-class MusicViewModel(private val repo: MusicRepository, val player: PlayerController, private val preferences: PlaybackPreferences, private val lyricsRepository: LyricsRepository, val castController: CastSessionController) : ViewModel() {
+class MusicViewModel(private val repo: MusicRepository, val player: PlayerController, private val preferences: PlaybackPreferences, private val lyricsRepository: LyricsRepository, val castController: CastSessionController, private val onlineRepository: OnlineMusicRepository) : ViewModel() {
     val songs = repo.songs().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val favorites = repo.favorites().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val playlists = repo.playlists().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -134,8 +142,15 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val onlineLyricsEnabled = preferences.onlineLyricsEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val fmModeEnabled = preferences.fmModeEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val karaokeModeEnabled = preferences.karaokeModeEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val onlineSearchEnabled = preferences.onlineSearchEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    val onlinePlatform = preferences.onlinePlatform.stateIn(viewModelScope, SharingStarted.Eagerly, "netease")
+    val onlineApiBase = preferences.onlineApiBase.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+    val downloadFolder = preferences.downloadFolder.stateIn(viewModelScope, SharingStarted.Eagerly, "")
     val openPlayer = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val lyrics = MutableStateFlow<LyricsState>(LyricsState.Idle)
+    val onlineDownloads = onlineRepository.downloads
+    private val _onlineSearch = MutableStateFlow<OnlineSearchUiState>(OnlineSearchUiState.Idle)
+    val onlineSearch = _onlineSearch.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -214,10 +229,11 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     private fun startScan(folderUris: Set<String>) {
         scanJob?.cancel()
         val generation = scanGeneration.incrementAndGet()
+        val effectiveFolders = folderUris + listOfNotNull(downloadFolder.value.takeIf { it.isNotBlank() })
         scanJob = viewModelScope.launch {
             _scanState.value = ScanState(running = true)
             val result = runCatching {
-                repo.scan(folderUris) { progress: ScanProgress ->
+                repo.scan(effectiveFolders) { progress: ScanProgress ->
                     if (scanGeneration.get() == generation) {
                         _scanState.value = ScanState(running = true, currentFile = progress.fileName, discovered = progress.discovered)
                     }
@@ -372,6 +388,38 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     fun playlistSongs(id: Long) = repo.playlistSongs(id)
     fun addToPlaylist(playlistId: Long, songId: Long) = viewModelScope.launch { repo.addToPlaylist(playlistId, songId) }
     fun removeFromPlaylist(playlistId: Long, songId: Long) = viewModelScope.launch { repo.removeFromPlaylist(playlistId, songId) }
+    fun onlineSearch(query: String) {
+        if (!onlineSearchEnabled.value) {
+            _onlineSearch.value = OnlineSearchUiState.Error("在线搜歌下载已在设置中关闭")
+            return
+        }
+        val keyword = query.trim()
+        if (keyword.isEmpty()) return
+        _onlineSearch.value = OnlineSearchUiState.Searching
+        viewModelScope.launch {
+            val result = runCatching { onlineRepository.search(keyword) }
+            val next = result.fold(
+                onSuccess = { tracks -> if (tracks.isEmpty()) OnlineSearchUiState.Error("未找到相关歌曲，可切换平台或更换关键词") else OnlineSearchUiState.Results(keyword, tracks) },
+                onFailure = { OnlineSearchUiState.Error(it.message ?: "搜索失败，请稍后重试") }
+            )
+            _onlineSearch.value = next
+            if (next is OnlineSearchUiState.Results) onlineRepository.markDownloadedIfAny(next.tracks)
+        }
+    }
+    fun startOnlineDownload(track: OnlineTrack) = onlineRepository.startDownload(track)
+    fun cancelOnlineDownload(onlineId: String) = onlineRepository.cancel(onlineId)
+    fun playOnlineDownloaded(onlineId: String) = viewModelScope.launch {
+        val song = onlineRepository.findByOnlineId(onlineId) ?: return@launch
+        play(song)
+    }
+    fun setOnlineSearchEnabled(enabled: Boolean) = viewModelScope.launch { preferences.setOnlineSearchEnabled(enabled) }
+    fun setOnlinePlatform(platform: String) = viewModelScope.launch { preferences.setOnlinePlatform(platform) }
+    fun setOnlineApiBase(base: String) = viewModelScope.launch { preferences.setOnlineApiBase(base) }
+    fun setDownloadFolder(uri: String?) = viewModelScope.launch { preferences.setDownloadFolder(uri) }
+    fun setDownloadFolderAndStart(uri: String, track: OnlineTrack) = viewModelScope.launch {
+        preferences.setDownloadFolder(uri)
+        onlineRepository.startDownload(track)
+    }
     fun setSleepTimer(minutes: Int) {
         sleepTimerJob?.cancel()
         sleepTimerJob = viewModelScope.launch {
@@ -403,8 +451,8 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     }
     override fun onCleared() { player.release() }
 
-    companion object { fun factory(repo: MusicRepository, player: PlayerController, preferences: PlaybackPreferences, lyrics: LyricsRepository, cast: CastSessionController) = object : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player, preferences, lyrics, cast) as T
+    companion object { fun factory(repo: MusicRepository, player: PlayerController, preferences: PlaybackPreferences, lyrics: LyricsRepository, cast: CastSessionController, online: OnlineMusicRepository) = object : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player, preferences, lyrics, cast, online) as T
     } }
 }
 
@@ -418,6 +466,13 @@ data class ScanState(
     val message: String? = null,
     val failed: Boolean = false
 )
+
+sealed class OnlineSearchUiState {
+    data object Idle : OnlineSearchUiState()
+    data object Searching : OnlineSearchUiState()
+    data class Results(val query: String, val tracks: List<OnlineTrack>) : OnlineSearchUiState()
+    data class Error(val message: String) : OnlineSearchUiState()
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun XstarApp(vm: MusicViewModel) {
@@ -440,6 +495,7 @@ data class ScanState(
         entry<LibraryRoute> { LibraryScreen(vm, openMenu) }
         entry<FavoritesRoute> { CollectionScreen(vm.favorites.collectAsStateWithLifecycle().value, vm, openMenu, goToLibrary = { navigator.navigate(LibraryRoute) }) }
         entry<PlaylistsRoute> { PlaylistsScreen(vm, openMenu) }
+        entry<OnlineRoute> { OnlineScreen(vm, openMenu) }
         entry<EqualizerRoute> { EqualizerScreen(vm, openMenu) }
         entry<SettingsRoute> { SettingsScreen(vm, openMenu) }
     }
@@ -448,12 +504,13 @@ data class ScanState(
         LibraryRoute to (Icons.Default.LibraryMusic to "音乐库"),
         FavoritesRoute to (Icons.Default.Favorite to "我的收藏"),
         PlaylistsRoute to (Icons.Default.QueueMusic to "播放列表"),
+        OnlineRoute to (Icons.Default.CloudDownload to "在线搜歌"),
         EqualizerRoute to (Icons.Default.Equalizer to "均衡器"),
         SettingsRoute to (Icons.Default.Settings to "设置")
     )
     ModalNavigationDrawer(drawerState = drawerState, gesturesEnabled = true, drawerContent = {
         ModalDrawerSheet(drawerContainerColor = Color(0xFF10131A)) {
-            Column(Modifier.fillMaxHeight().width(300.dp).padding(horizontal = 16.dp)) {
+            Column(Modifier.fillMaxHeight().width(300.dp).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
                 Spacer(Modifier.height(44.dp)); Text("XSTAR", fontSize = 30.sp, fontWeight = FontWeight.Black, color = Color.White); Text("YOUR MUSIC. YOUR SPACE.", color = Color(0xFF7E8A9A), fontSize = 11.sp); Spacer(Modifier.height(34.dp))
                 drawerRoutes.forEach { (route, item) ->
                     NavigationDrawerItem(label = { Text(item.second) }, icon = { Icon(item.first, null) }, selected = route == navigationState.topLevelRoute, onClick = { navigator.navigate(route); scope.launch { drawerState.close() } }, modifier = Modifier.padding(vertical = 3.dp))
@@ -567,7 +624,7 @@ data class ScanState(
                         }
                     }
                 }
-                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.height(20.dp))
                 Text("主题颜色", color = Color(0xFF9BA5B5), fontSize = 13.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
                 Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                     ThemeAccent.entries.forEach { accent -> ThemeSwatch(accent, theme == accent) { vm.setTheme(accent) } }
@@ -1462,6 +1519,7 @@ data class ScanState(
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> uri?.let { runCatching { context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }; vm.addFolder(it.toString()) } }
     val songs by vm.songs.collectAsStateWithLifecycle()
     val folders by vm.folders.collectAsStateWithLifecycle()
+    val downloadFolder by vm.downloadFolder.collectAsStateWithLifecycle()
     val scanState by vm.scanState.collectAsStateWithLifecycle()
     var query by remember { mutableStateOf("") }
     var group by remember { mutableIntStateOf(0) }
@@ -1469,7 +1527,7 @@ data class ScanState(
     Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) {
         PageHeader(openMenu, {
             IconButton({ folderPicker.launch(null) }, enabled = !scanState.running) { Icon(Icons.Default.CreateNewFolder, "添加文件夹", tint = Color.White) }
-            IconButton(vm::scan, enabled = !scanState.running && folders.isNotEmpty()) { Icon(Icons.Default.Refresh, "扫描", tint = Color.White) }
+            IconButton(vm::scan, enabled = !scanState.running && (folders.isNotEmpty() || downloadFolder.isNotBlank())) { Icon(Icons.Default.Refresh, "扫描", tint = Color.White) }
         })
         OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth(), leadingIcon = { Icon(Icons.Default.Search, null) }, placeholder = { Text("搜索歌曲、艺术家或专辑") }, singleLine = true, shape = RoundedCornerShape(18.dp))
         if (scanState.running || scanState.message != null) {
@@ -1477,8 +1535,8 @@ data class ScanState(
             ScanStatusCard(scanState)
         }
         Spacer(Modifier.height(12.dp))
-        if (folders.isEmpty() && !scanState.running) {
-            EmptyState("选择音乐文件夹", "可以连续选择多个目录，XSTAR 只扫描这些目录中的音频。", "选择文件夹") { folderPicker.launch(null) }
+        if (folders.isEmpty() && songs.isEmpty() && !scanState.running) {
+            EmptyState("选择音乐文件夹", "可以连续选择多个目录，XSTAR 只扫描这些目录中的音频。也可以使用在线搜歌下载音乐。", "选择文件夹") { folderPicker.launch(null) }
         } else {
             val filtered = songs.filter { query.isBlank() || "${it.title}${it.artist}${it.album}".contains(query, true) }
             TabRow(group, containerColor = Color.Transparent) {
@@ -1588,6 +1646,167 @@ data class ScanState(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun PlaylistSheet(vm: MusicViewModel, playlist: PlaylistEntity, close: () -> Unit) { val links by vm.playlistSongs(playlist.id).collectAsStateWithLifecycle(emptyList()); val all by vm.songs.collectAsStateWithLifecycle(); val current = links.mapNotNull { link -> all.find { it.mediaStoreId == link.songId } }; var name by remember { mutableStateOf(playlist.name) }; var add by remember { mutableStateOf(false) }; ModalBottomSheet(onDismissRequest = close, containerColor = Color(0xFF171B23)) { Column(Modifier.padding(20.dp)) { Row(verticalAlignment = Alignment.CenterVertically) { OutlinedTextField(name, { name = it }, Modifier.weight(1f), label = { Text("名称") }); IconButton({ vm.renamePlaylist(playlist.id, name) }) { Icon(Icons.Default.Check, "保存") } }; TextButton({ add = true }) { Icon(Icons.Default.Add, null); Text("添加歌曲") }; SongsList(current, vm) } }; if (add) AlertDialog(onDismissRequest = { add = false }, title = { Text("添加歌曲") }, text = { LazyColumn { items(all.filterNot { it in current }, key = { it.mediaStoreId }) { song -> ListItem(headlineContent = { Text(song.title) }, modifier = Modifier.clickable { vm.addToPlaylist(playlist.id, song.mediaStoreId); add = false }) } } }, confirmButton = { TextButton({ add = false }) { Text("关闭") } }) }
 
+@Composable private fun OnlineScreen(vm: MusicViewModel, openMenu: () -> Unit) {
+    val context = LocalContext.current
+    val enabled by vm.onlineSearchEnabled.collectAsStateWithLifecycle()
+    val platform by vm.onlinePlatform.collectAsStateWithLifecycle()
+    val downloadFolder by vm.downloadFolder.collectAsStateWithLifecycle()
+    val searchState by vm.onlineSearch.collectAsStateWithLifecycle()
+    val downloads by vm.onlineDownloads.collectAsStateWithLifecycle()
+    var query by remember { mutableStateOf("") }
+    var pendingTrack by remember { mutableStateOf<OnlineTrack?>(null) }
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
+            pendingTrack?.let { pending ->
+                vm.setDownloadFolderAndStart(uri.toString(), pending)
+                pendingTrack = null
+            }
+        } else {
+            pendingTrack = null
+        }
+    }
+    fun ensureDownloadFolder(track: OnlineTrack) {
+        if (downloadFolder.isBlank()) {
+            pendingTrack = track
+            folderPicker.launch(null)
+        } else {
+            vm.startOnlineDownload(track)
+        }
+    }
+    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) {
+        PageHeader(openMenu)
+        Text("在线搜歌", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        Text("搜索并下载到本地音乐库，只有你主动搜索时才联网", color = Color(0xFF8F99A9), fontSize = 12.sp)
+        Spacer(Modifier.height(14.dp))
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = enabled,
+            leadingIcon = { Icon(Icons.Default.Search, null) },
+            trailingIcon = {
+                if (query.isNotBlank()) IconButton(onClick = { vm.onlineSearch(query) }, enabled = enabled) {
+                    Icon(Icons.Default.ArrowForward, "搜索")
+                }
+            },
+            placeholder = { Text(if (enabled) "输入歌名、歌手或关键词" else "在线搜歌已在设置中关闭", color = Color(0xFF5B6577)) },
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = { vm.onlineSearch(query) }),
+            shape = RoundedCornerShape(18.dp)
+        )
+        Row(Modifier.horizontalScroll(rememberScrollState()).padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            supportedOnlinePlatforms.forEach { item ->
+                FilterChip(
+                    selected = platform == item.id,
+                    enabled = enabled,
+                    onClick = {
+                        vm.setOnlinePlatform(item.id)
+                        if (searchState is OnlineSearchUiState.Results && query.isNotBlank()) vm.onlineSearch(query)
+                    },
+                    label = { Text(item.label) }
+                )
+            }
+        }
+        when (val state = searchState) {
+            OnlineSearchUiState.Idle -> if (!enabled) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("在线搜歌下载已在设置中关闭", color = Color(0xFF8F99A9))
+                }
+            } else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(bottom = 60.dp)) {
+                    Icon(Icons.Default.CloudDownload, null, Modifier.size(56.dp), tint = Color(0xFF65738A))
+                    Spacer(Modifier.height(14.dp))
+                    Text("搜索你喜欢的歌曲", color = Color(0xFFB8C1CF))
+                    Text("下载完成后会自动出现在音乐库", color = Color(0xFF65738A), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                }
+            }
+            OnlineSearchUiState.Searching -> if (!enabled) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("在线搜歌下载已在设置中关闭", color = Color(0xFF8F99A9))
+                }
+            } else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            is OnlineSearchUiState.Error -> if (!enabled) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("在线搜歌下载已在设置中关闭", color = Color(0xFF8F99A9))
+                }
+            } else Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(28.dp)) {
+                    Text(state.message, color = Color(0xFFFF8A96), textAlign = TextAlign.Center)
+                    Spacer(Modifier.height(14.dp))
+                    Button(onClick = { vm.onlineSearch(query) }, enabled = query.isNotBlank()) { Text("重试") }
+                }
+            }
+            is OnlineSearchUiState.Results -> if (!enabled) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("在线搜歌下载已在设置中关闭", color = Color(0xFF8F99A9))
+                }
+            } else LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
+                items(state.tracks, key = { it.onlineId }) { track ->
+                    val downloadState = downloads[track.onlineId]
+                    OnlineTrackRow(
+                        track = track,
+                        downloadState = downloadState,
+                        onDownload = { ensureDownloadFolder(track) },
+                        onCancel = { vm.cancelOnlineDownload(track.onlineId) },
+                        onPlay = { vm.playOnlineDownloaded(track.onlineId) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable private fun OnlineTrackRow(
+    track: OnlineTrack,
+    downloadState: OnlineDownloadState?,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    onPlay: () -> Unit
+) {
+    val downloading = downloadState is OnlineDownloadState.DownloadingPercent
+    val failed = downloadState is OnlineDownloadState.Failed
+    val done = downloadState == OnlineDownloadState.Done
+    val percent = (downloadState as? OnlineDownloadState.DownloadingPercent)?.percent
+    ListItem(
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        headlineContent = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(track.title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                if (done) Spacer(Modifier.width(6.dp))
+            }
+        },
+        supportingContent = {
+            if (failed) Text((downloadState as OnlineDownloadState.Failed).message, color = Color(0xFFFF8A96), maxLines = 2)
+            else Text("${platformLabel(track.platform)} · ${track.artist}", color = Color(0xFF8F99A9), maxLines = 1, overflow = TextOverflow.Ellipsis)
+        },
+        leadingContent = {
+            Surface(Modifier.size(48.dp), RoundedCornerShape(13.dp), color = Color(0xFF252C38)) {
+                DefaultArtwork(Color(0xFF2E3649))
+            }
+        },
+        trailingContent = {
+            when {
+                downloading -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(percent?.let { "$it%" } ?: "…", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    IconButton(onClick = onCancel, Modifier.size(34.dp)) { Icon(Icons.Default.Close, "取消下载", tint = Color(0xFFB3BDCC), modifier = Modifier.size(18.dp)) }
+                }
+                done -> IconButton(onClick = onPlay) { Icon(Icons.Default.CheckCircle, "已下载，点击播放", tint = Color(0xFF55D6A9)) }
+                failed -> IconButton(onClick = onDownload) { Icon(Icons.Default.Refresh, "下载失败，点击重试", tint = Color(0xFFFF8A96)) }
+                else -> IconButton(onClick = onDownload) { Icon(Icons.Default.Download, "下载", tint = Color(0xFFB3BDCC)) }
+            }
+        },
+        modifier = Modifier.clickable {
+            when {
+                done -> onPlay()
+                downloading -> onCancel()
+                else -> onDownload()
+            }
+        }
+    )
+}
+
 @Composable private fun EqualizerScreen(vm: MusicViewModel, openMenu: () -> Unit) {
     val state by vm.equalizerState.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { vm.refreshEqualizer() }
@@ -1672,12 +1891,68 @@ data class ScanState(
     val folders by vm.folders.collectAsStateWithLifecycle()
     val beatEffect by vm.beatEffect.collectAsStateWithLifecycle()
     val onlineArtwork by vm.onlineArtworkEnabled.collectAsStateWithLifecycle()
+    val onlineSearch by vm.onlineSearchEnabled.collectAsStateWithLifecycle()
+    val onlinePlatform by vm.onlinePlatform.collectAsStateWithLifecycle()
+    val onlineApiBase by vm.onlineApiBase.collectAsStateWithLifecycle()
+    val downloadFolder by vm.downloadFolder.collectAsStateWithLifecycle()
     val scanState by vm.scanState.collectAsStateWithLifecycle()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let { runCatching { context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }; vm.addFolder(it.toString()) }
     }
+    val downloadPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
+            vm.setDownloadFolder(uri.toString())
+        }
+    }
+    val canScan = folders.isNotEmpty() || downloadFolder.isNotBlank()
     Column(Modifier.fillMaxSize().systemBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
         PageHeader(openMenu)
+        Text("在线搜歌下载", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
+        ListItem(
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            headlineContent = { Text("允许在线搜索并下载", color = Color.White) },
+            supportingContent = { Text("搜索关键词会发送到公共音乐聚合服务，仅在你主动搜索时发生", color = Color.Gray) },
+            leadingContent = { Icon(Icons.Default.CloudDownload, null) },
+            trailingContent = { Switch(checked = onlineSearch, onCheckedChange = vm::setOnlineSearchEnabled) }
+        )
+        Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            supportedOnlinePlatforms.forEach { platform ->
+                FilterChip(
+                    selected = onlinePlatform == platform.id,
+                    enabled = onlineSearch,
+                    onClick = { vm.setOnlinePlatform(platform.id) },
+                    label = { Text(platform.label) }
+                )
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        ListItem(
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            headlineContent = { Text("下载目录", color = Color.White) },
+            supportingContent = {
+                Text(
+                    if (downloadFolder.isBlank()) "未设置，下载前请选择一个文件夹" else folderName(downloadFolder),
+                    color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
+            },
+            leadingContent = { Icon(Icons.Default.Save, null) },
+            trailingContent = {
+                if (downloadFolder.isNotBlank()) IconButton({ vm.setDownloadFolder(null) }) { Icon(Icons.Default.Close, "清除下载目录") }
+            },
+            modifier = Modifier.clickable { downloadPicker.launch(null) }
+        )
+        OutlinedTextField(
+            value = onlineApiBase,
+            onValueChange = vm::setOnlineApiBase,
+            enabled = onlineSearch,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+            label = { Text("自定义服务地址（可选）", color = Color(0xFF8F99A9)) },
+            placeholder = { Text("留空使用公共实例", color = Color(0xFF5B6577)) },
+            singleLine = true,
+            shape = RoundedCornerShape(14.dp)
+        )
+        HorizontalDivider(color = Color.White.copy(alpha = .07f), modifier = Modifier.padding(vertical = 10.dp))
         ListItem(
             colors = ListItemDefaults.colors(containerColor = Color.Transparent),
             headlineContent = { Text("允许获取在线专辑封面", color = Color.White) },
@@ -1721,7 +1996,7 @@ data class ScanState(
             },
             leadingContent = { Icon(if (scanState.running) Icons.Default.Radar else Icons.Default.Refresh, null) },
             trailingContent = { if (scanState.running) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp) },
-            modifier = Modifier.clickable(enabled = !scanState.running && folders.isNotEmpty()) { vm.scan() }
+            modifier = Modifier.clickable(enabled = !scanState.running && canScan) { vm.scan() }
         )
         ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("XSTAR", color = Color.White) }, supportingContent = { Text("本地音乐播放器 · 0.1.0", color = Color.Gray) }, leadingContent = { Icon(Icons.Default.Info, null) })
     }
