@@ -24,6 +24,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
@@ -99,6 +100,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val favorites = repo.favorites().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val playlists = repo.playlists().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val playback = player.state
+    val equalizerState = player.equalizerState
     private val _scanState = MutableStateFlow(ScanState())
     val scanState = _scanState.asStateFlow()
     private var scanJob: Job? = null
@@ -304,6 +306,11 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         sleepTimerJob = null
         _sleepTimerRemaining.value = null
     }
+    fun refreshEqualizer() = player.refreshEqualizer()
+    fun setEqualizerEnabled(enabled: Boolean) = player.setEqualizerEnabled(enabled)
+    fun useEqualizerPreset(index: Int) = player.useEqualizerPreset(index)
+    fun setEqualizerBand(index: Int, levelMb: Int) = player.setEqualizerBand(index, levelMb)
+    fun resetEqualizer() = player.resetEqualizer()
     private suspend fun restoreSongs(saved: life.xstar.music.player.data.preferences.SavedPlayback): RestoredQueue {
         val songs = repo.findByIds(saved.queue)
         val currentId = saved.queue.getOrNull(saved.index)
@@ -327,7 +334,7 @@ data class ScanState(
     val failed: Boolean = false
 )
 
-private enum class Screen(val title: String) { Player("正在播放"), Library("音乐库"), Favorites("我的收藏"), Playlists("播放列表"), Settings("设置") }
+private enum class Screen(val title: String) { Player("正在播放"), Library("音乐库"), Favorites("我的收藏"), Playlists("播放列表"), Equalizer("均衡器"), Settings("设置") }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun XstarApp(vm: MusicViewModel) {
@@ -344,7 +351,7 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
         ModalDrawerSheet(drawerContainerColor = Color(0xFF10131A)) {
             Column(Modifier.fillMaxHeight().width(300.dp).padding(horizontal = 16.dp)) {
                 Spacer(Modifier.height(44.dp)); Text("XSTAR", fontSize = 30.sp, fontWeight = FontWeight.Black, color = Color.White); Text("YOUR MUSIC. YOUR SPACE.", color = Color(0xFF7E8A9A), fontSize = 11.sp); Spacer(Modifier.height(34.dp))
-                listOf(Screen.Player to Icons.Default.Headphones, Screen.Library to Icons.Default.LibraryMusic, Screen.Favorites to Icons.Default.Favorite, Screen.Playlists to Icons.Default.QueueMusic, Screen.Settings to Icons.Default.Settings).forEach { item ->
+                listOf(Screen.Player to Icons.Default.Headphones, Screen.Library to Icons.Default.LibraryMusic, Screen.Favorites to Icons.Default.Favorite, Screen.Playlists to Icons.Default.QueueMusic, Screen.Equalizer to Icons.Default.Equalizer, Screen.Settings to Icons.Default.Settings).forEach { item ->
                     NavigationDrawerItem(label = { Text(item.first.title) }, icon = { Icon(item.second, null) }, selected = screen == item.first, onClick = { screen = item.first; scope.launch { drawerState.close() } }, modifier = Modifier.padding(vertical = 3.dp))
                 }
                 Spacer(Modifier.height(16.dp))
@@ -403,6 +410,7 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
                 Screen.Library -> LibraryScreen(vm) { scope.launch { drawerState.open() } }
                 Screen.Favorites -> CollectionScreen(vm.favorites.collectAsStateWithLifecycle().value, vm) { scope.launch { drawerState.open() } }
                 Screen.Playlists -> PlaylistsScreen(vm) { scope.launch { drawerState.open() } }
+                Screen.Equalizer -> EqualizerScreen(vm) { scope.launch { drawerState.open() } }
                 Screen.Settings -> SettingsScreen(vm) { scope.launch { drawerState.open() } }
             } }
         }
@@ -994,6 +1002,85 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun PlaylistSheet(vm: MusicViewModel, playlist: PlaylistEntity, close: () -> Unit) { val links by vm.playlistSongs(playlist.id).collectAsStateWithLifecycle(emptyList()); val all by vm.songs.collectAsStateWithLifecycle(); val current = links.mapNotNull { link -> all.find { it.mediaStoreId == link.songId } }; var name by remember { mutableStateOf(playlist.name) }; var add by remember { mutableStateOf(false) }; ModalBottomSheet(onDismissRequest = close, containerColor = Color(0xFF171B23)) { Column(Modifier.padding(20.dp)) { Row(verticalAlignment = Alignment.CenterVertically) { OutlinedTextField(name, { name = it }, Modifier.weight(1f), label = { Text("名称") }); IconButton({ vm.renamePlaylist(playlist.id, name) }) { Icon(Icons.Default.Check, "保存") } }; TextButton({ add = true }) { Icon(Icons.Default.Add, null); Text("添加歌曲") }; SongsList(current, vm) } }; if (add) AlertDialog(onDismissRequest = { add = false }, title = { Text("添加歌曲") }, text = { LazyColumn { items(all.filterNot { it in current }, key = { it.mediaStoreId }) { song -> ListItem(headlineContent = { Text(song.title) }, modifier = Modifier.clickable { vm.addToPlaylist(playlist.id, song.mediaStoreId); add = false }) } } }, confirmButton = { TextButton({ add = false }) { Text("关闭") } }) }
 
+@Composable private fun EqualizerScreen(vm: MusicViewModel, openMenu: () -> Unit) {
+    val state by vm.equalizerState.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { vm.refreshEqualizer() }
+    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) {
+        PageHeader(openMenu)
+        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("均衡器", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    when {
+                        !state.available -> "当前设备不支持"
+                        !state.ready -> "播放歌曲后自动初始化"
+                        else -> "${state.bands.size} 段 · ${formatDb(state.bands.firstOrNull()?.minLevelMb ?: 0)} 至 ${formatDb(state.bands.firstOrNull()?.maxLevelMb ?: 0)}"
+                    },
+                    color = Color(0xFF8F99A9),
+                    fontSize = 13.sp
+                )
+            }
+            Switch(checked = state.enabled, enabled = state.ready, onCheckedChange = vm::setEqualizerEnabled)
+        }
+        state.error?.let {
+            Surface(Modifier.fillMaxWidth().padding(vertical = 10.dp), shape = RoundedCornerShape(14.dp), color = Color(0xFFFF8A96).copy(alpha = .12f)) {
+                Text(it, color = Color(0xFFFFA5AE), modifier = Modifier.padding(14.dp))
+            }
+        }
+        if (!state.ready) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(Icons.Default.Equalizer, null, Modifier.size(64.dp), tint = Color(0xFF65738A))
+                    Spacer(Modifier.height(18.dp))
+                    Text(if (state.available) "请先播放一首歌曲" else "无法使用系统均衡器", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                    Text(if (state.available) "音频 Session 建立后即可调整音效" else "此设备或当前音频输出不提供均衡器", color = Color.Gray, modifier = Modifier.padding(top = 8.dp))
+                    TextButton(onClick = vm::refreshEqualizer, modifier = Modifier.padding(top = 8.dp)) { Text("重新检测") }
+                }
+            }
+        } else {
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 18.dp)) {
+                Text("预设", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(horizontal = 8.dp))
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(selected = state.selectedPreset == null, onClick = vm::resetEqualizer, enabled = state.enabled, label = { Text("自定义") })
+                    state.presets.forEach { preset ->
+                        FilterChip(selected = state.selectedPreset == preset.index, onClick = { vm.useEqualizerPreset(preset.index) }, enabled = state.enabled, label = { Text(preset.name) })
+                    }
+                }
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp), color = Color.White.copy(alpha = .06f)) {
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                        state.bands.forEach { band ->
+                            EqualizerBandControl(band, state.enabled) { vm.setEqualizerBand(band.index, it) }
+                            if (band != state.bands.last()) HorizontalDivider(color = Color.White.copy(alpha = .07f))
+                        }
+                    }
+                }
+                Row(Modifier.fillMaxWidth().padding(top = 14.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text("提升多个频段可能造成失真", color = Color(0xFF818C9C), fontSize = 12.sp)
+                    TextButton(onClick = vm::resetEqualizer, enabled = state.enabled) { Icon(Icons.Default.RestartAlt, null, Modifier.size(18.dp)); Spacer(Modifier.width(5.dp)); Text("重置") }
+                }
+                Spacer(Modifier.height(24.dp))
+            }
+        }
+    }
+}
+
+@Composable private fun EqualizerBandControl(band: EqualizerBand, enabled: Boolean, onLevelChange: (Int) -> Unit) {
+    var level by remember(band.index, band.levelMb) { mutableFloatStateOf(band.levelMb.toFloat()) }
+    Column(Modifier.fillMaxWidth().padding(vertical = 11.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(formatFrequency(band.centerFrequencyHz), color = Color.White, fontWeight = FontWeight.SemiBold)
+            Text(formatDb(level.roundToInt()), color = if (level > 600) Color(0xFFFFBE5C) else MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        }
+        Slider(
+            value = level,
+            onValueChange = { level = it; onLevelChange(it.roundToInt()) },
+            valueRange = band.minLevelMb.toFloat()..band.maxLevelMb.toFloat(),
+            enabled = enabled,
+            modifier = Modifier.fillMaxWidth()
+        )
+    }
+}
+
 @Composable private fun SettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) {
     val context = LocalContext.current
     val folders by vm.folders.collectAsStateWithLifecycle()
@@ -1056,6 +1143,11 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
 @Composable private fun EmptyState(title: String, text: String, action: String, click: () -> Unit) { Column(Modifier.fillMaxWidth().padding(42.dp), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Default.LibraryMusic, null, Modifier.size(58.dp), tint = Color(0xFF65738A)); Spacer(Modifier.height(18.dp)); Text(title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold); Text(text, color = Color.Gray, modifier = Modifier.padding(vertical = 12.dp)); Button(click) { Text(action) } } }
 private fun PlaybackMode.next() = when (this) { PlaybackMode.Sequential -> PlaybackMode.Shuffle; PlaybackMode.Shuffle -> PlaybackMode.RepeatOne; PlaybackMode.RepeatOne -> PlaybackMode.Sequential }
 private fun time(ms: Long) = "%d:%02d".format(ms.coerceAtLeast(0) / 60_000, (ms.coerceAtLeast(0) / 1_000) % 60)
+private fun formatDb(levelMb: Int): String = if (levelMb == 0) "0 dB" else "%+.1f dB".format(levelMb / 100f)
+private fun formatFrequency(frequencyHz: Int): String = if (frequencyHz >= 1_000) {
+    val kiloHertz = frequencyHz / 1_000f
+    if (kiloHertz % 1f == 0f) "${kiloHertz.toInt()} kHz" else "%.1f kHz".format(kiloHertz)
+} else "$frequencyHz Hz"
 private fun qualityLabel(value: String): String = runCatching { AudioQuality.valueOf(value) }.getOrDefault(AudioQuality.Standard).let { quality -> when (quality) { AudioQuality.Standard -> "普通"; AudioQuality.High -> "高清"; AudioQuality.Lossless -> "无损"; AudioQuality.HiRes -> "Hi-Res" } }
 private fun formatName(mime: String?) = mime?.substringAfter('/')?.uppercase()?.replace("MPEG", "MP3") ?: "AUDIO"
 private fun folderName(uri: String) = Uri.parse(uri).lastPathSegment?.substringAfterLast(':')?.ifBlank { "音乐文件夹" } ?: "音乐文件夹"

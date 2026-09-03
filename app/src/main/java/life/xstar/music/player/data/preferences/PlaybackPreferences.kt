@@ -10,6 +10,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
+import life.xstar.music.player.player.EqualizerSettings
 
 private val Context.playbackDataStore by preferencesDataStore("playback")
 
@@ -29,6 +30,9 @@ class PlaybackPreferences(private val context: Context) {
     private val fmIndexKey = longPreferencesKey("fm_queue_index")
     private val fmPositionKey = longPreferencesKey("fm_position_ms")
     private val fmWasPlayingKey = booleanPreferencesKey("fm_was_playing")
+    private val equalizerEnabledKey = booleanPreferencesKey("equalizer_enabled")
+    private val equalizerPresetKey = longPreferencesKey("equalizer_preset")
+    private val equalizerLevelsKey = stringPreferencesKey("equalizer_levels")
 
     val folders: Flow<Set<String>> = context.playbackDataStore.data.map { it[foldersKey].orEmpty() }
     val theme: Flow<ThemeAccent> = context.playbackDataStore.data.map { values ->
@@ -92,6 +96,24 @@ class PlaybackPreferences(private val context: Context) {
     suspend fun setBeatEffect(enabled: Boolean) = context.playbackDataStore.edit { it[beatEffectKey] = enabled }
     suspend fun setOnlineArtworkEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineArtworkKey] = enabled }
     suspend fun setOnlineLyricsEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineLyricsKey] = enabled }
+
+    suspend fun readEqualizer(): EqualizerSettings {
+        val values = context.playbackDataStore.data.first()
+        return EqualizerSettings(
+            enabled = values[equalizerEnabledKey] ?: false,
+            preset = values[equalizerPresetKey]?.toInt()?.takeIf { it >= 0 },
+            levelsByFrequency = values[equalizerLevelsKey].orEmpty().split(',').mapNotNull { entry ->
+                val parts = entry.split(':')
+                if (parts.size == 2) parts[0].toIntOrNull()?.let { frequency -> parts[1].toIntOrNull()?.let { frequency to it } } else null
+            }.toMap()
+        )
+    }
+
+    suspend fun saveEqualizer(settings: EqualizerSettings) = context.playbackDataStore.edit { values ->
+        values[equalizerEnabledKey] = settings.enabled
+        values[equalizerPresetKey] = (settings.preset ?: -1).toLong()
+        values[equalizerLevelsKey] = settings.levelsByFrequency.entries.joinToString(",") { "${it.key}:${it.value}" }
+    }
 }
 
 private fun String?.toIds() = orEmpty().split(',').mapNotNull { it.toLongOrNull() }

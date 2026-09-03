@@ -3,13 +3,17 @@ package life.xstar.music.player.player
 import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
+import android.os.Bundle
 import java.io.File
+import androidx.core.os.bundleOf
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Player
 import androidx.media3.common.PlaybackException
 import androidx.media3.session.MediaController
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionResult
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CoroutineScope
@@ -31,6 +35,8 @@ class PlayerController(context: Context) {
     private var listenerAttached = false
     private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state.asStateFlow()
+    private val _equalizerState = MutableStateFlow(EqualizerState())
+    val equalizerState: StateFlow<EqualizerState> = _equalizerState.asStateFlow()
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) { _state.value = _state.value.copy(playing = isPlaying) }
         override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
@@ -47,8 +53,24 @@ class PlayerController(context: Context) {
             if (controller.hasNextMediaItem()) controller.seekToNextMediaItem()
         }
     }
+    private val controllerListener = object : MediaController.Listener {
+        override fun onCustomCommand(controller: MediaController, command: SessionCommand, args: Bundle): ListenableFuture<SessionResult> {
+            if (command.customAction == EqualizerCommands.STATE_CHANGED) _equalizerState.value = equalizerStateFromBundle(args)
+            return com.google.common.util.concurrent.Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+        }
+    }
     private val controllerFuture: ListenableFuture<MediaController> =
-        MediaController.Builder(context, SessionToken(context, ComponentName(context, PlaybackService::class.java))).buildAsync()
+        MediaController.Builder(context, SessionToken(context, ComponentName(context, PlaybackService::class.java)))
+            .setListener(controllerListener)
+            .buildAsync()
+
+    init {
+        controllerFuture.addListener({
+            val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
+            attachListener(controller)
+            refreshEqualizer()
+        }, executor)
+    }
 
     fun play(song: SongEntity) = playQueue(listOf(song), 0)
 
@@ -143,6 +165,15 @@ class PlayerController(context: Context) {
         _state.value = _state.value.copy(mode = mode)
     }, executor)
 
+    fun refreshEqualizer() = sendEqualizerCommand(EqualizerCommands.GET_STATE)
+    fun setEqualizerEnabled(enabled: Boolean) = sendEqualizerCommand(EqualizerCommands.SET_ENABLED, bundleOf(EqualizerCommands.KEY_ENABLED to enabled))
+    fun useEqualizerPreset(index: Int) = sendEqualizerCommand(EqualizerCommands.USE_PRESET, bundleOf(EqualizerCommands.KEY_PRESET to index))
+    fun setEqualizerBand(index: Int, levelMb: Int) = sendEqualizerCommand(
+        EqualizerCommands.SET_BAND,
+        bundleOf(EqualizerCommands.KEY_BAND to index, EqualizerCommands.KEY_LEVEL to levelMb)
+    )
+    fun resetEqualizer() = sendEqualizerCommand(EqualizerCommands.RESET)
+
     fun release() { progressJob?.cancel(); scope.cancel(); if (controllerFuture.isDone) controllerFuture.get().removeListener(listener); MediaController.releaseFuture(controllerFuture) }
 
     private fun attachListener(controller: MediaController) {
@@ -170,6 +201,20 @@ class PlayerController(context: Context) {
                 delay(500)
             }
         }
+    }
+
+    private fun sendEqualizerCommand(action: String, args: Bundle = Bundle.EMPTY) {
+        controllerFuture.addListener({
+            val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
+            val command = SessionCommand(action, Bundle.EMPTY)
+            if (!controller.isSessionCommandAvailable(command)) return@addListener
+            val result = controller.sendCustomCommand(command, args)
+            result.addListener({
+                val response = runCatching { result.get() }.getOrNull() ?: return@addListener
+                if (response.resultCode == SessionResult.RESULT_SUCCESS) _equalizerState.value = equalizerStateFromBundle(response.extras)
+                else _equalizerState.value = _equalizerState.value.copy(error = "均衡器操作失败")
+            }, executor)
+        }, executor)
     }
 
     private fun SongEntity.toMediaItem() = MediaItem.Builder()
