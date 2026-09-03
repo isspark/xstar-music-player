@@ -7,6 +7,7 @@ import android.os.SystemClock
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import android.os.Bundle
+import androidx.activity.compose.BackHandler
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -63,6 +64,9 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.*
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation3.runtime.NavKey
+import androidx.navigation3.runtime.entryProvider
+import androidx.navigation3.ui.NavDisplay
 import androidx.palette.graphics.Palette
 import coil.compose.SubcomposeAsyncImage
 import kotlinx.coroutines.flow.*
@@ -82,6 +86,7 @@ import life.xstar.music.player.data.repository.ScanProgress
 import life.xstar.music.player.data.lyrics.LyricsRepository
 import life.xstar.music.player.data.lyrics.LyricsState
 import life.xstar.music.player.data.lyrics.LyricsCandidate
+import life.xstar.music.player.navigation.*
 import life.xstar.music.player.player.*
 
 class MainActivity : ComponentActivity() {
@@ -334,25 +339,41 @@ data class ScanState(
     val failed: Boolean = false
 )
 
-private enum class Screen(val title: String) { Player("正在播放"), Library("音乐库"), Favorites("我的收藏"), Playlists("播放列表"), Equalizer("均衡器"), Settings("设置") }
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun XstarApp(vm: MusicViewModel) {
+    val navigationState = rememberNavigationState(startRoute, topLevelRoutes)
+    val navigator = remember { Navigator(navigationState) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-    var screen by remember { mutableStateOf(Screen.Player) }
     val theme by vm.theme.collectAsStateWithLifecycle()
     val sleepTimerRemaining by vm.sleepTimerRemaining.collectAsStateWithLifecycle()
     val fmMode by vm.fmModeEnabled.collectAsStateWithLifecycle()
     val songs by vm.songs.collectAsStateWithLifecycle()
     val accent = theme.color()
-    LaunchedEffect(vm) { vm.openPlayer.collect { screen = Screen.Player; drawerState.close() } }
+    LaunchedEffect(vm) { vm.openPlayer.collect { navigator.navigate(PlayerRoute); drawerState.close() } }
+    val openMenu: () -> Unit = { scope.launch { drawerState.open() } }
+    val entryProvider = entryProvider<NavKey> {
+        entry<PlayerRoute> { PlayerScreen(vm, openMenu) }
+        entry<LibraryRoute> { LibraryScreen(vm, openMenu) }
+        entry<FavoritesRoute> { CollectionScreen(vm.favorites.collectAsStateWithLifecycle().value, vm, openMenu, goToLibrary = { navigator.navigate(LibraryRoute) }) }
+        entry<PlaylistsRoute> { PlaylistsScreen(vm, openMenu) }
+        entry<EqualizerRoute> { EqualizerScreen(vm, openMenu) }
+        entry<SettingsRoute> { SettingsScreen(vm, openMenu) }
+    }
+    val drawerRoutes = listOf(
+        PlayerRoute to (Icons.Default.Headphones to "正在播放"),
+        LibraryRoute to (Icons.Default.LibraryMusic to "音乐库"),
+        FavoritesRoute to (Icons.Default.Favorite to "我的收藏"),
+        PlaylistsRoute to (Icons.Default.QueueMusic to "播放列表"),
+        EqualizerRoute to (Icons.Default.Equalizer to "均衡器"),
+        SettingsRoute to (Icons.Default.Settings to "设置")
+    )
     ModalNavigationDrawer(drawerState = drawerState, gesturesEnabled = true, drawerContent = {
         ModalDrawerSheet(drawerContainerColor = Color(0xFF10131A)) {
             Column(Modifier.fillMaxHeight().width(300.dp).padding(horizontal = 16.dp)) {
                 Spacer(Modifier.height(44.dp)); Text("XSTAR", fontSize = 30.sp, fontWeight = FontWeight.Black, color = Color.White); Text("YOUR MUSIC. YOUR SPACE.", color = Color(0xFF7E8A9A), fontSize = 11.sp); Spacer(Modifier.height(34.dp))
-                listOf(Screen.Player to Icons.Default.Headphones, Screen.Library to Icons.Default.LibraryMusic, Screen.Favorites to Icons.Default.Favorite, Screen.Playlists to Icons.Default.QueueMusic, Screen.Equalizer to Icons.Default.Equalizer, Screen.Settings to Icons.Default.Settings).forEach { item ->
-                    NavigationDrawerItem(label = { Text(item.first.title) }, icon = { Icon(item.second, null) }, selected = screen == item.first, onClick = { screen = item.first; scope.launch { drawerState.close() } }, modifier = Modifier.padding(vertical = 3.dp))
+                drawerRoutes.forEach { (route, item) ->
+                    NavigationDrawerItem(label = { Text(item.second) }, icon = { Icon(item.first, null) }, selected = route == navigationState.topLevelRoute, onClick = { navigator.navigate(route); scope.launch { drawerState.close() } }, modifier = Modifier.padding(vertical = 3.dp))
                 }
                 Spacer(Modifier.height(16.dp))
                 Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = .06f)) {
@@ -405,14 +426,12 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
         }
     }) {
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(accent.copy(alpha = .22f), Color(0xFF090B10)), endY = 1100f))) {
-            AnimatedContent(screen, label = "screen") { destination -> when (destination) {
-                Screen.Player -> PlayerScreen(vm) { scope.launch { drawerState.open() } }
-                Screen.Library -> LibraryScreen(vm) { scope.launch { drawerState.open() } }
-                Screen.Favorites -> CollectionScreen(vm.favorites.collectAsStateWithLifecycle().value, vm) { scope.launch { drawerState.open() } }
-                Screen.Playlists -> PlaylistsScreen(vm) { scope.launch { drawerState.open() } }
-                Screen.Equalizer -> EqualizerScreen(vm) { scope.launch { drawerState.open() } }
-                Screen.Settings -> SettingsScreen(vm) { scope.launch { drawerState.open() } }
-            } }
+            NavDisplay(
+                entries = navigationState.toDecoratedEntries(entryProvider),
+                onBack = { navigator.goBack() },
+                modifier = Modifier.fillMaxSize()
+            )
+            BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
         }
     }
 }
@@ -937,7 +956,7 @@ private enum class Screen(val title: String) { Player("正在播放"), Library("
     }
 }
 
-@Composable private fun CollectionScreen(songs: List<SongEntity>, vm: MusicViewModel, openMenu: () -> Unit) { Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) { PageHeader(openMenu); if (songs.isEmpty()) EmptyState("还没有收藏", "在歌曲右侧点击爱心即可收藏。", "前往音乐库") {} else SongsList(songs, vm) } }
+@Composable private fun CollectionScreen(songs: List<SongEntity>, vm: MusicViewModel, openMenu: () -> Unit, goToLibrary: () -> Unit) { Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) { PageHeader(openMenu); if (songs.isEmpty()) EmptyState("还没有收藏", "在歌曲右侧点击爱心即可收藏。", "前往音乐库", goToLibrary) else SongsList(songs, vm) } }
 @Composable private fun SongsList(songs: List<SongEntity>, vm: MusicViewModel) { LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 10.dp)) { items(songs, key = { it.mediaStoreId }) { song -> ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(song.title, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) }, supportingContent = { Text("${song.artist} · ${formatName(song.mimeType)}", color = Color(0xFF8F99A9)) }, leadingContent = { Surface(Modifier.size(48.dp), RoundedCornerShape(13.dp), color = Color(0xFF252C38)) { ArtworkImage(song.albumArtUri, Color(0xFF252C38)) } }, trailingContent = { IconButton({ vm.favorite(song.mediaStoreId) }) { Icon(if (song.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, "收藏", tint = if (song.isFavorite) Color(0xFFFF708C) else Color.Gray) } }, modifier = Modifier.clickable { vm.play(song, songs) }) } } }
 
 @Composable private fun ArtworkImage(uri: String?, tint: Color) {
