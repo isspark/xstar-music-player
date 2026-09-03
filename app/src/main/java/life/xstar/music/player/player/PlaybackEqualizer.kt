@@ -1,8 +1,11 @@
 package life.xstar.music.player.player
 
 import android.media.audiofx.Equalizer
+import androidx.annotation.OptIn
 import androidx.media3.common.C
+import androidx.media3.common.util.UnstableApi
 
+@OptIn(UnstableApi::class)
 class PlaybackEqualizer(private val onStateChanged: (EqualizerState) -> Unit) {
     private var effect: Equalizer? = null
     private var settings = EqualizerSettings()

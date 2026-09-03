@@ -37,6 +37,8 @@ class PlayerController(context: Context) {
     val state: StateFlow<PlayerState> = _state.asStateFlow()
     private val _equalizerState = MutableStateFlow(EqualizerState())
     val equalizerState: StateFlow<EqualizerState> = _equalizerState.asStateFlow()
+    private val _karaokeState = MutableStateFlow(KaraokeState())
+    val karaokeState: StateFlow<KaraokeState> = _karaokeState.asStateFlow()
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) { _state.value = _state.value.copy(playing = isPlaying) }
         override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
@@ -55,7 +57,10 @@ class PlayerController(context: Context) {
     }
     private val controllerListener = object : MediaController.Listener {
         override fun onCustomCommand(controller: MediaController, command: SessionCommand, args: Bundle): ListenableFuture<SessionResult> {
-            if (command.customAction == EqualizerCommands.STATE_CHANGED) _equalizerState.value = equalizerStateFromBundle(args)
+            when (command.customAction) {
+                EqualizerCommands.STATE_CHANGED -> _equalizerState.value = equalizerStateFromBundle(args)
+                KaraokeCommands.STATE_CHANGED -> _karaokeState.value = karaokeStateFromBundle(args)
+            }
             return com.google.common.util.concurrent.Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
         }
     }
@@ -69,6 +74,7 @@ class PlayerController(context: Context) {
             val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
             attachListener(controller)
             refreshEqualizer()
+            refreshKaraoke()
         }, executor)
     }
 
@@ -174,6 +180,11 @@ class PlayerController(context: Context) {
     )
     fun resetEqualizer() = sendEqualizerCommand(EqualizerCommands.RESET)
 
+    fun refreshKaraoke() = sendKaraokeCommand(KaraokeCommands.GET_STATE)
+    fun setKaraokeEnabled(enabled: Boolean) = sendKaraokeCommand(KaraokeCommands.SET_ENABLED, bundleOf(KaraokeCommands.KEY_ENABLED to enabled))
+    fun setKaraokeVocal(value: Float) = sendKaraokeCommand(KaraokeCommands.SET_VOCAL, bundleOf(KaraokeCommands.KEY_VOCAL to value))
+    fun setKaraokePitch(semi: Int) = sendKaraokeCommand(KaraokeCommands.SET_PITCH, bundleOf(KaraokeCommands.KEY_PITCH to semi))
+
     fun release() { progressJob?.cancel(); scope.cancel(); if (controllerFuture.isDone) controllerFuture.get().removeListener(listener); MediaController.releaseFuture(controllerFuture) }
 
     private fun attachListener(controller: MediaController) {
@@ -201,6 +212,20 @@ class PlayerController(context: Context) {
                 delay(500)
             }
         }
+    }
+
+    private fun sendKaraokeCommand(action: String, args: Bundle = Bundle.EMPTY) {
+        controllerFuture.addListener({
+            val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
+            val command = SessionCommand(action, Bundle.EMPTY)
+            if (!controller.isSessionCommandAvailable(command)) return@addListener
+            val result = controller.sendCustomCommand(command, args)
+            result.addListener({
+                val response = runCatching { result.get() }.getOrNull() ?: return@addListener
+                if (response.resultCode == SessionResult.RESULT_SUCCESS) _karaokeState.value = karaokeStateFromBundle(response.extras)
+                else _karaokeState.value = _karaokeState.value.copy(error = "卡拉OK音效操作失败")
+            }, executor)
+        }, executor)
     }
 
     private fun sendEqualizerCommand(action: String, args: Bundle = Bundle.EMPTY) {

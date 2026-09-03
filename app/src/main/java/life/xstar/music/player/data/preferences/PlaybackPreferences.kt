@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
 import life.xstar.music.player.player.EqualizerSettings
+import life.xstar.music.player.player.KaraokeSettings
 
 private val Context.playbackDataStore by preferencesDataStore("playback")
 
@@ -30,6 +31,9 @@ class PlaybackPreferences(private val context: Context) {
     private val fmIndexKey = longPreferencesKey("fm_queue_index")
     private val fmPositionKey = longPreferencesKey("fm_position_ms")
     private val fmWasPlayingKey = booleanPreferencesKey("fm_was_playing")
+    private val karaokeEnabledKey = booleanPreferencesKey("karaoke_enabled")
+    private val karaokeVocalKey = stringPreferencesKey("karaoke_vocal")
+    private val karaokePitchKey = longPreferencesKey("karaoke_pitch")
     private val equalizerEnabledKey = booleanPreferencesKey("equalizer_enabled")
     private val equalizerPresetKey = longPreferencesKey("equalizer_preset")
     private val equalizerLevelsKey = stringPreferencesKey("equalizer_levels")
@@ -42,6 +46,7 @@ class PlaybackPreferences(private val context: Context) {
     val onlineArtworkEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[onlineArtworkKey] ?: true }
     val onlineLyricsEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[onlineLyricsKey] ?: true }
     val fmModeEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[fmModeKey] ?: false }
+    val karaokeModeEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[karaokeEnabledKey] ?: false }
 
     suspend fun save(queue: List<Long>, index: Int, position: Long, mode: String, playing: Boolean) {
         context.playbackDataStore.edit { values ->
@@ -83,6 +88,22 @@ class PlaybackPreferences(private val context: Context) {
 
     suspend fun isFmModeEnabled(): Boolean = context.playbackDataStore.data.first()[fmModeKey] ?: false
     suspend fun setFmModeEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[fmModeKey] = enabled }
+    suspend fun isKaraokeModeEnabled(): Boolean = context.playbackDataStore.data.first()[karaokeEnabledKey] ?: false
+
+    suspend fun readKaraoke(): KaraokeSettings {
+        val values = context.playbackDataStore.data.first()
+        return KaraokeSettings(
+            enabled = values[karaokeEnabledKey] ?: false,
+            vocal = values[karaokeVocalKey]?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0f,
+            pitchSemi = (values[karaokePitchKey] ?: 0L).toInt().coerceIn(-7, 7)
+        )
+    }
+
+    suspend fun saveKaraoke(settings: KaraokeSettings) = context.playbackDataStore.edit { values ->
+        values[karaokeEnabledKey] = settings.enabled
+        values[karaokeVocalKey] = settings.vocal.toString()
+        values[karaokePitchKey] = settings.pitchSemi.toLong()
+    }
 
     suspend fun addFolder(uri: String) = context.playbackDataStore.edit { values ->
         values[foldersKey] = values[foldersKey].orEmpty() + uri

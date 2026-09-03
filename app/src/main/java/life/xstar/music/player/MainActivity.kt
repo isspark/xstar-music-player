@@ -14,11 +14,16 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -32,6 +37,8 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -126,6 +133,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val onlineArtworkEnabled = preferences.onlineArtworkEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val onlineLyricsEnabled = preferences.onlineLyricsEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val fmModeEnabled = preferences.fmModeEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val karaokeModeEnabled = preferences.karaokeModeEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val openPlayer = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val lyrics = MutableStateFlow<LyricsState>(LyricsState.Idle)
 
@@ -274,7 +282,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     }
     fun discoverCastDevices() = viewModelScope.async { castController.discoverDevices() }
     fun connectCast(device: CastDevice) {
-        if (fmModeEnabled.value) return
+        if (fmModeEnabled.value || karaokeModeEnabled.value) return
         val snap = playback.value
         if (snap.queue.isEmpty() || snap.index !in snap.queue.indices) return
         castResumeAfterStop = snap.playing
@@ -298,6 +306,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     fun setFmMode(enabled: Boolean) = viewModelScope.launch {
         if (enabled == preferences.isFmModeEnabled()) return@launch
         if (enabled) {
+            if (preferences.isKaraokeModeEnabled()) disableKaraokeEffect()
             if (castState.value.connection != CastSessionController.Connection.Disconnected) castController.disconnect()
             castResumeAfterStop = false
             val library = songs.value
@@ -313,21 +322,47 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
             suppressPlaybackPersistence = false
             openPlayer.emit(Unit)
         } else {
+            disableFmContext()
+        }
+    }
+    fun setKaraokeMode(enabled: Boolean) = viewModelScope.launch {
+        if (enabled == preferences.isKaraokeModeEnabled()) return@launch
+        if (enabled) {
+            if (castState.value.connection == CastSessionController.Connection.Connected) return@launch
+            if (preferences.isFmModeEnabled()) disableFmContext()
             suppressPlaybackPersistence = true
-            preferences.setFmModeEnabled(false)
-            val saved = preferences.read()
-            val restored = restoreSongs(saved)
-            val expectedId = restored.songs.getOrNull(restored.index)?.mediaStoreId
-            if (restored.songs.isEmpty()) {
-                player.clear()
-                withTimeoutOrNull(3_000) { playback.first { it.queue.isEmpty() } }
-            } else {
-                player.restoreQueue(restored.songs, restored.index, saved.position, saved.mode.toPlaybackMode(), saved.playing)
-                withTimeoutOrNull(3_000) { playback.first { it.song?.mediaStoreId == expectedId } }
-            }
+            val settings = preferences.readKaraoke().copy(enabled = true)
+            preferences.saveKaraoke(settings)
+            player.setKaraokeEnabled(true)
             suppressPlaybackPersistence = false
             openPlayer.emit(Unit)
+        } else {
+            disableKaraokeEffect()
+            openPlayer.emit(Unit)
         }
+    }
+    private suspend fun disableFmContext() {
+        suppressPlaybackPersistence = true
+        preferences.setFmModeEnabled(false)
+        val saved = preferences.read()
+        val restored = restoreSongs(saved)
+        val expectedId = restored.songs.getOrNull(restored.index)?.mediaStoreId
+        if (restored.songs.isEmpty()) {
+            player.clear()
+            withTimeoutOrNull(3_000) { playback.first { it.queue.isEmpty() } }
+        } else {
+            player.restoreQueue(restored.songs, restored.index, saved.position, saved.mode.toPlaybackMode(), saved.playing)
+            withTimeoutOrNull(3_000) { playback.first { it.song?.mediaStoreId == expectedId } }
+        }
+        suppressPlaybackPersistence = false
+        openPlayer.emit(Unit)
+    }
+    private suspend fun disableKaraokeEffect() {
+        suppressPlaybackPersistence = true
+        val settings = preferences.readKaraoke().copy(enabled = false)
+        preferences.saveKaraoke(settings)
+        player.setKaraokeEnabled(false)
+        suppressPlaybackPersistence = false
     }
     fun fmRandomSong() = player.randomSong()
     fun favorite(id: Long) = viewModelScope.launch { repo.toggleFavorite(id) }
@@ -393,6 +428,7 @@ data class ScanState(
     val theme by vm.theme.collectAsStateWithLifecycle()
     val sleepTimerRemaining by vm.sleepTimerRemaining.collectAsStateWithLifecycle()
     val fmMode by vm.fmModeEnabled.collectAsStateWithLifecycle()
+    val karaokeMode by vm.karaokeModeEnabled.collectAsStateWithLifecycle()
     val castState by vm.castState.collectAsStateWithLifecycle()
     val songs by vm.songs.collectAsStateWithLifecycle()
     var showCastSheet by remember { mutableStateOf(false) }
@@ -424,7 +460,7 @@ data class ScanState(
                 }
                 Spacer(Modifier.height(16.dp))
                 val castActive = castState.connection != CastSessionController.Connection.Disconnected
-                val castCardEnabled = !fmMode
+                val castCardEnabled = !fmMode && !karaokeMode
                 Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = if (castCardEnabled) .06f else .03f)) {
                     Row(
                         Modifier.padding(horizontal = 14.dp, vertical = 10.dp).clickable(enabled = castCardEnabled) {
@@ -439,7 +475,7 @@ data class ScanState(
                             Text("投屏", color = if (castCardEnabled) Color.White else Color.White.copy(alpha = .5f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                             Text(
                                 when {
-                                    !castCardEnabled -> "FM 模式不可用"
+                                    !castCardEnabled -> if (fmMode) "FM 模式不可用" else "卡拉OK 模式不可用"
                                     castActive -> "正在投到 ${castState.device?.friendlyName ?: "设备"}"
                                     else -> "搜索同一 Wi-Fi 的投影设备"
                                 },
@@ -456,19 +492,54 @@ data class ScanState(
                     }
                 }
                 Spacer(Modifier.height(12.dp))
-                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = .06f)) {
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = if (fmMode || !castActive) .06f else .03f)) {
                     Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.Radio, null, Modifier.size(21.dp), tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
                             Text("FM 模式", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                            Text(if (songs.isEmpty()) "请先扫描音乐" else "随机电台 · 极简手势", color = Color(0xFF818C9C), fontSize = 11.sp)
+                            Text(
+                                when {
+                                    songs.isEmpty() -> "请先扫描音乐"
+                                    castActive -> "投屏中不可用"
+                                    else -> "随机电台 · 极简手势"
+                                },
+                                color = Color(0xFF818C9C),
+                                fontSize = 11.sp
+                            )
                         }
                         Switch(
                             checked = fmMode,
-                            enabled = songs.isNotEmpty() || fmMode,
+                            enabled = (songs.isNotEmpty() || fmMode) && !castActive,
                             onCheckedChange = {
                                 vm.setFmMode(it)
+                                if (it) scope.launch { drawerState.close() }
+                            }
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = if (karaokeMode || !castActive) .06f else .03f)) {
+                    Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Mic, null, Modifier.size(21.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("卡拉OK 模式", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                when {
+                                    songs.isEmpty() -> "请先扫描音乐"
+                                    castActive -> "投屏中不可用"
+                                    else -> "伴奏跟唱 · 原唱/伴奏 · 变调"
+                                },
+                                color = Color(0xFF818C9C),
+                                fontSize = 11.sp
+                            )
+                        }
+                        Switch(
+                            checked = karaokeMode,
+                            enabled = (songs.isNotEmpty() || karaokeMode) && !castActive,
+                            onCheckedChange = {
+                                vm.setKaraokeMode(it)
                                 if (it) scope.launch { drawerState.close() }
                             }
                         )
@@ -667,8 +738,18 @@ data class ScanState(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun PlayerScreen(vm: MusicViewModel, openMenu: () -> Unit, onOpenCastSheet: () -> Unit) {
     val fmMode by vm.fmModeEnabled.collectAsStateWithLifecycle()
-    AnimatedContent(fmMode, label = "playerMode") { fm ->
-        if (fm) FmPlayerScreen(vm, openMenu) else TraditionalPlayerScreen(vm, openMenu, onOpenCastSheet)
+    val karaokeMode by vm.karaokeModeEnabled.collectAsStateWithLifecycle()
+    val display = when {
+        karaokeMode -> "karaoke"
+        fmMode -> "fm"
+        else -> "classic"
+    }
+    AnimatedContent(display, label = "playerMode") { mode ->
+        when (mode) {
+            "karaoke" -> KaraokePlayerScreen(vm, openMenu)
+            "fm" -> FmPlayerScreen(vm, openMenu)
+            else -> TraditionalPlayerScreen(vm, openMenu, onOpenCastSheet)
+        }
     }
 }
 
@@ -933,6 +1014,233 @@ data class ScanState(
         close = { showDetails = false }
     )
     if (showArtworkPicker && song != null) AlbumArtworkSheet(song.album, listOf(song), vm, allowReplace = true) { showArtworkPicker = false }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun KaraokePlayerScreen(vm: MusicViewModel, openMenu: () -> Unit) {
+    val state by vm.playback.collectAsStateWithLifecycle()
+    val karaokeState by vm.player.karaokeState.collectAsStateWithLifecycle()
+    val theme by vm.theme.collectAsStateWithLifecycle()
+    var expanded by remember { mutableStateOf(false) }
+    var showQueue by remember { mutableStateOf(false) }
+    val song = state.song
+    val mono = song?.channelCount == 1
+    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(theme.color().copy(alpha = .18f), Color(0xFF0B0E14))))) {
+        Column(Modifier.fillMaxSize().systemBarsPadding(), horizontalAlignment = Alignment.CenterHorizontally) {
+            Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton(openMenu) { Icon(Icons.Default.Menu, "菜单", tint = Color.White) }
+                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    Text("卡拉OK模式", color = Color(0xFFB8C1CF), fontSize = 15.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 3.sp)
+                }
+                IconButton({ showQueue = true }, enabled = song != null) { Icon(Icons.Default.QueueMusic, "播放列表", tint = if (song != null) Color.White else Color(0xFF5B6577)) }
+            }
+            if (song != null) {
+                Column(Modifier.padding(horizontal = 18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(song.title, color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(3.dp))
+                    Text(song.artist, color = Color(0xFF9AA5B6), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (mono) {
+                    Spacer(Modifier.height(5.dp))
+                    Text("单声道音轨 · 去除人声不可用", color = Color(0xFFFFBE5C).copy(alpha = .85f), fontSize = 11.sp)
+                }
+            } else {
+                Spacer(Modifier.height(10.dp))
+            }
+            Spacer(Modifier.height(4.dp))
+            Box(
+                Modifier.weight(1f).fillMaxWidth()
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { if (song != null) vm.player.toggle() },
+                contentAlignment = Alignment.Center
+            ) {
+                if (song == null) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Default.MusicNote, null, Modifier.size(54.dp), tint = Color(0xFF65738A))
+                        Spacer(Modifier.height(14.dp))
+                        Text("从音乐库选择一首歌开始跟唱", color = Color(0xFF9AA5B6), fontSize = 15.sp, textAlign = TextAlign.Center)
+                        Text("点击歌词区域可播放或暂停", color = Color(0xFF5B6577), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                    }
+                } else {
+                    KaraokeLyricsStage(vm, Modifier.fillMaxSize())
+                }
+            }
+            if (!expanded) KaraokeProgressRail(state, vm, Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp)) else Spacer(Modifier.height(12.dp))
+        }
+        AnimatedVisibility(
+            visible = expanded && song != null,
+            enter = slideInVertically { it } + fadeIn(),
+            exit = slideOutVertically { it } + fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
+        ) {
+            KaraokeControlPanel(vm, state, karaokeState, mono, close = { expanded = false }, openQueue = { showQueue = true })
+        }
+        if (!expanded && song != null) {
+            Surface(
+                Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 16.dp, bottom = 88.dp).size(52.dp).clickable { expanded = true },
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primary,
+                shadowElevation = 10.dp
+            ) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.Tune, "展开卡拉OK控制", tint = Color(0xFF090B10), modifier = Modifier.size(24.dp))
+                }
+            }
+        }
+    }
+    if (showQueue) QueueSheet(state, vm) { showQueue = false }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun KaraokeLyricsStage(vm: MusicViewModel, modifier: Modifier = Modifier) {
+    val lyricsState by vm.lyrics.collectAsStateWithLifecycle()
+    val playback by vm.playback.collectAsStateWithLifecycle()
+    val lines = (lyricsState as? LyricsState.Loaded)?.document?.lines.orEmpty()
+    when {
+        lyricsState == LyricsState.Loading -> Box(modifier, contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(26.dp), strokeWidth = 2.5.dp, color = Color.White.copy(alpha = .5f)) }
+        lines.isEmpty() -> Box(modifier, contentAlignment = Alignment.Center) {
+            Column(Modifier.padding(horizontal = 32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(Icons.Default.Notes, null, Modifier.size(42.dp), tint = Color(0xFF5B6577))
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    if (lyricsState is LyricsState.Error) (lyricsState as LyricsState.Error).message else "纯音乐或暂无歌词",
+                    color = Color(0xFF7E8A9A),
+                    fontSize = 14.sp,
+                    textAlign = TextAlign.Center
+                )
+                Text("可切到原唱继续演唱", color = Color(0xFF5B6577), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+            }
+        }
+        else -> BoxWithConstraints(modifier) {
+            val listState = rememberLazyListState()
+            val current = lines.indexOfLast { line -> line.timeMs?.let(playback.position::compareTo) ?: -1 >= 0 }.coerceAtLeast(0)
+            val verticalPadding = if (maxHeight.value > 56f) ((maxHeight.value - 56f) / 2f).dp else 0.dp
+            LaunchedEffect(current, playback.song?.mediaStoreId) {
+                if (!listState.isScrollInProgress) listState.animateScrollToItem(current)
+            }
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                contentPadding = PaddingValues(vertical = verticalPadding)
+            ) {
+                itemsIndexed(lines) { index, line ->
+                    val isCurrent = index == current
+                    Text(
+                        line.text,
+                        color = if (isCurrent) Color.White else Color.White.copy(alpha = .3f),
+                        fontSize = if (isCurrent) 26.sp else 15.sp,
+                        fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                        lineHeight = if (isCurrent) 34.sp else 22.sp,
+                        textAlign = TextAlign.Center,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = if (isCurrent) 8.dp else 6.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun KaraokeProgressRail(state: PlayerState, vm: MusicViewModel, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(time(state.position), color = Color(0xFF7E8A9A), fontSize = 11.sp)
+            Text(time(state.duration), color = Color(0xFF7E8A9A), fontSize = 11.sp)
+        }
+        Slider(
+            value = if (state.duration > 0) state.position.toFloat() / state.duration else 0f,
+            onValueChange = { vm.player.seek((it * state.duration).toLong()) },
+            modifier = Modifier.fillMaxWidth().height(18.dp),
+            colors = SliderDefaults.colors(
+                thumbColor = MaterialTheme.colorScheme.primary,
+                activeTrackColor = Color.White.copy(alpha = .55f),
+                inactiveTrackColor = Color.White.copy(alpha = .14f)
+            ),
+            thumb = { Box(Modifier.size(7.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary)) },
+            track = { sliderPositions ->
+                Box(Modifier.fillMaxWidth().height(2.5.dp).clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = .14f))) {
+                    Box(Modifier.fillMaxWidth(sliderPositions.value).fillMaxHeight().clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = .55f)))
+                }
+            }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun KaraokeControlPanel(
+    vm: MusicViewModel,
+    state: PlayerState,
+    karaokeState: KaraokeState,
+    mono: Boolean,
+    close: () -> Unit,
+    openQueue: () -> Unit
+) {
+    val vocalLabel = when {
+        mono -> "不可用"
+        karaokeState.vocal < .06f -> "纯伴奏"
+        karaokeState.vocal > .94f -> "原唱"
+        else -> "人声 ${(karaokeState.vocal * 100).roundToInt()}%"
+    }
+    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp), color = Color(0xF211151D), shadowElevation = 24.dp) {
+        Column(Modifier.navigationBarsPadding().padding(horizontal = 20.dp, vertical = 6.dp)) {
+            Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("跟唱控制", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Text(vocalLabel, color = if (mono) Color(0xFF9A5B00) else MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                IconButton(close) { Icon(Icons.Default.ExpandMore, "收起", tint = Color.White) }
+            }
+            karaokeState.error?.let {
+                Text(it, color = Color(0xFFFF8A96), fontSize = 11.sp, modifier = Modifier.padding(bottom = 4.dp))
+            }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("伴奏", color = Color(0xFF8F99A9), fontSize = 12.sp)
+                Slider(
+                    value = karaokeState.vocal,
+                    onValueChange = { vm.player.setKaraokeVocal(it) },
+                    enabled = !mono,
+                    modifier = Modifier.weight(1f).padding(horizontal = 10.dp).height(20.dp),
+                    colors = SliderDefaults.colors(
+                        thumbColor = MaterialTheme.colorScheme.primary,
+                        activeTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = .8f),
+                        inactiveTrackColor = Color.White.copy(alpha = .16f)
+                    )
+                )
+                Text("原唱", color = Color(0xFF8F99A9), fontSize = 12.sp)
+            }
+            if (mono) Text("当前为单声道音轨，中心声道抵消无效，请在原唱下演唱", color = Color(0xFFFFBE5C).copy(alpha = .85f), fontSize = 11.sp, modifier = Modifier.padding(vertical = 2.dp))
+            Spacer(Modifier.height(6.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("变调", color = Color(0xFF8F99A9), fontSize = 12.sp, modifier = Modifier.padding(end = 10.dp))
+                Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    (-7..7).forEach { semi ->
+                        FilterChip(
+                            selected = karaokeState.pitchSemi == semi,
+                            onClick = { vm.player.setKaraokePitch(semi) },
+                            enabled = !mono || semi == 0,
+                            label = { Text(if (semi > 0) "+$semi" else semi.toString(), fontSize = 12.sp) },
+                            shape = CircleShape,
+                            border = null
+                        )
+                    }
+                }
+                if (karaokeState.pitchSemi != 0) TextButton(onClick = { vm.player.setKaraokePitch(0) }, contentPadding = PaddingValues(horizontal = 6.dp)) { Text("归零", fontSize = 11.sp) }
+            }
+            HorizontalDivider(color = Color.White.copy(alpha = .06f), modifier = Modifier.padding(vertical = 8.dp))
+            Row(Modifier.fillMaxWidth().height(64.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
+                PlaybackModeButton(state.mode) { vm.player.setPlaybackMode(state.mode.next()) }
+                IconButton(onClick = vm.player::previous, Modifier.size(48.dp)) { Icon(Icons.Default.SkipPrevious, "上一首", Modifier.size(28.dp), tint = Color.White) }
+                Surface(Modifier.size(52.dp), shape = CircleShape, color = MaterialTheme.colorScheme.primary) {
+                    Box(Modifier.fillMaxSize().clickable(onClick = vm.player::toggle), contentAlignment = Alignment.Center) {
+                        Icon(if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow, "播放或暂停", Modifier.size(32.dp), tint = Color(0xFF090B10))
+                    }
+                }
+                IconButton(onClick = vm.player::next, Modifier.size(48.dp)) { Icon(Icons.Default.SkipNext, "下一首", Modifier.size(28.dp), tint = Color.White) }
+                IconButton(onClick = openQueue, Modifier.size(48.dp)) { Icon(Icons.Default.QueueMusic, "播放列表", tint = Color(0xFFB3BDCC)) }
+            }
+            Spacer(Modifier.height(6.dp))
+        }
+    }
 }
 
 @Composable private fun FmVinylRecord(
