@@ -1,6 +1,10 @@
 package life.xstar.music.player
 
+import android.Manifest
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.MediaPlayer
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.SystemClock
@@ -20,10 +24,10 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -40,7 +44,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -81,6 +84,7 @@ import androidx.palette.graphics.Palette
 import coil.compose.SubcomposeAsyncImage
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.*
 import kotlin.random.Random
@@ -93,6 +97,7 @@ import life.xstar.music.player.data.preferences.ThemeAccent
 import life.xstar.music.player.data.repository.MusicRepository
 import life.xstar.music.player.data.repository.ArtworkCandidate
 import life.xstar.music.player.data.repository.ScanProgress
+import life.xstar.music.player.data.sing.*
 import life.xstar.music.player.data.lyrics.LyricsRepository
 import life.xstar.music.player.data.lyrics.LyricsState
 import life.xstar.music.player.data.lyrics.LyricsCandidate
@@ -113,13 +118,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(state)
         enableEdgeToEdge()
         val app = application as XstarApplication
-        val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, PlayerController(this), app.playbackPreferences, LyricsRepository(this), app.castController, app.onlineMusicRepository))[MusicViewModel::class.java]
+        val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, PlayerController(this), app.playbackPreferences, LyricsRepository(this), app.castController, app.onlineMusicRepository, app.applicationContext))[MusicViewModel::class.java]
         setContent { val theme by vm.theme.collectAsStateWithLifecycle(); XstarTheme(theme) { XstarApp(vm) } }
     }
 }
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
-class MusicViewModel(private val repo: MusicRepository, val player: PlayerController, private val preferences: PlaybackPreferences, private val lyricsRepository: LyricsRepository, val castController: CastSessionController, private val onlineRepository: OnlineMusicRepository) : ViewModel() {
+class MusicViewModel(private val repo: MusicRepository, val player: PlayerController, private val preferences: PlaybackPreferences, private val lyricsRepository: LyricsRepository, val castController: CastSessionController, private val onlineRepository: OnlineMusicRepository, private val appContext: Context) : ViewModel() {
     val songs = repo.songs().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val favorites = repo.favorites().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val playlists = repo.playlists().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -151,6 +156,10 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val onlineDownloads = onlineRepository.downloads
     private val _onlineSearch = MutableStateFlow<OnlineSearchUiState>(OnlineSearchUiState.Idle)
     val onlineSearch = _onlineSearch.asStateFlow()
+    private val _vocalReference = MutableStateFlow<VocalReferenceState>(VocalReferenceState.Idle)
+    val vocalReference = _vocalReference.asStateFlow()
+    private var vocalReferenceJob: Job? = null
+    private var vocalReferenceSongId: Long? = null
 
     init {
         viewModelScope.launch {
@@ -444,15 +453,49 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     fun useEqualizerPreset(index: Int) = player.useEqualizerPreset(index)
     fun setEqualizerBand(index: Int, levelMb: Int) = player.setEqualizerBand(index, levelMb)
     fun resetEqualizer() = player.resetEqualizer()
+    fun requestVocalReference(song: SongEntity) {
+        val currentSongId = vocalReferenceSongId
+        if (currentSongId == song.mediaStoreId && (_vocalReference.value is VocalReferenceState.Ready || _vocalReference.value is VocalReferenceState.Computing)) return
+        vocalReferenceJob?.cancel()
+        val cached = VocalPitchAnalyzer.load(appContext, song.mediaStoreId)
+        if (cached != null) {
+            vocalReferenceSongId = song.mediaStoreId
+            _vocalReference.value = VocalReferenceState.Ready(cached)
+            return
+        }
+        vocalReferenceJob = viewModelScope.launch {
+            vocalReferenceSongId = song.mediaStoreId
+            _vocalReference.value = VocalReferenceState.Computing
+            val targetSongId = song.mediaStoreId
+            val context = currentCoroutineContext()
+            val frames = withContext(Dispatchers.IO) { VocalPitchAnalyzer.analyze(appContext, song.uri) { !context.isActive } }
+            if (vocalReferenceSongId != targetSongId) return@launch
+            if (frames.isNullOrEmpty()) {
+                _vocalReference.value = VocalReferenceState.Unavailable("未能提取原唱音高,本次使用轻量评分")
+            } else {
+                VocalPitchAnalyzer.save(appContext, song.mediaStoreId, frames)
+                _vocalReference.value = VocalReferenceState.Ready(frames)
+            }
+        }
+    }
+    fun cancelVocalAnalysis() {
+        vocalReferenceJob?.cancel()
+        vocalReferenceJob = null
+        vocalReferenceSongId = null
+        _vocalReference.value = VocalReferenceState.Idle
+    }
     private suspend fun restoreSongs(saved: life.xstar.music.player.data.preferences.SavedPlayback): RestoredQueue {
         val songs = repo.findByIds(saved.queue)
         val currentId = saved.queue.getOrNull(saved.index)
         return RestoredQueue(songs, songs.indexOfFirst { it.mediaStoreId == currentId }.coerceAtLeast(0))
     }
-    override fun onCleared() { player.release() }
+    override fun onCleared() {
+        vocalReferenceJob?.cancel()
+        player.release()
+    }
 
-    companion object { fun factory(repo: MusicRepository, player: PlayerController, preferences: PlaybackPreferences, lyrics: LyricsRepository, cast: CastSessionController, online: OnlineMusicRepository) = object : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player, preferences, lyrics, cast, online) as T
+    companion object { fun factory(repo: MusicRepository, player: PlayerController, preferences: PlaybackPreferences, lyrics: LyricsRepository, cast: CastSessionController, online: OnlineMusicRepository, appContext: Context) = object : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player, preferences, lyrics, cast, online, appContext) as T
     } }
 }
 
@@ -1080,6 +1123,7 @@ sealed class OnlineSearchUiState {
     val theme by vm.theme.collectAsStateWithLifecycle()
     var expanded by remember { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
+    var showScore by remember { mutableStateOf(false) }
     val song = state.song
     val mono = song?.channelCount == 1
     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(theme.color().copy(alpha = .18f), Color(0xFF0B0E14))))) {
@@ -1089,7 +1133,7 @@ sealed class OnlineSearchUiState {
                 Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     Text("卡拉OK模式", color = Color(0xFFB8C1CF), fontSize = 15.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 3.sp)
                 }
-                IconButton({ showQueue = true }, enabled = song != null) { Icon(Icons.Default.QueueMusic, "播放列表", tint = if (song != null) Color.White else Color(0xFF5B6577)) }
+                IconButton({ expanded = !expanded }, enabled = song != null) { Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.Tune, if (expanded) "收起控制" else "展开跟唱控制", tint = if (song != null) Color.White else Color(0xFF5B6577)) }
             }
             if (song != null) {
                 Column(Modifier.padding(horizontal = 18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1105,46 +1149,32 @@ sealed class OnlineSearchUiState {
                 Spacer(Modifier.height(10.dp))
             }
             Spacer(Modifier.height(4.dp))
-            Box(
-                Modifier.weight(1f).fillMaxWidth()
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { if (song != null) vm.player.toggle() },
-                contentAlignment = Alignment.Center
-            ) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 if (song == null) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(Icons.Default.MusicNote, null, Modifier.size(54.dp), tint = Color(0xFF65738A))
                         Spacer(Modifier.height(14.dp))
                         Text("从音乐库选择一首歌开始跟唱", color = Color(0xFF9AA5B6), fontSize = 15.sp, textAlign = TextAlign.Center)
-                        Text("点击歌词区域可播放或暂停", color = Color(0xFF5B6577), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                        Text("使用下方按钮控制播放", color = Color(0xFF5B6577), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
                     }
                 } else {
                     KaraokeLyricsStage(vm, Modifier.fillMaxSize())
                 }
             }
-            if (!expanded) KaraokeProgressRail(state, vm, Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp)) else Spacer(Modifier.height(12.dp))
-        }
-        AnimatedVisibility(
-            visible = expanded && song != null,
-            enter = slideInVertically { it } + fadeIn(),
-            exit = slideOutVertically { it } + fadeOut(),
-            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding()
-        ) {
-            KaraokeControlPanel(vm, state, karaokeState, mono, close = { expanded = false }, openQueue = { showQueue = true })
-        }
-        if (!expanded && song != null) {
-            Surface(
-                Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 16.dp, bottom = 88.dp).size(52.dp).clickable { expanded = true },
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.primary,
-                shadowElevation = 10.dp
+            AnimatedVisibility(
+                visible = expanded && song != null,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
             ) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Default.Tune, "展开卡拉OK控制", tint = Color(0xFF090B10), modifier = Modifier.size(24.dp))
-                }
+                KaraokeControlSections(vm, karaokeState, mono, openScore = { showScore = true }, onCollapse = { expanded = false })
             }
+            KaraokeProgressRail(state, vm, Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp))
+            KaraokeTransportRow(state, vm, openQueue = { showQueue = true }, modifier = Modifier.fillMaxWidth().height(62.dp))
+            Spacer(Modifier.height(6.dp))
         }
     }
     if (showQueue) QueueSheet(state, vm) { showQueue = false }
+    if (showScore && song != null) KaraokeScoreSheet(vm, song) { showScore = false }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1226,13 +1256,12 @@ sealed class OnlineSearchUiState {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun KaraokeControlPanel(
+@Composable private fun KaraokeControlSections(
     vm: MusicViewModel,
-    state: PlayerState,
     karaokeState: KaraokeState,
     mono: Boolean,
-    close: () -> Unit,
-    openQueue: () -> Unit
+    openScore: () -> Unit,
+    onCollapse: () -> Unit
 ) {
     val vocalLabel = when {
         mono -> "不可用"
@@ -1240,12 +1269,12 @@ sealed class OnlineSearchUiState {
         karaokeState.vocal > .94f -> "原唱"
         else -> "人声 ${(karaokeState.vocal * 100).roundToInt()}%"
     }
-    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp), color = Color(0xF211151D), shadowElevation = 24.dp) {
-        Column(Modifier.navigationBarsPadding().padding(horizontal = 20.dp, vertical = 6.dp)) {
-            Row(Modifier.fillMaxWidth().height(40.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("跟唱控制", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                Text(vocalLabel, color = if (mono) Color(0xFF9A5B00) else MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                IconButton(close) { Icon(Icons.Default.ExpandMore, "收起", tint = Color.White) }
+    Surface(Modifier.fillMaxWidth().padding(horizontal = 20.dp), shape = RoundedCornerShape(18.dp), color = Color(0xFF151A23)) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+            Row(Modifier.fillMaxWidth().height(34.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("跟唱控制", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Text(vocalLabel, color = if (mono) Color(0xFF9A5B00) else MaterialTheme.colorScheme.primary, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                IconButton(onCollapse, Modifier.size(30.dp)) { Icon(Icons.Default.ExpandLess, "收起控制", tint = Color.White) }
             }
             karaokeState.error?.let {
                 Text(it, color = Color(0xFFFF8A96), fontSize = 11.sp, modifier = Modifier.padding(bottom = 4.dp))
@@ -1256,7 +1285,7 @@ sealed class OnlineSearchUiState {
                     value = karaokeState.vocal,
                     onValueChange = { vm.player.setKaraokeVocal(it) },
                     enabled = !mono,
-                    modifier = Modifier.weight(1f).padding(horizontal = 10.dp).height(20.dp),
+                    modifier = Modifier.weight(1f).padding(horizontal = 10.dp).height(18.dp),
                     colors = SliderDefaults.colors(
                         thumbColor = MaterialTheme.colorScheme.primary,
                         activeTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = .8f),
@@ -1266,7 +1295,7 @@ sealed class OnlineSearchUiState {
                 Text("原唱", color = Color(0xFF8F99A9), fontSize = 12.sp)
             }
             if (mono) Text("当前为单声道音轨，中心声道抵消无效，请在原唱下演唱", color = Color(0xFFFFBE5C).copy(alpha = .85f), fontSize = 11.sp, modifier = Modifier.padding(vertical = 2.dp))
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(4.dp))
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("变调", color = Color(0xFF8F99A9), fontSize = 12.sp, modifier = Modifier.padding(end = 10.dp))
                 Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1283,19 +1312,205 @@ sealed class OnlineSearchUiState {
                 }
                 if (karaokeState.pitchSemi != 0) TextButton(onClick = { vm.player.setKaraokePitch(0) }, contentPadding = PaddingValues(horizontal = 6.dp)) { Text("归零", fontSize = 11.sp) }
             }
-            HorizontalDivider(color = Color.White.copy(alpha = .06f), modifier = Modifier.padding(vertical = 8.dp))
-            Row(Modifier.fillMaxWidth().height(64.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
-                PlaybackModeButton(state.mode) { vm.player.setPlaybackMode(state.mode.next()) }
-                IconButton(onClick = vm.player::previous, Modifier.size(48.dp)) { Icon(Icons.Default.SkipPrevious, "上一首", Modifier.size(28.dp), tint = Color.White) }
-                Surface(Modifier.size(52.dp), shape = CircleShape, color = MaterialTheme.colorScheme.primary) {
-                    Box(Modifier.fillMaxSize().clickable(onClick = vm.player::toggle), contentAlignment = Alignment.Center) {
-                        Icon(if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow, "播放或暂停", Modifier.size(32.dp), tint = Color(0xFF090B10))
+            HorizontalDivider(color = Color.White.copy(alpha = .06f), modifier = Modifier.padding(vertical = 6.dp))
+            Surface(Modifier.fillMaxWidth().height(40.dp), shape = RoundedCornerShape(13.dp), color = MaterialTheme.colorScheme.primary.copy(alpha = .14f)) {
+                Row(Modifier.fillMaxWidth().height(40.dp).clickable(onClick = openScore).padding(horizontal = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.Mic, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.width(9.dp))
+                    Text("演唱评分 · 跟唱录音", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Icon(Icons.Default.ChevronRight, null, Modifier.size(17.dp), tint = Color(0xFF8F99A9))
+                }
+            }
+        }
+    }
+}
+
+@Composable private fun KaraokeTransportRow(state: PlayerState, vm: MusicViewModel, openQueue: () -> Unit, modifier: Modifier = Modifier) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
+        PlaybackModeButton(state.mode) { vm.player.setPlaybackMode(state.mode.next()) }
+        IconButton(onClick = vm.player::previous, Modifier.size(52.dp)) { Icon(Icons.Default.SkipPrevious, "上一首", Modifier.size(30.dp), tint = Color.White) }
+        Surface(Modifier.size(54.dp), shape = CircleShape, color = MaterialTheme.colorScheme.primary) {
+            Box(Modifier.fillMaxSize().clickable(onClick = vm.player::toggle), contentAlignment = Alignment.Center) {
+                Icon(if (state.playing) Icons.Default.Pause else Icons.Default.PlayArrow, "播放或暂停", Modifier.size(32.dp), tint = Color(0xFF090B10))
+            }
+        }
+        IconButton(onClick = vm.player::next, Modifier.size(52.dp)) { Icon(Icons.Default.SkipNext, "下一首", Modifier.size(30.dp), tint = Color.White) }
+        IconButton(onClick = openQueue, Modifier.size(52.dp)) { Icon(Icons.Default.QueueMusic, "播放列表", tint = Color(0xFFB3BDCC)) }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun KaraokeScoreSheet(vm: MusicViewModel, song: SongEntity, close: () -> Unit) {
+    val context = LocalContext.current
+    val appContext = context.applicationContext
+    val playback by vm.playback.collectAsStateWithLifecycle()
+    val reference by vm.vocalReference.collectAsStateWithLifecycle()
+    val recorder = remember { KaraokeMicRecorder() }
+    val playerRef = remember { arrayOfNulls<MediaPlayer>(1) }
+    var recording by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf<SingingScore?>(null) }
+    var previewPath by remember { mutableStateOf<String?>(null) }
+    var recordStartMs by remember { mutableStateOf(0L) }
+    var previewing by remember { mutableStateOf(false) }
+    var permissionGranted by remember { mutableStateOf(context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted -> permissionGranted = granted }
+    val live by recorder.live.collectAsStateWithLifecycle()
+    val readyFrames = (reference as? VocalReferenceState.Ready)?.frames
+
+    LaunchedEffect(song.mediaStoreId) { vm.requestVocalReference(song) }
+    DisposableEffect(Unit) {
+        onDispose {
+            recorder.discard()
+            runCatching { playerRef[0]?.release() }
+            playerRef[0] = null
+        }
+    }
+
+    fun finishRecording() {
+        if (!recording) return
+        recording = false
+        val captured = recorder.stop() ?: return
+        val score = VocalPitchAnalyzer.computeScore(readyFrames, captured.notes, recordStartMs)
+        result = score
+        val file = File(appContext.cacheDir, "karaoke_${System.currentTimeMillis()}.wav")
+        if (writeWav16Mono(file, captured.samples, captured.sampleRate)) previewPath = file.absolutePath
+    }
+
+    fun togglePreview() {
+        val current = playerRef[0]
+        if (current?.isPlaying == true) {
+            current.stop()
+            current.release()
+            playerRef[0] = null
+            previewing = false
+            return
+        }
+        val path = previewPath ?: return
+        previewing = false
+        runCatching {
+            val player = MediaPlayer()
+            player.setDataSource(path)
+            player.setOnCompletionListener {
+                runCatching { it.release() }
+                playerRef[0] = null
+                previewing = false
+            }
+            player.prepare()
+            player.start()
+            playerRef[0] = player
+            previewing = true
+        }
+    }
+
+    ModalBottomSheet(onDismissRequest = { if (!recording) close() }, containerColor = Color(0xFF171B23)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 10.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("演唱评分", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                    Text(song.title, color = Color(0xFF8F99A9), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (recording) TextButton(onClick = ::finishRecording) { Text("结束", color = Color(0xFFFF8A96)) }
+                else IconButton(close) { Icon(Icons.Default.Close, "关闭", tint = Color.White) }
+            }
+            Spacer(Modifier.height(8.dp))
+            when (val state = reference) {
+                is VocalReferenceState.Computing -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text("正在分析原唱音高轮廓(仅首次,请稍候)", color = Color(0xFF9AA5B6), fontSize = 12.sp)
+                }
+                is VocalReferenceState.Ready -> Text("参考音高轮廓已就绪 · ${state.frames.size} 帧 · 纯伴奏下演唱更准", color = Color(0xFF55D6A9), fontSize = 12.sp)
+                is VocalReferenceState.Unavailable -> Text(state.message, color = Color(0xFFFFBE5C), fontSize = 12.sp)
+                VocalReferenceState.Idle -> Text("准备分析原唱音高…", color = Color(0xFF9AA5B6), fontSize = 12.sp)
+            }
+            Spacer(Modifier.height(14.dp))
+
+            val score = result
+            if (score != null) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(86.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = .18f)), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(gradeLabel(score.total), color = MaterialTheme.colorScheme.primary, fontSize = 30.sp, fontWeight = FontWeight.Black)
+                            Text("$score.total", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    Spacer(Modifier.width(18.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(if (score.lightweight) "活跃度评分(轻量)" else "综合评分", color = Color(0xFFC5CDDA), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(5.dp))
+                        Row {
+                            ScoreChip("音准", score.pitch)
+                            Spacer(Modifier.width(8.dp))
+                            ScoreChip("活跃度", score.activity)
+                        }
+                        if (score.lightweight) Text("未获得参考音高,按演唱时长与音量评估", color = Color(0xFF818C9C), fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
                     }
                 }
-                IconButton(onClick = vm.player::next, Modifier.size(48.dp)) { Icon(Icons.Default.SkipNext, "下一首", Modifier.size(28.dp), tint = Color.White) }
-                IconButton(onClick = openQueue, Modifier.size(48.dp)) { Icon(Icons.Default.QueueMusic, "播放列表", tint = Color(0xFFB3BDCC)) }
+                Spacer(Modifier.height(14.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(onClick = { result = null }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.Refresh, null, Modifier.size(17.dp)); Spacer(Modifier.width(6.dp)); Text("再唱一次") }
+                    Button(onClick = ::togglePreview, enabled = previewPath != null, modifier = Modifier.weight(1f)) {
+                        Icon(if (previewing) Icons.Default.Stop else Icons.Default.PlayArrow, null, Modifier.size(17.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (previewing) "停止试听" else "试听演唱")
+                    }
+                }
+            } else if (!recording) {
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = Color.White.copy(alpha = .06f)) {
+                    Column(Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Default.Mic, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.height(10.dp))
+                        Text("点击开始,跟随伴奏演唱并录音", color = Color(0xFFC5CDDA), fontSize = 14.sp, textAlign = TextAlign.Center)
+                        Text("结束后给出音准与活跃度评分,并支持试听", color = Color(0xFF818C9C), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
+                        Spacer(Modifier.height(12.dp))
+                        Button(
+                            onClick = {
+                                if (permissionGranted) {
+                                    if (recorder.start()) {
+                                        recordStartMs = playback.position
+                                        previewPath = null
+                                        recording = true
+                                    }
+                                } else {
+                                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text(if (permissionGranted) "开始演唱" else "授权麦克风后开始") }
+                    }
+                }
+            } else {
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = Color(0xFFFF5F74).copy(alpha = .08f)) {
+                    Column(Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(10.dp).clip(CircleShape).background(Color(0xFFFF5F74)))
+                            Spacer(Modifier.width(8.dp))
+                            Text("正在录音演唱…", color = Color(0xFFFF8A96), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        LinearProgressIndicator(progress = { live.level.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth().height(6.dp).clip(CircleShape), color = MaterialTheme.colorScheme.primary, trackColor = Color.White.copy(alpha = .1f))
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            live.frequency?.let { "音高 %.0f Hz".format(it) } ?: "未检测到音高(请靠近麦克风演唱)",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text("点击上方「结束」完成演唱与评分", color = Color(0xFF818C9C), fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
             }
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(18.dp))
+        }
+    }
+}
+
+@Composable private fun ScoreChip(label: String, value: Int?) {
+    Surface(shape = RoundedCornerShape(50), color = Color.White.copy(alpha = .08f)) {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(label, color = Color(0xFF8F99A9), fontSize = 11.sp)
+            Spacer(Modifier.width(6.dp))
+            Text(if (value == null) "--" else "$value", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
     }
 }

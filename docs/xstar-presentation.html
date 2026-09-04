@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>XSTAR · 本地音乐播放器</title>
+<style>
+  :root{
+    --bg:#0a0a12;
+    --bg-2:#12121f;
+    --ink:#f4f4fa;
+    --ink-dim:#9a9ab0;
+    --line:rgba(255,255,255,.08);
+    --accent:#7c5cff;
+    --accent-2:#ff5ca8;
+    --accent-3:#36d1c6;
+    --gold:#f5c542;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",Roboto,Helvetica,Arial,sans-serif;overflow:hidden}
+  .deck{position:relative;width:100vw;height:100vh;overflow:hidden}
+  .slide{position:absolute;inset:0;display:none;flex-direction:column;padding:6vh 8vw;opacity:0;transition:opacity .5s ease;overflow:auto}
+  .slide.active{display:flex;opacity:1;animation:fade .6s ease}
+  @keyframes fade{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+  .slide h1{font-size:clamp(40px,7vw,84px);font-weight:800;letter-spacing:-.02em;line-height:1.05}
+  .slide h2{font-size:clamp(28px,3.6vw,46px);font-weight:700;letter-spacing:-.01em;margin-bottom:2vh}
+  .slide .eyebrow{font-size:14px;letter-spacing:.3em;text-transform:uppercase;color:var(--accent-3);font-weight:600;margin-bottom:1.2vh}
+  .slide p,.slide li{font-size:clamp(15px,1.5vw,20px);line-height:1.65;color:var(--ink-dim)}
+  .slide .lead{font-size:clamp(18px,2vw,24px);color:var(--ink);max-width:60ch;line-height:1.55}
+  .grad-text{background:linear-gradient(90deg,var(--accent),var(--accent-2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .nav{position:fixed;bottom:24px;right:32px;display:flex;gap:10px;align-items:center;z-index:50;font-size:13px;color:var(--ink-dim)}
+  .nav button{width:38px;height:38px;border:1px solid var(--line);background:rgba(255,255,255,.03);color:var(--ink);border-radius:50%;cursor:pointer;font-size:16px;transition:.2s}
+  .nav button:hover{background:var(--accent);border-color:var(--accent)}
+  .nav .count{min-width:64px;text-align:center;font-variant-numeric:tabular-nums}
+  .hint{position:fixed;bottom:24px;left:32px;font-size:12px;color:#5a5a72;z-index:50}
+
+  /* cover */
+  #s-cover{justify-content:center;align-items:center;text-align:center;background:radial-gradient(1200px 800px at 70% 30%,rgba(124,92,255,.25),transparent 60%),radial-gradient(900px 700px at 20% 80%,rgba(255,92,168,.18),transparent 60%),var(--bg)}
+  #s-cover .logo{width:200px;height:200px;margin:0 auto 4vh;display:grid;place-items:center}
+  .cd-spin{animation:spin 16s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  #s-cover .tagline{font-size:18px;color:var(--ink-dim);letter-spacing:.15em;margin-top:1vh}
+
+  /* generic grid */
+  .grid{display:grid;gap:18px;width:100%}
+  .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:3vh}
+  .card{background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.01));border:1px solid var(--line);border-radius:16px;padding:22px 18px;transition:.25s}
+  .card:hover{transform:translateY(-4px);border-color:rgba(124,92,255,.5);box-shadow:0 10px 30px rgba(124,92,255,.12)}
+  .card .ic{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,var(--accent),var(--accent-2));display:grid;place-items:center;margin-bottom:14px}
+  .card h3{font-size:16px;font-weight:700;color:var(--ink);margin-bottom:6px}
+  .card p{font-size:13px;color:var(--ink-dim);line-height:1.5}
+  .two-col{display:grid;grid-template-columns:1fr 1fr;gap:6vw;align-items:center;flex:1;min-height:0}
+
+  /* feature mock frame */
+  .mock{aspect-ratio:9/16;max-height:74vh;margin:0 auto;border-radius:28px;border:1px solid var(--line);background:linear-gradient(180deg,#1a1a2a,#0e0e18);box-shadow:0 30px 80px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.05);overflow:hidden;position:relative}
+
+  .pills{display:flex;flex-wrap:wrap;gap:10px;margin-top:2vh}
+  .pill{padding:6px 14px;border:1px solid var(--line);border-radius:999px;font-size:13px;color:var(--ink-dim);background:rgba(255,255,255,.02)}
+  .pill.on{color:var(--ink);border-color:rgba(124,92,255,.4);background:rgba(124,92,255,.08)}
+
+  .badges{display:flex;gap:14px;flex-wrap:wrap;margin-top:3vh}
+  .badge{padding:12px 18px;border-radius:12px;font-size:14px;font-weight:600;letter-spacing:.04em}
+  .b-normal{background:rgba(140,140,160,.2);color:#c8c8d8}
+  .b-hd{background:linear-gradient(135deg,#36d1c6,#2a9d8f);color:#001815}
+  .b-loss{background:linear-gradient(135deg,#7c5cff,#5a3dff);color:#fff}
+  .b-hires{background:linear-gradient(135deg,#f5c542,#ff8a3d);color:#2b1500}
+
+  ul.feature-list{list-style:none;margin-top:2vh}
+  ul.feature-list li{position:relative;padding-left:22px;margin:10px 0;font-size:clamp(15px,1.4vw,18px)}
+  ul.feature-list li::before{content:"";position:absolute;left:0;top:11px;width:8px;height:8px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent-2))}
+
+  .stat-row{display:flex;gap:6vw;margin-top:4vh;flex-wrap:wrap}
+  .stat .n{font-size:clamp(34px,4vw,54px);font-weight:800;background:linear-gradient(90deg,var(--accent),var(--accent-3));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .stat .l{font-size:13px;color:var(--ink-dim);margin-top:4px;letter-spacing:.05em}
+
+  #s-end{justify-content:center;align-items:center;text-align:center;background:radial-gradient(1000px 700px at 50% 50%,rgba(124,92,255,.2),transparent 60%),var(--bg)}
+  .footer-note{position:absolute;bottom:6vh;font-size:12px;color:#4a4a60;letter-spacing:.15em}
+  svg{display:block}
+  .scroll-wrap{overflow:auto}
+  @media(max-width:900px){
+    .cards{grid-template-columns:repeat(2,1fr)}
+    .two-col{grid-template-columns:1fr}
+    .mock{max-height:50vh}
+  }
+</style>
+</head>
+<body>
+<div class="deck" id="deck">
+
+  <!-- 1. 封面 -->
+  <section class="slide" id="s-cover">
+    <div class="logo">
+      <svg viewBox="0 0 200 200" class="cd-spin" width="200" height="200">
+        <defs>
+          <radialGradient id="g1" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stop-color="#1a1a2a"/><stop offset="100%" stop-color="#0a0a12"/>
+          </radialGradient>
+          <linearGradient id="g2" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#7c5cff"/><stop offset="100%" stop-color="#ff5ca8"/>
+          </linearGradient>
+        </defs>
+        <circle cx="100" cy="100" r="96" fill="url(#g1)" stroke="url(#g2)" stroke-width="2"/>
+        <circle cx="100" cy="100" r="70" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="1"/>
+        <circle cx="100" cy="100" r="55" fill="none" stroke="rgba(255,255,255,.05)" stroke-width="1"/>
+        <circle cx="100" cy="100" r="40" fill="url(#g2)"/>
+        <circle cx="100" cy="100" r="6" fill="#0a0a12"/>
+        <g fill="rgba(255,255,255,.04)">
+          <circle cx="100" cy="30" r="2"/><circle cx="160" cy="80" r="2"/><circle cx="150" cy="150" r="2"/><circle cx="80" cy="170" r="2"/><circle cx="30" cy="120" r="2"/>
+        </g>
+      </svg>
+    </div>
+    <div class="eyebrow">XSTAR · ANDROID</div>
+    <h1><span class="grad-text">本地音乐</span><br>就该这样听</h1>
+    <p class="tagline">离线 · 沉浸 · 隐私至上</p>
+  </section>
+
+  <!-- 2. 产品定位 -->
+  <section class="slide" id="s-positioning">
+    <div class="eyebrow">产品定位</div>
+    <h2>把音乐还给本地</h2>
+    <p class="lead">XSTAR 是一款面向 Android 的本地音乐播放器。播放核心不依赖网络,只扫描你主动授权的文件夹,不上传、不修改、不删除你的原始文件。</p>
+    <div class="stat-row">
+      <div class="stat"><div class="n">0</div><div class="l">账号登录</div></div>
+      <div class="stat"><div class="n">0</div><div class="l">上传文件</div></div>
+      <div class="stat"><div class="n">100%</div><div class="l">离线播放</div></div>
+      <div class="stat"><div class="n">SAF</div><div class="l">用户授权目录</div></div>
+    </div>
+  </section>
+
+  <!-- 3. 核心功能概览 -->
+  <section class="slide" id="s-overview">
+    <div class="eyebrow">核心功能</div>
+    <h2>八大能力,一览</h2>
+    <div class="cards">
+      <div class="card"><div class="ic">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M5 4l14 8-14 8z" fill="#fff" stroke="none"/></svg></div><h3>沉浸播放</h3><p>旋转 CD、动态氛围色、精细进度拖动</p></div>
+      <div class="card"><div class="ic">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="#fff"/></svg></div><h3>FM 黑胶电台</h3><p>整库随机、极简黑胶、整页手势</p></div>
+      <div class="card"><div class="ic">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div><h3>DLNA 投屏</h3><p>同一 Wi-Fi 推送,手机做遥控</p></div>
+      <div class="card"><div class="ic">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/></svg></div><h3>音乐库与搜索</h3><p>歌曲/专辑/艺术家分类,关键词搜索</p></div>
+      <div class="card"><div class="ic">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M4 4h16v16H4z" fill="none"/><path d="M4 9l8 5 8-5" fill="#fff" stroke="none"/></svg></div><h3>音质识别</h3><p>普通/高清/无损/Hi-Res 自动徽标</p></div>
+      <div class="card"><div class="ic">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1.5" fill="#fff"/><path d="M21 15l-5-5-7 7" stroke="#fff"/></svg></div><h3>智能封面</h3><p>内嵌优先,iTunes 在线补充</p></div>
+      <div class="card"><div class="ic">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M4 5h16v14H4z"/><path d="M9 9h6M9 13h6M9 17h3" /></svg></div><h3>同步歌词</h3><p>本地 LRC + LRCLIB,行高亮滚动</p></div>
+      <div class="card"><div class="ic">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M12 3v14M5 10l7 7 7-7" /></svg></div><h3>在线搜歌下载</h3><p>多平台聚合,下载自动入库</p></div>
+    </div>
+  </section>
+
+  <!-- 4. 沉浸式播放页 -->
+  <section class="slide" id="s-player">
+    <div class="two-col">
+      <div>
+        <div class="eyebrow">沉浸式播放页</div>
+        <h2>旋转 CD,氛围随心</h2>
+        <ul class="feature-list">
+          <li>启动即入,无标题栏,无底导航</li>
+          <li>圆形封面播放时缓慢旋转,暂停保留角度</li>
+          <li>动态主题氛围色与封面脉冲缩放</li>
+          <li>歌曲名右侧显示音质徽标</li>
+          <li>点击 CD 切换到歌词页面</li>
+          <li>顺序 / 随机 / 单曲循环一键切换</li>
+        </ul>
+      </div>
+      <div class="mock">
+        <!-- 播放页示意 -->
+        <svg viewBox="0 0 270 480" width="100%" height="100%" preserveAspectRatio="xMidYMid slice">
+          <defs>
+            <radialGradient id="bg4" cx="50%" cy="35%" r="80%">
+              <stop offset="0%" stop-color="#3a2a6a"/><stop offset="60%" stop-color="#1a1430"/><stop offset="100%" stop-color="#0a0a12"/>
+            </radialGradient>
+            <linearGradient id="cd4" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#7c5cff"/><stop offset="100%" stop-color="#ff5ca8"/>
+            </linearGradient>
+          </defs>
+          <rect width="270" height="480" fill="url(#bg4)"/>
+          <!-- menu -->
+          <rect x="18" y="22" width="22" height="2" fill="#fff" opacity=".7"/>
+          <rect x="18" y="28" width="14" height="2" fill="#fff" opacity=".7"/>
+          <!-- CD -->
+          <g transform="translate(135 200)">
+            <circle r="92" fill="#0a0a12" stroke="url(#cd4)" stroke-width="1.5"/>
+            <circle r="78" fill="none" stroke="rgba(255,255,255,.06)"/>
+            <circle r="62" fill="none" stroke="rgba(255,255,255,.04)"/>
+            <circle r="48" fill="url(#cd4)"/>
+            <circle r="8" fill="#0a0a12"/>
+          </g>
+          <!-- text -->
+          <text x="135" y="332" text-anchor="middle" fill="#fff" font-size="15" font-weight="700" font-family="sans-serif">Singer · 歌曲名称</text>
+          <!-- badge -->
+          <rect x="195" y="320" width="42" height="16" rx="8" fill="#7c5cff"/>
+          <text x="216" y="332" text-anchor="middle" fill="#fff" font-size="9" font-weight="700">无损</text>
+          <!-- progress -->
+          <line x1="40" y1="360" x2="230" y2="360" stroke="rgba(255,255,255,.15)" stroke-width="3" stroke-linecap="round"/>
+          <line x1="40" y1="360" x2="140" y2="360" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+          <circle cx="140" cy="360" r="6" fill="#fff"/>
+          <text x="40" y="378" fill="#9a9ab0" font-size="10">1:42</text>
+          <text x="230" y="378" text-anchor="end" fill="#9a9ab0" font-size="10">3:24</text>
+          <!-- controls -->
+          <g transform="translate(135 420)" fill="#fff">
+            <path d="M-60 -10l-12 -8v16z M-60 -10h-22" stroke="#fff" stroke-width="2" fill="none"/>
+            <path d="M-50 -14v28l22 -14z"/>
+            <circle cx="0" cy="0" r="22" fill="#fff"/>
+            <rect x="-3" y="-10" width="6" height="20" rx="3" fill="#0a0a12"/>
+            <path d="M50 -14v28l22 -14z"/>
+            <path d="M80 -10l12 -8v16z M80 -10h22" stroke="#fff" stroke-width="2" fill="none"/>
+          </g>
+        </svg>
+      </div>
+    </div>
+  </section>
+
+  <!-- 5. FM 黑胶 -->
+  <section class="slide" id="s-fm">
+    <div class="two-col">
+      <div class="mock">
+        <svg viewBox="0 0 270 480" width="100%" height="100%" preserveAspectRatio="xMidYMid slice">
+          <defs>
+            <radialGradient id="vinyl5" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#2a2a36"/><stop offset="80%" stop-color="#0a0a0e"/><stop offset="100%" stop-color="#000"/>
+            </radialGradient>
+          </defs>
+          <rect width="270" height="480" fill="#050508"/>
+          <!-- lyrics -->
+          <g fill="#5a5a70" font-size="11" font-family="sans-serif" text-anchor="middle">
+            <text x="135" y="40">曾以为一眼就是永远</text>
+            <text x="135" y="58">时间却悄悄转身</text>
+          </g>
+          <text x="135" y="80" text-anchor="middle" fill="#fff" font-size="13" font-weight="700">星光落在你肩头</text>
+          <g fill="#5a5a70" font-size="11" font-family="sans-serif" text-anchor="middle">
+            <text x="135" y="100">像一场未完成的梦</text>
+            <text x="135" y="118">风把故事吹散</text>
+          </g>
+          <!-- vinyl -->
+          <g transform="translate(135 280)">
+            <circle r="110" fill="url(#vinyl5)"/>
+            <g stroke="rgba(255,255,255,.04)" fill="none">
+              <circle r="100"/><circle r="88"/><circle r="76"/><circle r="64"/><circle r="52"/>
+            </g>
+            <!-- progress ring -->
+            <circle r="108" fill="none" stroke="rgba(255,255,255,.08)" stroke-width="3"/>
+            <path d="M 0 -108 A 108 108 0 1 1 -76 76" stroke="#7c5cff" stroke-width="3" fill="none" stroke-linecap="round"/>
+            <!-- label -->
+            <circle r="42" fill="#1a1a2a" stroke="rgba(255,255,255,.1)"/>
+            <circle r="40" fill="url(#cd4)"/>
+            <circle r="6" fill="#0a0a12"/>
+          </g>
+          <!-- title -->
+          <text x="135" y="430" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">星光落在你肩头</text>
+          <text x="135" y="450" text-anchor="middle" fill="#9a9ab0" font-size="11">某歌手 · FM 随机</text>
+        </svg>
+      </div>
+      <div>
+        <div class="eyebrow">FM 黑胶电台</div>
+        <h2>整库随机,黑胶作画</h2>
+        <ul class="feature-list">
+          <li>开启即保存现场,从全库随机独立队列</li>
+          <li>极简黑胶画布:沟槽、内圈标签、边缘高光</li>
+          <li>外缘闭合圆环展示进度,暂停显示透明标识</li>
+          <li>整页单击播放/暂停,左右滑动随机换歌</li>
+          <li>标题上方歌词随播放进度高亮滚动</li>
+          <li>应用重启继续 FM,关闭即恢复原现场</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 6. DLNA 投屏 -->
+  <section class="slide" id="s-cast">
+    <div class="two-col">
+      <div>
+        <div class="eyebrow">DLNA / UPnP 投屏</div>
+        <h2>把客厅变成音乐厅</h2>
+        <ul class="feature-list">
+          <li>侧滑入口,FM 模式下禁用</li>
+          <li>手机做 Control Point,发现同一 Wi-Fi 渲染器</li>
+          <li>自建本地 HTTP 音频流,Range/206 支持 seek</li>
+          <li>手机全程掌控队列、模式、进度、歌词与封面</li>
+          <li>本地静音保留现场,断开自动恢复</li>
+          <li>锁屏/切后台前台服务保活,持续投屏</li>
+          <li>播放页右上"正在投到 &lt;设备名&gt;"胶囊</li>
+        </ul>
+      </div>
+      <div>
+        <svg viewBox="0 0 400 320" width="100%" height="auto">
+          <defs>
+            <linearGradient id="tv6" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#1a1a2a"/><stop offset="100%" stop-color="#0a0a12"/>
+            </linearGradient>
+            <linearGradient id="wave6" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0%" stop-color="#7c5cff"/><stop offset="100%" stop-color="#ff5ca8"/>
+            </linearGradient>
+          </defs>
+          <!-- phone -->
+          <g transform="translate(40 90)">
+            <rect width="80" height="150" rx="12" fill="#0e0e18" stroke="rgba(255,255,255,.15)"/>
+            <rect x="6" y="6" width="68" height="138" rx="6" fill="url(#tv6)"/>
+            <circle cx="40" cy="60" r="22" fill="none" stroke="url(#wave6)" stroke-width="2"/>
+            <circle cx="40" cy="60" r="8" fill="url(#wave6)"/>
+            <text x="40" y="105" text-anchor="middle" fill="#9a9ab0" font-size="8">Control</text>
+            <text x="40" y="118" text-anchor="middle" fill="#9a9ab0" font-size="8">Point</text>
+          </g>
+          <!-- wifi waves -->
+          <g transform="translate(170 165)" stroke="url(#wave6)" stroke-width="2.5" fill="none" stroke-linecap="round">
+            <path d="M-20 0 A20 20 0 0 1 20 0"/>
+            <path d="M-32 0 A32 32 0 0 1 32 0" opacity=".7"/>
+            <path d="M-44 0 A44 44 0 0 1 44 0" opacity=".4"/>
+          </g>
+          <!-- speaker / tv -->
+          <g transform="translate(230 70)">
+            <rect width="140" height="180" rx="10" fill="#0e0e18" stroke="rgba(255,255,255,.15)"/>
+            <rect x="10" y="10" width="120" height="120" rx="6" fill="url(#tv6)"/>
+            <!-- album art on tv -->
+            <defs>
+              <linearGradient id="art6" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#7c5cff"/><stop offset="100%" stop-color="#ff5ca8"/>
+              </linearGradient>
+            </defs>
+            <circle cx="70" cy="70" r="42" fill="url(#art6)"/>
+            <circle cx="70" cy="70" r="10" fill="#0a0a12"/>
+            <!-- speakers -->
+            <circle cx="35" cy="155" r="8" fill="#1a1a2a" stroke="rgba(255,255,255,.1)"/>
+            <circle cx="105" cy="155" r="8" fill="#1a1a2a" stroke="rgba(255,255,255,.1)"/>
+            <text x="70" y="175" text-anchor="middle" fill="#9a9ab0" font-size="9">Renderer</text>
+          </g>
+        </svg>
+      </div>
+    </div>
+  </section>
+
+  <!-- 7. 音乐库 -->
+  <section class="slide" id="s-library">
+    <div class="two-col">
+      <div class="mock">
+        <svg viewBox="0 0 270 480" width="100%" height="100%" preserveAspectRatio="xMidYMid slice">
+          <rect width="270" height="480" fill="#0e0e18"/>
+          <text x="135" y="40" text-anchor="middle" fill="#fff" font-size="16" font-weight="800">音乐库</text>
+          <!-- search -->
+          <rect x="20" y="56" width="230" height="30" rx="15" fill="#1a1a2a" stroke="rgba(255,255,255,.08)"/>
+          <circle cx="38" cy="71" r="5" fill="none" stroke="#9a9ab0" stroke-width="1.5"/>
+          <line x1="42" y1="75" x2="46" y2="79" stroke="#9a9ab0" stroke-width="1.5"/>
+          <text x="56" y="76" fill="#5a5a72" font-size="10">搜索歌曲、艺术家、专辑</text>
+          <!-- tabs -->
+          <g font-size="11" font-weight="700">
+            <text x="30" y="110" fill="#fff">歌曲</text>
+            <line x1="22" y1="118" x2="48" y2="118" stroke="#7c5cff" stroke-width="2"/>
+            <text x="110" y="110" fill="#5a5a72">专辑</text>
+            <text x="180" y="110" fill="#5a5a72">艺术家</text>
+          </g>
+          <!-- list -->
+          <g font-size="11">
+            <g transform="translate(0 130)">
+              <rect x="20" y="0" width="40" height="40" rx="6" fill="url(#cd4)"/>
+              <text x="70" y="16" fill="#fff" font-weight="600">起风了</text>
+              <text x="70" y="32" fill="#9a9ab0" font-size="9">买辣椒也用券 · MP3</text>
+              <rect x="225" y="22" width="24" height="11" rx="3" fill="#36d1c6"/>
+              <text x="237" y="30" text-anchor="middle" fill="#001815" font-size="7" font-weight="700">高清</text>
+            </g>
+            <g transform="translate(0 180)">
+              <rect x="20" y="0" width="40" height="40" rx="6" fill="#1a1a2a" stroke="rgba(255,255,255,.08)"/>
+              <text x="70" y="16" fill="#fff" font-weight="600">夜空中最亮的星</text>
+              <text x="70" y="32" fill="#9a9ab0" font-size="9">逃跑计划 · FLAC</text>
+              <rect x="221" y="22" width="28" height="11" rx="3" fill="#7c5cff"/>
+              <text x="235" y="30" text-anchor="middle" fill="#fff" font-size="7" font-weight="700">无损</text>
+            </g>
+            <g transform="translate(0 230)">
+              <rect x="20" y="0" width="40" height="40" rx="6" fill="url(#g2)"/>
+              <text x="70" y="16" fill="#fff" font-weight="600">海阔天空</text>
+              <text x="70" y="32" fill="#9a9ab0" font-size="9">Beyond · FLAC 24/96</text>
+              <rect x="215" y="22" width="34" height="11" rx="3" fill="#f5c542"/>
+              <text x="232" y="30" text-anchor="middle" fill="#2b1500" font-size="7" font-weight="700">Hi-Res</text>
+            </g>
+            <g transform="translate(0 280)">
+              <rect x="20" y="0" width="40" height="40" rx="6" fill="#1a1a2a" stroke="rgba(255,255,255,.08)"/>
+              <text x="70" y="16" fill="#fff" font-weight="600">平凡之路</text>
+              <text x="70" y="32" fill="#9a9ab0" font-size="9">朴树 · MP3</text>
+              <rect x="225" y="22" width="24" height="11" rx="3" fill="#8c8ca0" opacity=".4"/>
+              <text x="237" y="30" text-anchor="middle" fill="#c8c8d8" font-size="7" font-weight="700">普通</text>
+            </g>
+            <g transform="translate(0 330)">
+              <rect x="20" y="0" width="40" height="40" rx="6" fill="url(#cd4)"/>
+              <text x="70" y="16" fill="#fff" font-weight="600">稻香</text>
+              <text x="70" y="32" fill="#9a9ab0" font-size="9">周杰伦 · M4A</text>
+              <rect x="225" y="22" width="24" height="11" rx="3" fill="#36d1c6"/>
+              <text x="237" y="30" text-anchor="middle" fill="#001815" font-size="7" font-weight="700">高清</text>
+            </g>
+          </g>
+          <!-- FAB -->
+          <circle cx="220" cy="430" r="22" fill="url(#cd4)"/>
+          <line x1="220" y1="422" x2="220" y2="438" stroke="#fff" stroke-width="2"/>
+          <line x1="212" y1="430" x2="228" y2="430" stroke="#fff" stroke-width="2"/>
+        </svg>
+      </div>
+      <div>
+        <div class="eyebrow">音乐库</div>
+        <h2>你的音乐,你的秩序</h2>
+        <ul class="feature-list">
+          <li>歌曲 / 专辑 / 艺术家三大分类</li>
+          <li>关键词搜索,中英文皆可</li>
+          <li>连续添加多个授权文件夹</li>
+          <li>移除目录即清理对应索引</li>
+          <li>手动重新扫描,保留收藏与播放列表</li>
+          <li>点击歌曲自动返回播放页</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 8. 音质识别 -->
+  <section class="slide" id="s-quality">
+    <div class="eyebrow">音质识别</div>
+    <h2>每一首歌,都标得清清楚楚</h2>
+    <p class="lead">扫描时双 API 读取音频参数,自动按格式、码率、采样率与位深归类,让你一眼分辨音质。</p>
+    <div class="badges">
+      <div class="badge b-normal">普通 · MP3 / AAC &lt;256kbps</div>
+      <div class="badge b-hd">高清 · 有损 ≥256kbps</div>
+      <div class="badge b-loss">无损 · FLAC / ALAC / WAV</div>
+      <div class="badge b-hires">Hi-Res · ≥24bit 或 &gt;48kHz</div>
+    </div>
+    <div class="pills" style="margin-top:4vh">
+      <span class="pill on">MP3</span>
+      <span class="pill on">M4A</span>
+      <span class="pill on">AAC</span>
+      <span class="pill on">FLAC</span>
+      <span class="pill on">OGG</span>
+      <span class="pill on">OPUS</span>
+      <span class="pill on">WAV</span>
+      <span class="pill on">WMA</span>
+    </div>
+    <p style="margin-top:4vh">歌曲详情页展示编码、码率、采样率、位深、声道与文件信息,所见即所听。</p>
+  </section>
+
+  <!-- 9. 智能封面 -->
+  <section class="slide" id="s-artwork">
+    <div class="two-col">
+      <div>
+        <div class="eyebrow">智能封面</div>
+        <h2>该有的图,一张不少</h2>
+        <ul class="feature-list">
+          <li>优先读取音乐文件内嵌封面</li>
+          <li>无内嵌时,用户主动点击"获取封面"</li>
+          <li>iTunes Search API 查询,多候选可选</li>
+          <li>用户确认后压缩为 JPG 并缓存</li>
+          <li>应用至该专辑全部歌曲</li>
+          <li>可在设置中关闭在线封面获取</li>
+          <li>扫描与启动时不发起任何在线请求</li>
+        </ul>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;align-self:center">
+        <div style="aspect-ratio:1;border-radius:14px;background:linear-gradient(135deg,#7c5cff,#ff5ca8);display:grid;place-items:center;color:#fff;font-weight:700">内嵌</div>
+        <div style="aspect-ratio:1;border-radius:14px;background:linear-gradient(135deg,#36d1c6,#2a9d8f);display:grid;place-items:center;color:#001815;font-weight:700">iTunes</div>
+        <div style="aspect-ratio:1;border-radius:14px;background:linear-gradient(135deg,#f5c542,#ff8a3d);display:grid;place-items:center;color:#2b1500;font-weight:700">缓存</div>
+        <div style="aspect-ratio:1;border-radius:14px;background:#1a1a2a;border:1px solid var(--line);display:grid;place-items:center;color:#9a9ab0;font-weight:700">默认符号</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 10. 歌词 -->
+  <section class="slide" id="s-lyrics">
+    <div class="two-col">
+      <div class="mock">
+        <svg viewBox="0 0 270 480" width="100%" height="100%" preserveAspectRatio="xMidYMid slice">
+          <defs>
+            <linearGradient id="lybg" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stop-color="#2a1a4a"/><stop offset="100%" stop-color="#0a0a12"/>
+            </linearGradient>
+          </defs>
+          <rect width="270" height="480" fill="url(#lybg)"/>
+          <text x="135" y="50" text-anchor="middle" fill="#fff" font-size="15" font-weight="700">星光落在你肩头</text>
+          <text x="135" y="70" text-anchor="middle" fill="#9a9ab0" font-size="11">某歌手 · 无损</text>
+          <g text-anchor="middle" font-family="sans-serif">
+            <text x="135" y="130" fill="#3a3a4a" font-size="12">晚风吹过山岗</text>
+            <text x="135" y="155" fill="#6a6a80" font-size="13">带走昨日的忧伤</text>
+            <text x="135" y="185" fill="#aaaad0" font-size="15">你站在灯火阑珊</text>
+            <text x="135" y="220" fill="#fff" font-size="18" font-weight="800">星光落在你肩头</text>
+            <line x1="100" y1="232" x2="170" y2="232" stroke="#7c5cff" stroke-width="2"/>
+            <text x="135" y="260" fill="#aaaad0" font-size="15">像一场未完成的梦</text>
+            <text x="135" y="290" fill="#6a6a80" font-size="13">风把故事吹散</text>
+            <text x="135" y="320" fill="#3a3a4a" font-size="12">只留下沉默</text>
+          </g>
+          <line x1="40" y1="420" x2="230" y2="420" stroke="rgba(255,255,255,.15)" stroke-width="3" stroke-linecap="round"/>
+          <line x1="40" y1="420" x2="160" y2="420" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+          <circle cx="160" cy="420" r="6" fill="#fff"/>
+        </svg>
+      </div>
+      <div>
+        <div class="eyebrow">歌词体验</div>
+        <h2>逐行高亮,随播放滚动</h2>
+        <ul class="feature-list">
+          <li>支持 [mm:ss.xx] 与 [mm:ss:xxx] 时间标签</li>
+          <li>一行多时间标签、UTF-8 BOM 兼容</li>
+          <li>缓存歌词 → 同目录同名 .lrc → LRCLIB 在线</li>
+          <li>LRCLIB 多候选,用户选择后缓存</li>
+          <li>纯文本歌词不执行时间滚动</li>
+          <li>设置中可关闭在线歌词获取</li>
+          <li>FM 切歌后自动补充缺失歌词</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 11. 在线搜歌 -->
+  <section class="slide" id="s-online">
+    <div class="two-col">
+      <div>
+        <div class="eyebrow">在线搜歌与下载</div>
+        <h2>缺的那首,一键补齐</h2>
+        <ul class="feature-list">
+          <li>侧滑入口,开箱即用公共聚合服务</li>
+          <li>网易云、QQ、酷狗、酷我、咪咕多平台切换</li>
+          <li>展示标题、歌手、专辑与来源平台</li>
+          <li>首次下载引导选择 SAF 下载目录</li>
+          <li>解析最佳可用音质直链,流式下载</li>
+          <li>下载完成自动写入音乐库,立即播放</li>
+          <li>重复下载自动识别并跳过</li>
+        </ul>
+      </div>
+      <div class="mock">
+        <svg viewBox="0 0 270 480" width="100%" height="100%" preserveAspectRatio="xMidYMid slice">
+          <rect width="270" height="480" fill="#0e0e18"/>
+          <text x="135" y="40" text-anchor="middle" fill="#fff" font-size="16" font-weight="800">在线搜歌</text>
+          <rect x="20" y="56" width="230" height="30" rx="15" fill="#1a1a2a" stroke="rgba(255,255,255,.08)"/>
+          <text x="35" y="76" fill="#5a5a72" font-size="10">搜索关键词</text>
+          <!-- platform tabs -->
+          <g font-size="9">
+            <rect x="20" y="100" width="40" height="22" rx="11" fill="#7c5cff"/>
+            <text x="40" y="115" text-anchor="middle" fill="#fff" font-weight="700">网易云</text>
+            <rect x="65" y="100" width="30" height="22" rx="11" fill="#1a1a2a" stroke="rgba(255,255,255,.08)"/>
+            <text x="80" y="115" text-anchor="middle" fill="#9a9ab0">QQ</text>
+            <rect x="100" y="100" width="30" height="22" rx="11" fill="#1a1a2a" stroke="rgba(255,255,255,.08)"/>
+            <text x="115" y="115" text-anchor="middle" fill="#9a9ab0">酷狗</text>
+            <rect x="135" y="100" width="30" height="22" rx="11" fill="#1a1a2a" stroke="rgba(255,255,255,.08)"/>
+            <text x="150" y="115" text-anchor="middle" fill="#9a9ab0">酷我</text>
+            <rect x="170" y="100" width="30" height="22" rx="11" fill="#1a1a2a" stroke="rgba(255,255,255,.08)"/>
+            <text x="185" y="115" text-anchor="middle" fill="#9a9ab0">咪咕</text>
+          </g>
+          <!-- results -->
+          <g font-size="10">
+            <g transform="translate(0 140)">
+              <rect x="20" y="0" width="40" height="40" rx="6" fill="url(#cd4)"/>
+              <text x="70" y="16" fill="#fff" font-weight="600">起风了</text>
+              <text x="70" y="32" fill="#9a9ab0" font-size="8">买辣椒也用券 · 起风了</text>
+              <text x="70" y="44" fill="#5a5a72" font-size="7">网易云</text>
+              <circle cx="230" cy="20" r="11" fill="#7c5cff"/>
+              <line x1="225" y1="20" x2="235" y2="20" stroke="#fff" stroke-width="2"/>
+              <line x1="230" y1="15" x2="230" y2="25" stroke="#fff" stroke-width="2"/>
+            </g>
+            <g transform="translate(0 190)">
+              <rect x="20" y="0" width="40" height="40" rx="6" fill="#1a1a2a" stroke="rgba(255,255,255,.08)"/>
+              <text x="70" y="16" fill="#fff" font-weight="600">晴天</text>
+              <text x="70" y="32" fill="#9a9ab0" font-size="8">周杰伦 · 叶惠美</text>
+              <text x="70" y="44" fill="#5a5a72" font-size="7">网易云</text>
+              <!-- downloading -->
+              <rect x="210" y="14" width="30" height="12" rx="6" fill="#1a1a2a"/>
+              <rect x="210" y="14" width="18" height="12" rx="6" fill="#36d1c6"/>
+            </g>
+            <g transform="translate(0 240)">
+              <rect x="20" y="0" width="40" height="40" rx="6" fill="url(#g2)"/>
+              <text x="70" y="16" fill="#fff" font-weight="600">七里香</text>
+              <text x="70" y="32" fill="#9a9ab0" font-size="8">周杰伦 · 七里香</text>
+              <text x="70" y="44" fill="#5a5a72" font-size="7">网易云</text>
+              <path d="M222 20 l5 5 l8 -10" stroke="#36d1c6" stroke-width="2" fill="none"/>
+            </g>
+            <g transform="translate(0 290)">
+              <rect x="20" y="0" width="40" height="40" rx="6" fill="#1a1a2a" stroke="rgba(255,255,255,.08)"/>
+              <text x="70" y="16" fill="#fff" font-weight="600">稻香</text>
+              <text x="70" y="32" fill="#9a9ab0" font-size="8">周杰伦 · 魔杰座</text>
+              <text x="70" y="44" fill="#5a5a72" font-size="7">网易云</text>
+              <circle cx="230" cy="20" r="11" fill="#7c5cff"/>
+              <line x1="225" y1="20" x2="235" y2="20" stroke="#fff" stroke-width="2"/>
+              <line x1="230" y1="15" x2="230" y2="25" stroke="#fff" stroke-width="2"/>
+            </g>
+          </g>
+        </svg>
+      </div>
+    </div>
+  </section>
+
+  <!-- 12. 隐私 -->
+  <section class="slide" id="s-privacy">
+    <div class="eyebrow">隐私承诺</div>
+    <h2>你的音乐,你做主</h2>
+    <div class="cards" style="grid-template-columns:repeat(3,1fr);margin-top:4vh">
+      <div class="card"><div class="ic">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M18 10V7a6 6 0 0 0-12 0v3"/><rect x="5" y="10" width="14" height="10" rx="2"/></svg></div><h3>不上传</h3><p>本地音频文件、目录、封面、播放历史均不上传</p></div>
+      <div class="card"><div class="ic">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9"/><path d="M3 3v6h6"/></svg></div><h3>不修改</h3><p>不删除、移动或修改用户原始音频文件</p></div>
+      <div class="card"><div class="ic">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M7 12l3 3 6-6"/></svg></div><h3>主动触发</h3><p>在线封面、歌词、搜歌仅在你主动操作时请求</p></div>
+    </div>
+    <p style="margin-top:5vh" class="lead">iTunes 仅发送艺术家与专辑名;LRCLIB 发送歌曲标题、艺术家、专辑与时长;在线搜歌仅在搜索时发送关键词。关闭对应开关后,不再发起任何网络请求。</p>
+  </section>
+
+  <!-- 13. 结尾 -->
+  <section class="slide" id="s-end">
+    <div class="logo" style="margin-bottom:4vh">
+      <svg viewBox="0 0 200 200" width="160" height="160">
+        <defs>
+          <linearGradient id="g13" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#7c5cff"/><stop offset="100%" stop-color="#ff5ca8"/>
+          </linearGradient>
+        </defs>
+        <circle cx="100" cy="100" r="92" fill="none" stroke="url(#g13)" stroke-width="3"/>
+        <circle cx="100" cy="100" r="60" fill="url(#g13)"/>
+        <circle cx="100" cy="100" r="8" fill="#0a0a12"/>
+      </svg>
+    </div>
+    <h1><span class="grad-text">你的音乐</span><br>你来掌控</h1>
+    <p class="tagline" style="margin-top:3vh">XSTAR · 本地优先 · 离线沉浸 · 隐私至上</p>
+    <div class="footer-note">THANK YOU</div>
+  </section>
+
+</div>
+
+<div class="hint">← → 切换 · F 全屏 · Esc 退出</div>
+<div class="nav">
+  <button id="prev">‹</button>
+  <span class="count"><span id="cur">1</span> / <span id="total">13</span></span>
+  <button id="next">›</button>
+</div>
+
+<script>
+  const slides=document.querySelectorAll('.slide');
+  const total=slides.length;
+  let idx=0;
+  document.getElementById('total').textContent=total;
+  function show(i){
+    idx=(i+total)%total;
+    slides.forEach((s,n)=>s.classList.toggle('active',n===idx));
+    document.getElementById('cur').textContent=idx+1;
+  }
+  show(0);
+  document.getElementById('prev').onclick=()=>show(idx-1);
+  document.getElementById('next').onclick=()=>show(idx+1);
+  document.addEventListener('keydown',e=>{
+    if(e.key==='ArrowRight'||e.key===' '||e.key==='PageDown'){e.preventDefault();show(idx+1);}
+    else if(e.key==='ArrowLeft'||e.key==='PageUp'){e.preventDefault();show(idx-1);}
+    else if(e.key==='Home'){show(0);}
+    else if(e.key==='End'){show(total-1);}
+    else if(e.key==='f'||e.key==='F'){
+      if(!document.fullscreenElement)document.documentElement.requestFullscreen();
+      else document.exitFullscreen();
+    }
+  });
+  // click right half to advance, left half to go back (skip UI controls)
+  document.getElementById('deck').addEventListener('click',e=>{
+    if(e.target.closest('.nav')||e.target.closest('.hint'))return;
+    const x=e.clientX/window.innerWidth;
+    if(x>0.6)show(idx+1);else if(x<0.4)show(idx-1);
+  });
+</script>
+</body>
+</html>
