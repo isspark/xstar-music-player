@@ -39,6 +39,8 @@ class PlayerController(context: Context) {
     val equalizerState: StateFlow<EqualizerState> = _equalizerState.asStateFlow()
     private val _karaokeState = MutableStateFlow(KaraokeState())
     val karaokeState: StateFlow<KaraokeState> = _karaokeState.asStateFlow()
+    private val _spectrum = MutableStateFlow(FloatArray(0))
+    val spectrum: StateFlow<FloatArray> = _spectrum.asStateFlow()
     private val listener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) { _state.value = _state.value.copy(playing = isPlaying) }
         override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
@@ -60,6 +62,7 @@ class PlayerController(context: Context) {
             when (command.customAction) {
                 EqualizerCommands.STATE_CHANGED -> _equalizerState.value = equalizerStateFromBundle(args)
                 KaraokeCommands.STATE_CHANGED -> _karaokeState.value = karaokeStateFromBundle(args)
+                SpectrumCommands.STATE_CHANGED -> _spectrum.value = spectrumFromBundle(args)
             }
             return com.google.common.util.concurrent.Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
         }

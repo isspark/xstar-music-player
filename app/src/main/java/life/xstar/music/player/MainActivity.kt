@@ -63,6 +63,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
@@ -143,6 +145,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val folders = preferences.folders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val theme = preferences.theme.stateIn(viewModelScope, SharingStarted.Eagerly, ThemeAccent.Blue)
     val beatEffect = preferences.beatEffect.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    val bottomEffect = preferences.bottomEffect.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val onlineArtworkEnabled = preferences.onlineArtworkEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val onlineLyricsEnabled = preferences.onlineLyricsEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val fmModeEnabled = preferences.fmModeEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
@@ -261,6 +264,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     }
     fun setTheme(theme: ThemeAccent) = viewModelScope.launch { preferences.setTheme(theme) }
     fun setBeatEffect(enabled: Boolean) = viewModelScope.launch { preferences.setBeatEffect(enabled) }
+    fun setBottomEffect(enabled: Boolean) = viewModelScope.launch { preferences.setBottomEffect(enabled) }
     fun setOnlineArtworkEnabled(enabled: Boolean) = viewModelScope.launch { preferences.setOnlineArtworkEnabled(enabled) }
     fun setOnlineLyricsEnabled(enabled: Boolean) = viewModelScope.launch { preferences.setOnlineLyricsEnabled(enabled) }
     fun artworkCandidates(artist: String, album: String) = viewModelScope.async { repo.findArtworkCandidates(artist, album) }
@@ -860,6 +864,7 @@ sealed class OnlineSearchUiState {
     var showQueue by remember { mutableStateOf(false) }
     val theme by vm.theme.collectAsStateWithLifecycle()
     val beatEffect by vm.beatEffect.collectAsStateWithLifecycle()
+    val bottomEffect by vm.bottomEffect.collectAsStateWithLifecycle()
     val castState by vm.castState.collectAsStateWithLifecycle()
     val artworkColors by produceState(initialValue = ArtworkColors.fallback(theme), state.song?.albumArtUri, theme) {
         value = loadArtworkColors(context, state.song?.albumArtUri, theme)
@@ -926,6 +931,14 @@ sealed class OnlineSearchUiState {
                 )
             }
         }
+    }
+    if (bottomEffect && !showLyrics && !castConnected) {
+        BottomSpectrumStage(
+            levelsFlow = vm.player.spectrum,
+            playing = state.playing,
+            colors = artworkColors,
+            modifier = Modifier.fillMaxWidth().height(BOTTOM_STAGE_HEIGHT).navigationBarsPadding().align(Alignment.BottomCenter)
+        )
     }
     Column(Modifier.fillMaxSize().padding(horizontal = 22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.weight(if (showLyrics) .12f else .45f))
@@ -2105,6 +2118,7 @@ sealed class OnlineSearchUiState {
     val context = LocalContext.current
     val folders by vm.folders.collectAsStateWithLifecycle()
     val beatEffect by vm.beatEffect.collectAsStateWithLifecycle()
+    val bottomEffect by vm.bottomEffect.collectAsStateWithLifecycle()
     val onlineArtwork by vm.onlineArtworkEnabled.collectAsStateWithLifecycle()
     val onlineSearch by vm.onlineSearchEnabled.collectAsStateWithLifecycle()
     val onlinePlatform by vm.onlinePlatform.collectAsStateWithLifecycle()
@@ -2189,6 +2203,13 @@ sealed class OnlineSearchUiState {
             leadingContent = { Icon(Icons.Default.GraphicEq, null) },
             trailingContent = { Switch(checked = beatEffect, onCheckedChange = vm::setBeatEffect) }
         )
+        ListItem(
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            headlineContent = { Text("底部频谱特效", color = Color.White) },
+            supportingContent = { Text("播放时在页面底部显示实时频谱律动与氛围粒子", color = Color.Gray) },
+            leadingContent = { Icon(Icons.Default.Equalizer, null) },
+            trailingContent = { Switch(checked = bottomEffect, onCheckedChange = vm::setBottomEffect) }
+        )
         Text("音乐文件夹", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
         folders.forEach { uri ->
             ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(folderName(uri), color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) }, supportingContent = { Text(uri, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis) }, leadingContent = { Icon(Icons.Default.Folder, null) }, trailingContent = { IconButton({ vm.removeFolder(uri) }, enabled = !scanState.running) { Icon(Icons.Default.Close, "移除") } })
@@ -2268,3 +2289,145 @@ private suspend fun loadArtworkColors(context: android.content.Context, artworkU
 }
 private fun ThemeAccent.color() = when (this) { ThemeAccent.Blue -> Color(0xFF78A9FF); ThemeAccent.Violet -> Color(0xFFAE8CFF); ThemeAccent.Rose -> Color(0xFFFF7998); ThemeAccent.Emerald -> Color(0xFF55D6A9); ThemeAccent.Amber -> Color(0xFFFFBE5C) }
 @Composable private fun XstarTheme(accent: ThemeAccent, content: @Composable () -> Unit) { MaterialTheme(colorScheme = darkColorScheme(primary = accent.color(), background = Color(0xFF090B10), surface = Color(0xFF171B23)), content = content) }
+
+private val BOTTOM_STAGE_HEIGHT = 132.dp
+
+private const val SPECTRUM_ATTACK_RATE = 12f
+private const val SPECTRUM_RELEASE_RATE = 1.6f
+private const val SPECTRUM_PAUSE_RELEASE_RATE = 8f
+private const val SPECTRUM_PARTICLE_COUNT = 20
+private const val SPECTRUM_REAL_FLOOR = 0.06f
+private const val SPECTRUM_REAL_WINDOW_MS = 5_000L
+
+@Composable
+private fun BottomSpectrumStage(
+    levelsFlow: StateFlow<FloatArray>,
+    playing: Boolean,
+    colors: ArtworkColors,
+    modifier: Modifier = Modifier
+) {
+    val levels by levelsFlow.collectAsStateWithLifecycle()
+    val now = remember { mutableFloatStateOf(0f) }
+    val prevDrawT = remember { floatArrayOf(-1f) }
+    val smooth = remember { FloatArray(SPECTRUM_BAND_COUNT) }
+    var lastMusicAt by remember { mutableLongStateOf(0L) }
+    var animActive by remember { mutableStateOf(false) }
+
+    LaunchedEffect(levels) {
+        if (levels.size == SPECTRUM_BAND_COUNT && levels.any { it > SPECTRUM_REAL_FLOOR }) {
+            lastMusicAt = SystemClock.uptimeMillis()
+        }
+    }
+
+    LaunchedEffect(playing) {
+        animActive = true
+        if (playing) {
+            smooth.fill(0f)
+            while (true) withFrameNanos { now.floatValue = it / 1_000_000_000f }
+        } else {
+            val end = SystemClock.uptimeMillis() + 700L
+            while (SystemClock.uptimeMillis() < end) withFrameNanos { now.floatValue = it / 1_000_000_000f }
+            animActive = false
+        }
+    }
+
+    Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        if (w <= 0f || h <= 0f) return@Canvas
+        val t = now.floatValue
+        val primary = colors.primary
+        val light = colors.light
+
+        drawRect(
+            brush = Brush.verticalGradient(
+                0f to Color.Transparent,
+                0.3f to primary.copy(alpha = 0.14f),
+                1f to primary.copy(alpha = 0.5f)
+            )
+        )
+        drawRoundRect(
+            brush = Brush.horizontalGradient(
+                listOf(Color.Transparent, light.copy(alpha = 0.5f), primary.copy(alpha = 0.22f), light.copy(alpha = 0.5f), Color.Transparent)
+            ),
+            topLeft = Offset(0f, h - 2.dp.toPx()),
+            size = Size(w, 2.dp.toPx()),
+            cornerRadius = CornerRadius(1.dp.toPx(), 1.dp.toPx())
+        )
+        if (!animActive) return@Canvas
+
+        if (playing) {
+            val particleCount = SPECTRUM_PARTICLE_COUNT
+            for (p in 0 until particleCount) {
+                val seed = p * 0.61803398875f
+                val rise = t * (0.05f + (p % 6) * 0.014f) + seed
+                val yNorm = (rise % 1f)
+                val sway = kotlin.math.sin(t * 1.3f + seed * 17f) * 20.dp.toPx() * yNorm
+                val x = (((seed * 13f) % 1f) * w + sway).coerceIn(0f, w)
+                val twinkle = 0.5f + 0.5f * kotlin.math.sin(t * (1.6f + p % 3) + seed * 40f)
+                val alpha = twinkle * 0.6f * (1f - yNorm * 0.5f)
+                if (alpha <= 0.01f) continue
+                val r = (1.1f + (p % 4) * 0.9f).dp.toPx() * (1f - yNorm * 0.5f)
+                drawCircle(
+                    color = lerp(light, primary, seed % 1f).copy(alpha = alpha),
+                    radius = r,
+                    center = Offset(x, h - 4.dp.toPx() - yNorm * (h - 8.dp.toPx()))
+                )
+            }
+        }
+
+        val dt = if (prevDrawT[0] >= 0f) (t - prevDrawT[0]).coerceIn(0f, 0.1f) else 0.016f
+        prevDrawT[0] = t
+        val attack = 1f - kotlin.math.exp(-dt * SPECTRUM_ATTACK_RATE)
+        val release = 1f - kotlin.math.exp(-dt * if (playing) SPECTRUM_RELEASE_RATE else SPECTRUM_PAUSE_RELEASE_RATE)
+
+        val slot = w / SPECTRUM_BAND_COUNT
+        val barW = (slot * 0.52f).coerceAtLeast(1.dp.toPx())
+        val maxH = h * 0.82f
+        val minBar = 1.5.dp.toPx()
+        val realFresh = levels.size == SPECTRUM_BAND_COUNT &&
+            (SystemClock.uptimeMillis() - lastMusicAt) < SPECTRUM_REAL_WINDOW_MS
+        for (i in 0 until SPECTRUM_BAND_COUNT) {
+            val target = when {
+                !playing -> 0f
+                realFresh -> levels[i]
+                else -> pseudoSpectrum(i, t)
+            }
+            val current = smooth[i]
+            val k = if (target > current) attack else release
+            smooth[i] = current + (target - current) * k
+            val level = smooth[i].coerceAtLeast(0f)
+            val barH = if (level <= 0.015f) 0f else (level * maxH).coerceAtLeast(minBar)
+            if (barH <= 0f) continue
+            val x = i * slot + (slot - barW) / 2f
+            val vivid = lerp(light, primary, i.toFloat() / SPECTRUM_BAND_COUNT)
+            val brighter = lerp(vivid, Color.White, 0.24f)
+            val color = brighter.copy(alpha = (0.7f + 0.3f * level).coerceIn(0f, 1f))
+            drawRoundRect(
+                color = color,
+                topLeft = Offset(x, h - barH),
+                size = Size(barW, barH),
+                cornerRadius = CornerRadius(barW / 2f, barW / 2f)
+            )
+            if (barH > minBar * 2f) {
+                drawCircle(
+                    color = Color.White.copy(alpha = 0.12f + 0.35f * level),
+                    radius = barW * 0.30f,
+                    center = Offset(x + barW / 2f, h - barH)
+                )
+            }
+        }
+    }
+}
+
+private fun pseudoSpectrum(i: Int, t: Float): Float {
+    val n = SPECTRUM_BAND_COUNT.toFloat()
+    val x = i / n
+    val a = 0.5f + 0.5f * kotlin.math.sin(t * 1.1f + x * 4.2f)
+    val b = 0.5f + 0.5f * kotlin.math.sin(t * 0.7f - x * 6.3f)
+    val c = 0.5f + 0.5f * kotlin.math.sin(t * 2.3f + i * 0.35f + kotlin.math.sin(t * 0.9f) * 2.0f)
+    val swell = 0.72f + 0.28f * (0.5f + 0.5f * kotlin.math.sin(t * 1.7f + kotlin.math.sin(t * 0.23f) * 3.0f))
+    val base = (0.30f * a + 0.30f * b + 0.40f * c) * swell
+    val shape = 0.55f + 0.45f * kotlin.math.sin(x * kotlin.math.PI.toFloat())
+    return (base * shape).coerceIn(0.05f, 1f)
+}

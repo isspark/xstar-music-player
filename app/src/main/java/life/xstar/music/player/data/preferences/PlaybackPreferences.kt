@@ -22,6 +22,7 @@ class PlaybackPreferences(private val context: Context) {
     private val foldersKey = stringSetPreferencesKey("music_folders")
     private val themeKey = stringPreferencesKey("theme_accent")
     private val beatEffectKey = booleanPreferencesKey("beat_effect")
+    private val bottomEffectKey = booleanPreferencesKey("bottom_effect")
     private val onlineArtworkKey = booleanPreferencesKey("online_artwork_enabled")
     private val onlineLyricsKey = booleanPreferencesKey("online_lyrics_enabled")
     private val playbackModeKey = stringPreferencesKey("playback_mode")
@@ -47,6 +48,7 @@ class PlaybackPreferences(private val context: Context) {
         runCatching { ThemeAccent.valueOf(values[themeKey] ?: ThemeAccent.Blue.name) }.getOrDefault(ThemeAccent.Blue)
     }
     val beatEffect: Flow<Boolean> = context.playbackDataStore.data.map { it[beatEffectKey] ?: true }
+    val bottomEffect: Flow<Boolean> = context.playbackDataStore.data.map { it[bottomEffectKey] ?: true }
     val onlineArtworkEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[onlineArtworkKey] ?: true }
     val onlineLyricsEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[onlineLyricsKey] ?: true }
     val fmModeEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[fmModeKey] ?: false }
@@ -123,6 +125,7 @@ class PlaybackPreferences(private val context: Context) {
 
     suspend fun setTheme(theme: ThemeAccent) = context.playbackDataStore.edit { it[themeKey] = theme.name }
     suspend fun setBeatEffect(enabled: Boolean) = context.playbackDataStore.edit { it[beatEffectKey] = enabled }
+    suspend fun setBottomEffect(enabled: Boolean) = context.playbackDataStore.edit { it[bottomEffectKey] = enabled }
     suspend fun setOnlineArtworkEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineArtworkKey] = enabled }
     suspend fun setOnlineLyricsEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineLyricsKey] = enabled }
     suspend fun setOnlineSearchEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineSearchEnabledKey] = enabled }

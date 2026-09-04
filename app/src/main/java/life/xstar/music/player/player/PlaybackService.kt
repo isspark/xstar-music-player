@@ -32,6 +32,7 @@ class PlaybackService : MediaSessionService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var equalizer: PlaybackEqualizer
     private lateinit var karaoke: KaraokeDspController
+    private lateinit var spectrum: SpectrumCapturer
     private var equalizerPersistenceJob: Job? = null
     private var karaokePersistenceJob: Job? = null
 
@@ -56,14 +57,31 @@ class PlaybackService : MediaSessionService() {
             .build()
         karaoke.bind(player)
         equalizer = PlaybackEqualizer(::broadcastEqualizerState)
+        spectrum = SpectrumCapturer(::broadcastSpectrum)
         player.addListener(object : Player.Listener {
-            override fun onAudioSessionIdChanged(audioSessionId: Int) = equalizer.attach(audioSessionId)
+            override fun onAudioSessionIdChanged(audioSessionId: Int) {
+                equalizer.attach(audioSessionId)
+                spectrum.attach(audioSessionId)
+            }
+
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                spectrum.ensureSession(player.audioSessionId)
+                spectrum.setEnabled(isPlaying)
+            }
+
+            override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
+                spectrum.ensureSession(player.audioSessionId)
+            }
         })
         mediaSession = MediaSession.Builder(this, player).setCallback(sessionCallback).build()
         scope.launch {
             equalizer.updateSettings((application as XstarApplication).playbackPreferences.readEqualizer())
             karaoke.updateSettings((application as XstarApplication).playbackPreferences.readKaraoke())
-            if (player.audioSessionId != C.AUDIO_SESSION_ID_UNSET) equalizer.attach(player.audioSessionId)
+            val session = player.audioSessionId
+            if (session != C.AUDIO_SESSION_ID_UNSET) {
+                equalizer.attach(session)
+                spectrum.attach(session)
+            }
         }
     }
 
@@ -72,6 +90,7 @@ class PlaybackService : MediaSessionService() {
     override fun onDestroy() {
         equalizer.release()
         karaoke.release()
+        spectrum.release()
         scope.cancel()
         mediaSession?.run {
             player.release()
@@ -88,6 +107,7 @@ class PlaybackService : MediaSessionService() {
             val commands = defaults.availableSessionCommands.buildUpon()
             EqualizerCommands.controllerCommands.forEach(commands::add)
             KaraokeCommands.controllerCommands.forEach(commands::add)
+            commands.add(SpectrumCommands.stateChanged)
             return MediaSession.ConnectionResult.accept(commands.build(), defaults.availablePlayerCommands)
         }
 
@@ -153,6 +173,13 @@ class PlaybackService : MediaSessionService() {
         val session = mediaSession ?: return
         session.connectedControllers.filter { it.packageName == packageName }.forEach { controller ->
             session.sendCustomCommand(controller, KaraokeCommands.stateChanged, state.toBundle())
+        }
+    }
+
+    private fun broadcastSpectrum(levels: FloatArray) {
+        val session = mediaSession ?: return
+        session.connectedControllers.filter { it.packageName == packageName }.forEach { controller ->
+            session.sendCustomCommand(controller, SpectrumCommands.stateChanged, spectrumToBundle(levels))
         }
     }
 
