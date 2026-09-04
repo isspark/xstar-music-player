@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
 import life.xstar.music.player.player.EqualizerSettings
 import life.xstar.music.player.player.KaraokeSettings
+import life.xstar.music.player.together.TogetherConnectMode
 
 private val Context.playbackDataStore by preferencesDataStore("playback")
 
@@ -42,6 +43,9 @@ class PlaybackPreferences(private val context: Context) {
     private val equalizerEnabledKey = booleanPreferencesKey("equalizer_enabled")
     private val equalizerPresetKey = longPreferencesKey("equalizer_preset")
     private val equalizerLevelsKey = stringPreferencesKey("equalizer_levels")
+    private val togetherConnectModeKey = stringPreferencesKey("together_connect_mode")
+    private val togetherServerEnabledKey = booleanPreferencesKey("together_server_enabled")
+    private val togetherServerAddressKey = stringPreferencesKey("together_server_address")
 
     val folders: Flow<Set<String>> = context.playbackDataStore.data.map { it[foldersKey].orEmpty() }
     val theme: Flow<ThemeAccent> = context.playbackDataStore.data.map { values ->
@@ -57,6 +61,12 @@ class PlaybackPreferences(private val context: Context) {
     val onlinePlatform: Flow<String> = context.playbackDataStore.data.map { it[onlinePlatformKey] ?: "netease" }
     val onlineApiBase: Flow<String> = context.playbackDataStore.data.map { it[onlineApiBaseKey].orEmpty() }
     val downloadFolder: Flow<String> = context.playbackDataStore.data.map { it[downloadFolderKey].orEmpty() }
+    val togetherConnectMode: Flow<TogetherConnectMode> = context.playbackDataStore.data.map { values ->
+        runCatching { TogetherConnectMode.valueOf(values[togetherConnectModeKey] ?: TogetherConnectMode.MultiPath.name) }
+            .getOrDefault(TogetherConnectMode.MultiPath)
+    }
+    val togetherServerEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[togetherServerEnabledKey] ?: false }
+    val togetherServerAddress: Flow<String> = context.playbackDataStore.data.map { it[togetherServerAddressKey].orEmpty().trim() }
 
     suspend fun save(queue: List<Long>, index: Int, position: Long, mode: String, playing: Boolean) {
         context.playbackDataStore.edit { values ->
@@ -134,6 +144,15 @@ class PlaybackPreferences(private val context: Context) {
     suspend fun setDownloadFolder(uri: String?) = context.playbackDataStore.edit { values ->
         if (uri.isNullOrBlank()) values.remove(downloadFolderKey) else values[downloadFolderKey] = uri
     }
+    suspend fun setTogetherConnectMode(mode: TogetherConnectMode) = context.playbackDataStore.edit { it[togetherConnectModeKey] = mode.name }
+    suspend fun currentTogetherConnectMode(): TogetherConnectMode {
+        val value = context.playbackDataStore.data.first()[togetherConnectModeKey]
+        return runCatching { TogetherConnectMode.valueOf(value ?: TogetherConnectMode.MultiPath.name) }.getOrDefault(TogetherConnectMode.MultiPath)
+    }
+    suspend fun setTogetherServerEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[togetherServerEnabledKey] = enabled }
+    suspend fun setTogetherServerAddress(address: String) = context.playbackDataStore.edit { it[togetherServerAddressKey] = address.trim() }
+    suspend fun isTogetherServerEnabled(): Boolean = context.playbackDataStore.data.first()[togetherServerEnabledKey] ?: false
+    suspend fun currentTogetherServerAddress(): String = context.playbackDataStore.data.first()[togetherServerAddressKey].orEmpty().trim()
     suspend fun currentOnlinePlatform(): String = context.playbackDataStore.data.first()[onlinePlatformKey] ?: "netease"
     suspend fun currentOnlineApiBase(): String = context.playbackDataStore.data.first()[onlineApiBaseKey].orEmpty()
 

@@ -4,10 +4,12 @@ import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
+import java.io.InputStream
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.URL
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -25,6 +27,7 @@ class LocalMusicServer(private val context: Context) {
     }
 
     private val specs = ConcurrentHashMap<String, StreamSpec>()
+    private val artSpecs = ConcurrentHashMap<String, String>()
     private var serverSocket: ServerSocket? = null
     private var acceptorThread: Thread? = null
     private val executor = Executors.newCachedThreadPool { runnable ->
@@ -34,10 +37,10 @@ class LocalMusicServer(private val context: Context) {
 
     val port: Int get() = serverSocket?.localPort ?: 0
 
-    fun start(): Boolean {
+    fun start(requestedPort: Int = 0): Boolean {
         if (running.get()) return true
         return try {
-            serverSocket = ServerSocket(0).apply { reuseAddress = true }
+            serverSocket = ServerSocket(requestedPort).apply { reuseAddress = true }
             running.set(true)
             acceptorThread = Thread({ acceptLoop() }, "xstar-http-acceptor").apply {
                 isDaemon = true
@@ -56,14 +59,28 @@ class LocalMusicServer(private val context: Context) {
         runCatching { serverSocket?.close() }
         serverSocket = null
         specs.clear()
+        artSpecs.clear()
     }
 
     fun register(spec: StreamSpec): String? {
+        val token = registerForToken(spec) ?: return null
+        val ip = localIpV4() ?: return null
+        return "http://$ip:$port/stream?t=$token"
+    }
+
+    fun registerForToken(spec: StreamSpec): String? {
         if (!running.get()) start()
         val token = UUID.randomUUID().toString().replace("-", "")
         specs[token] = spec
-        val ip = localIpV4() ?: return null
-        return "http://$ip:$port/stream?t=$token"
+        return token
+    }
+
+    fun registerArtForToken(uri: String?): String? {
+        if (uri.isNullOrBlank()) return null
+        if (!running.get()) start()
+        val token = UUID.randomUUID().toString().replace("-", "")
+        artSpecs[token] = uri
+        return token
     }
 
     fun unregister(id: Long) {
@@ -109,14 +126,57 @@ class LocalMusicServer(private val context: Context) {
             val (path, query) = pathAndQuery.split("?").let { if (it.size == 1) it[0] to null else it[0] to it[1] }
             val token = query?.split("&")?.firstOrNull { it.startsWith("t=") }?.substring(2)
             val spec = token?.let { specs[it] }
+            val artUri = token?.let { artSpecs[it] }
 
             when {
+                path == "/art" -> {
+                    if (artUri == null) respond(output, "404 Not Found", null, byteArrayOf())
+                    else if (method == "HEAD") respondHeadUri(output, artUri)
+                    else if (method == "GET") respondUri(output, artUri)
+                    else respond(output, "405 Method Not Allowed", null, byteArrayOf())
+                }
                 spec == null -> respond(output, "404 Not Found", null, byteArrayOf())
                 method == "HEAD" -> respondHead(output, spec)
                 method == "GET" -> respondStream(output, spec, headers["range"])
                 else -> respond(output, "405 Method Not Allowed", null, byteArrayOf())
             }
         }
+    }
+
+    private fun openUri(uri: String): InputStream? = runCatching {
+        when {
+            uri.startsWith("http://") || uri.startsWith("https://") -> URL(uri).openStream()
+            uri.startsWith("content://") || uri.startsWith("file://") ->
+                context.contentResolver.openInputStream(Uri.parse(uri))
+                    ?: Uri.parse(uri).path?.let { java.io.File(it).inputStream() }
+            else -> java.io.File(uri).inputStream()
+        }
+    }.getOrNull()
+
+    private fun respondHeadUri(output: java.io.OutputStream, uri: String) {
+        val stream = openUri(uri) ?: return respond(output, "404 Not Found", null, byteArrayOf())
+        stream.use { input ->
+            val headers = buildString {
+                append("HTTP/1.1 200 OK\r\n")
+                append("Content-Type: image/jpeg\r\n")
+                append("Connection: close\r\n\r\n")
+            }
+            output.write(headers.toByteArray(Charsets.ISO_8859_1))
+            output.flush()
+        }
+    }
+
+    private fun respondUri(output: java.io.OutputStream, uri: String) {
+        val bytes = openUri(uri)?.use { it.readBytes() } ?: return respond(output, "404 Not Found", null, byteArrayOf())
+        val header = buildString {
+            append("HTTP/1.1 200 OK\r\n")
+            append("Content-Type: image/jpeg\r\n")
+            append("Content-Length: ${bytes.size}\r\n")
+            append("Connection: close\r\n\r\n")
+        }
+        output.write(header.toByteArray(Charsets.ISO_8859_1))
+        output.write(bytes)
+        output.flush()
     }
 
     private fun respondHead(output: java.io.OutputStream, spec: StreamSpec) {

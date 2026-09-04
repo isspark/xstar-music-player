@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.MediaPlayer
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.SystemClock
@@ -28,6 +29,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -56,6 +58,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.Brush
@@ -107,6 +110,7 @@ import life.xstar.music.player.cast.CastSessionController
 import life.xstar.music.player.cast.CastSessionState
 import life.xstar.music.player.cast.CastDevice
 import life.xstar.music.player.cast.CastSessionService
+import life.xstar.music.player.together.*
 import life.xstar.music.player.data.online.OnlineMusicRepository
 import life.xstar.music.player.data.online.OnlineTrack
 import life.xstar.music.player.data.online.OnlineDownloadState
@@ -120,18 +124,20 @@ class MainActivity : ComponentActivity() {
         super.onCreate(state)
         enableEdgeToEdge()
         val app = application as XstarApplication
-        val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, PlayerController(this), app.playbackPreferences, LyricsRepository(this), app.castController, app.onlineMusicRepository, app.applicationContext))[MusicViewModel::class.java]
+        val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, PlayerController(this), app.playbackPreferences, LyricsRepository(this), app.castController, app.onlineMusicRepository, app.togetherController, app.applicationContext))[MusicViewModel::class.java]
         setContent { val theme by vm.theme.collectAsStateWithLifecycle(); XstarTheme(theme) { XstarApp(vm) } }
     }
 }
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
-class MusicViewModel(private val repo: MusicRepository, val player: PlayerController, private val preferences: PlaybackPreferences, private val lyricsRepository: LyricsRepository, val castController: CastSessionController, private val onlineRepository: OnlineMusicRepository, private val appContext: Context) : ViewModel() {
+class MusicViewModel(private val repo: MusicRepository, val player: PlayerController, private val preferences: PlaybackPreferences, private val lyricsRepository: LyricsRepository, val castController: CastSessionController, private val onlineRepository: OnlineMusicRepository, val togetherController: TogetherSessionController, private val appContext: Context) : ViewModel() {
     val songs = repo.songs().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val favorites = repo.favorites().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val playlists = repo.playlists().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val playback = player.state
     val castState: StateFlow<CastSessionState> = castController.state
+    val togetherState: StateFlow<TogetherSessionState> = togetherController.state
+    val togetherReactions = togetherController.reactions
     val equalizerState = player.equalizerState
     private var castResumeAfterStop = false
     private val _scanState = MutableStateFlow(ScanState())
@@ -154,6 +160,10 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val onlinePlatform = preferences.onlinePlatform.stateIn(viewModelScope, SharingStarted.Eagerly, "netease")
     val onlineApiBase = preferences.onlineApiBase.stateIn(viewModelScope, SharingStarted.Eagerly, "")
     val downloadFolder = preferences.downloadFolder.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+    val togetherConnectMode = preferences.togetherConnectMode.stateIn(viewModelScope, SharingStarted.Eagerly, TogetherConnectMode.MultiPath)
+    val togetherServerEnabled = preferences.togetherServerEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val togetherServerAddress = preferences.togetherServerAddress.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+    private val deviceNickname: String = android.os.Build.MODEL.ifBlank { "手机" }
     val openPlayer = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val lyrics = MutableStateFlow<LyricsState>(LyricsState.Idle)
     val onlineDownloads = onlineRepository.downloads
@@ -168,8 +178,14 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         viewModelScope.launch {
             playback.debounce(1_000).collect { state ->
                 if (suppressPlaybackPersistence || state.queue.isEmpty()) return@collect
+                if (togetherState.value.inSession) return@collect
                 if (preferences.isFmModeEnabled()) preferences.saveFm(state.queue.map { it.mediaStoreId }, state.index, state.position, state.playing)
                 else preferences.save(state.queue.map { it.mediaStoreId }, state.index, state.position, state.mode.name, state.playing)
+            }
+        }
+        viewModelScope.launch {
+            togetherController.state.map { it.connection to it.role }.distinctUntilChanged().collect { (connection, role) ->
+                if (connection == TogetherConnection.Connected && role == TogetherRole.Member) player.ensureProgressUpdates()
             }
         }
         viewModelScope.launch {
@@ -290,6 +306,8 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     }
     fun play(song: SongEntity, source: List<SongEntity> = songs.value) {
         viewModelScope.launch {
+            val togetherSnap = togetherState.value
+            if (togetherSnap.inSession && togetherSnap.isMember) return@launch
             val queue = source.ifEmpty { listOf(song) }
             val castSnap = castState.value
             if (castSnap.connection == CastSessionController.Connection.Connected && !preferences.isFmModeEnabled()) {
@@ -332,6 +350,96 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     fun castNext() = castController.next()
     fun castPrevious() = castController.previous()
     fun castSeek(ms: Long) = castController.seekTo(ms)
+    fun setTogetherConnectMode(mode: TogetherConnectMode) = viewModelScope.launch { preferences.setTogetherConnectMode(mode) }
+    fun createTogetherSession() {
+        val together = togetherState.value
+        if (together.connection != TogetherConnection.Idle) return
+        if (fmModeEnabled.value || karaokeModeEnabled.value) return
+        if (castState.value.connection != CastSessionController.Connection.Disconnected) return
+        val snap = playback.value
+        if (snap.queue.isEmpty() || snap.index !in snap.queue.indices) return
+        TogetherService.start(appContext)
+        viewModelScope.launch {
+            configureTogetherRelay()
+            togetherController.setNickname(deviceNickname)
+            togetherController.startSession(togetherConnectMode.value)
+        }
+    }
+    fun joinTogetherCode(code: String) {
+        if (togetherState.value.connection != TogetherConnection.Idle) return
+        if (fmModeEnabled.value || karaokeModeEnabled.value) return
+        if (castState.value.connection != CastSessionController.Connection.Disconnected) return
+        TogetherService.start(appContext)
+        viewModelScope.launch {
+            configureTogetherRelay()
+            togetherController.setNickname(deviceNickname)
+            togetherController.joinByCode(code, togetherConnectMode.value)
+        }
+    }
+    fun joinTogetherInviteText(text: String) {
+        if (togetherState.value.connection != TogetherConnection.Idle) return
+        if (fmModeEnabled.value || karaokeModeEnabled.value) return
+        if (castState.value.connection != CastSessionController.Connection.Disconnected) return
+        TogetherService.start(appContext)
+        viewModelScope.launch {
+            configureTogetherRelay()
+            togetherController.setNickname(deviceNickname)
+            togetherController.joinByInviteText(text, togetherConnectMode.value)
+        }
+    }
+    private suspend fun configureTogetherRelay() {
+        val enabled = preferences.isTogetherServerEnabled()
+        val address = if (enabled) preferences.currentTogetherServerAddress() else ""
+        togetherController.setRelayServer(address)
+    }
+    fun setTogetherServerEnabled(enabled: Boolean) = viewModelScope.launch { preferences.setTogetherServerEnabled(enabled) }
+    fun setTogetherServerAddress(address: String) = viewModelScope.launch { preferences.setTogetherServerAddress(address) }
+    fun leaveTogether() {
+        togetherController.endSession()
+    }
+    fun togetherTogglePlayPause() {
+        val t = togetherState.value
+        when {
+            t.connection == TogetherConnection.Connected && t.isMember -> togetherController.sendControl("toggle")
+            t.connection == TogetherConnection.Connected && t.isHost -> { player.toggle(); togetherController.notifyHostLocalChange() }
+        }
+    }
+    fun togetherNext() {
+        val t = togetherState.value
+        when {
+            t.connection == TogetherConnection.Connected && t.isMember -> togetherController.sendControl("next")
+            t.connection == TogetherConnection.Connected && t.isHost -> { player.next(); togetherController.notifyHostLocalChange() }
+        }
+    }
+    fun togetherPrevious() {
+        val t = togetherState.value
+        when {
+            t.connection == TogetherConnection.Connected && t.isMember -> togetherController.sendControl("previous")
+            t.connection == TogetherConnection.Connected && t.isHost -> { player.previous(); togetherController.notifyHostLocalChange() }
+        }
+    }
+    fun togetherSeek(ms: Long) {
+        val t = togetherState.value
+        when {
+            t.connection == TogetherConnection.Connected && t.isMember -> togetherController.sendControl("seek", positionMs = ms)
+            t.connection == TogetherConnection.Connected && t.isHost -> { player.seek(ms); togetherController.notifyHostLocalChange() }
+        }
+    }
+    fun togetherPlayIndex(index: Int) {
+        val t = togetherState.value
+        when {
+            t.connection == TogetherConnection.Connected && t.isMember -> togetherController.sendControl("playIndex", index = index)
+            t.connection == TogetherConnection.Connected && t.isHost -> { player.jumpTo(index); togetherController.notifyHostLocalChange() }
+        }
+    }
+    fun togetherSetMode(mode: PlaybackMode) {
+        val t = togetherState.value
+        when {
+            t.connection == TogetherConnection.Connected && t.isMember -> togetherController.sendControl("setMode", mode = mode.name)
+            t.connection == TogetherConnection.Connected && t.isHost -> { player.setPlaybackMode(mode); togetherController.notifyHostLocalChange() }
+        }
+    }
+    fun togetherSendReaction(reaction: TogetherReaction) = togetherController.sendReaction(reaction)
     fun setFmMode(enabled: Boolean) = viewModelScope.launch {
         if (enabled == preferences.isFmModeEnabled()) return@launch
         if (enabled) {
@@ -498,8 +606,8 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         player.release()
     }
 
-    companion object { fun factory(repo: MusicRepository, player: PlayerController, preferences: PlaybackPreferences, lyrics: LyricsRepository, cast: CastSessionController, online: OnlineMusicRepository, appContext: Context) = object : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player, preferences, lyrics, cast, online, appContext) as T
+    companion object { fun factory(repo: MusicRepository, player: PlayerController, preferences: PlaybackPreferences, lyrics: LyricsRepository, cast: CastSessionController, online: OnlineMusicRepository, together: TogetherSessionController, appContext: Context) = object : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player, preferences, lyrics, cast, online, together, appContext) as T
     } }
 }
 
@@ -532,13 +640,15 @@ sealed class OnlineSearchUiState {
     val fmMode by vm.fmModeEnabled.collectAsStateWithLifecycle()
     val karaokeMode by vm.karaokeModeEnabled.collectAsStateWithLifecycle()
     val castState by vm.castState.collectAsStateWithLifecycle()
+    val togetherState by vm.togetherState.collectAsStateWithLifecycle()
     val songs by vm.songs.collectAsStateWithLifecycle()
     var showCastSheet by remember { mutableStateOf(false) }
+    var showTogetherSheet by remember { mutableStateOf(false) }
     val accent = theme.color()
     LaunchedEffect(vm) { vm.openPlayer.collect { navigator.navigate(PlayerRoute); drawerState.close() } }
     val openMenu: () -> Unit = { scope.launch { drawerState.open() } }
     val entryProvider = entryProvider<NavKey> {
-        entry<PlayerRoute> { PlayerScreen(vm, openMenu, onOpenCastSheet = { showCastSheet = true }) }
+        entry<PlayerRoute> { PlayerScreen(vm, openMenu, onOpenCastSheet = { showCastSheet = true }, onOpenTogetherSheet = { showTogetherSheet = true }) }
         entry<LibraryRoute> { LibraryScreen(vm, openMenu) }
         entry<FavoritesRoute> { CollectionScreen(vm.favorites.collectAsStateWithLifecycle().value, vm, openMenu, goToLibrary = { navigator.navigate(LibraryRoute) }) }
         entry<PlaylistsRoute> { PlaylistsScreen(vm, openMenu) }
@@ -564,7 +674,8 @@ sealed class OnlineSearchUiState {
                 }
                 Spacer(Modifier.height(16.dp))
                 val castActive = castState.connection != CastSessionController.Connection.Disconnected
-                val castCardEnabled = !fmMode && !karaokeMode
+                val togetherBusy = togetherState.connection != TogetherConnection.Idle
+                val castCardEnabled = !fmMode && !karaokeMode && !togetherBusy
                 Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = if (castCardEnabled) .06f else .03f)) {
                     Row(
                         Modifier.padding(horizontal = 14.dp, vertical = 10.dp).clickable(enabled = castCardEnabled) {
@@ -579,7 +690,7 @@ sealed class OnlineSearchUiState {
                             Text("投屏", color = if (castCardEnabled) Color.White else Color.White.copy(alpha = .5f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                             Text(
                                 when {
-                                    !castCardEnabled -> if (fmMode) "FM 模式不可用" else "卡拉OK 模式不可用"
+                                    !castCardEnabled -> if (togetherBusy) "一起听中不可用" else if (fmMode) "FM 模式不可用" else "卡拉OK 模式不可用"
                                     castActive -> "正在投到 ${castState.device?.friendlyName ?: "设备"}"
                                     else -> "搜索同一 Wi-Fi 的投影设备"
                                 },
@@ -596,7 +707,41 @@ sealed class OnlineSearchUiState {
                     }
                 }
                 Spacer(Modifier.height(12.dp))
-                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = if (fmMode || !castActive) .06f else .03f)) {
+                val togetherEnabled = !fmMode && !karaokeMode && !castActive
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = if (togetherEnabled) .06f else .03f)) {
+                    Row(
+                        Modifier.padding(horizontal = 14.dp, vertical = 10.dp).clickable(enabled = togetherEnabled) {
+                            showTogetherSheet = true
+                            scope.launch { drawerState.close() }
+                        },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.People, null, Modifier.size(21.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(10.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("一起听", color = if (togetherEnabled) Color.White else Color.White.copy(alpha = .5f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                when {
+                                    !togetherEnabled -> if (fmMode) "FM 模式不可用" else if (karaokeMode) "卡拉OK 模式不可用" else "投屏中不可用"
+                                    togetherState.connection == TogetherConnection.Connected && togetherState.isHost -> "一起听中 · 与 ${togetherState.peer?.nickname ?: "好友"}"
+                                    togetherState.connection == TogetherConnection.Connected && togetherState.isMember -> "一起听中 · 房主 ${togetherState.peer?.nickname ?: ""}"
+                                    togetherState.connection == TogetherConnection.Listening -> "等待好友加入 · 邀请码 ${togetherState.code ?: ""}"
+                                    else -> "邀请好友一起听同一首歌"
+                                },
+                                color = Color(0xFF818C9C),
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Icon(
+                            Icons.Default.ArrowForwardIos, null, Modifier.size(14.dp),
+                            tint = if (togetherState.connection != TogetherConnection.Idle) MaterialTheme.colorScheme.primary else Color(0xFF5B6577)
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = if (fmMode || !castActive || togetherBusy) .06f else .03f)) {
                     Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.Radio, null, Modifier.size(21.dp), tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(10.dp))
@@ -605,6 +750,7 @@ sealed class OnlineSearchUiState {
                             Text(
                                 when {
                                     songs.isEmpty() -> "请先扫描音乐"
+                                    togetherBusy -> "一起听中不可用"
                                     castActive -> "投屏中不可用"
                                     else -> "随机电台 · 极简手势"
                                 },
@@ -614,7 +760,7 @@ sealed class OnlineSearchUiState {
                         }
                         Switch(
                             checked = fmMode,
-                            enabled = (songs.isNotEmpty() || fmMode) && !castActive,
+                            enabled = (songs.isNotEmpty() || fmMode) && !castActive && !togetherBusy,
                             onCheckedChange = {
                                 vm.setFmMode(it)
                                 if (it) scope.launch { drawerState.close() }
@@ -623,7 +769,7 @@ sealed class OnlineSearchUiState {
                     }
                 }
                 Spacer(Modifier.height(12.dp))
-                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = if (karaokeMode || !castActive) .06f else .03f)) {
+                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = if (karaokeMode || !castActive || togetherBusy) .06f else .03f)) {
                     Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Default.Mic, null, Modifier.size(21.dp), tint = MaterialTheme.colorScheme.primary)
                         Spacer(Modifier.width(10.dp))
@@ -632,6 +778,7 @@ sealed class OnlineSearchUiState {
                             Text(
                                 when {
                                     songs.isEmpty() -> "请先扫描音乐"
+                                    togetherBusy -> "一起听中不可用"
                                     castActive -> "投屏中不可用"
                                     else -> "伴奏跟唱 · 原唱/伴奏 · 变调"
                                 },
@@ -641,7 +788,7 @@ sealed class OnlineSearchUiState {
                         }
                         Switch(
                             checked = karaokeMode,
-                            enabled = (songs.isNotEmpty() || karaokeMode) && !castActive,
+                            enabled = (songs.isNotEmpty() || karaokeMode) && !castActive && !togetherBusy,
                             onCheckedChange = {
                                 vm.setKaraokeMode(it)
                                 if (it) scope.launch { drawerState.close() }
@@ -688,6 +835,7 @@ sealed class OnlineSearchUiState {
             )
             BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
             if (showCastSheet) CastControlSheet(vm) { showCastSheet = false }
+            if (showTogetherSheet) TogetherSheet(vm, togetherState) { showTogetherSheet = false }
         }
     }
 }
@@ -840,7 +988,280 @@ sealed class OnlineSearchUiState {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun PlayerScreen(vm: MusicViewModel, openMenu: () -> Unit, onOpenCastSheet: () -> Unit) {
+@Composable private fun TogetherSheet(vm: MusicViewModel, together: TogetherSessionState, close: () -> Unit) {
+    val context = LocalContext.current
+    val playback by vm.playback.collectAsStateWithLifecycle()
+    var codeText by remember { mutableStateOf("") }
+    val connectMode by vm.togetherConnectMode.collectAsStateWithLifecycle()
+
+    fun pasteFromClipboard() {
+        val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        val clip = manager.primaryClip ?: return
+        val text = clip.getItemAt(0).coerceToText(context)?.toString()?.trim().orEmpty()
+        if (text.isEmpty()) return
+        if (text.length <= 24) {
+            codeText = text
+            vm.joinTogetherCode(text)
+        } else {
+            vm.joinTogetherInviteText(text)
+        }
+    }
+
+    ModalBottomSheet(onDismissRequest = close, containerColor = Color(0xFF171B23)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp)) {
+            Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("一起听", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+                    Text(statusTogether(together), color = Color(0xFF8F99A9), fontSize = 12.sp)
+                }
+                if (together.connection != TogetherConnection.Idle) {
+                    TextButton(onClick = { vm.leaveTogether(); close() }) { Text("结束", color = Color(0xFFFF8A96)) }
+                }
+            }
+            together.error?.let { Text(it, color = Color(0xFFFF8A96), fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) }
+            when (together.connection) {
+                TogetherConnection.Idle -> {
+                    Text("连接方式", color = Color(0xFF9BA5B5), fontSize = 13.sp, modifier = Modifier.padding(top = 4.dp, bottom = 6.dp))
+                    Row(Modifier.fillMaxWidth().padding(bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(TogetherConnectMode.Lan to "仅局域网", TogetherConnectMode.MultiPath to "跨网多路径(默认)").forEach { (mode, label) ->
+                            FilterChip(
+                                selected = connectMode == mode,
+                                onClick = { vm.setTogetherConnectMode(mode) },
+                                label = { Text(label, fontSize = 12.sp) }
+                            )
+                        }
+                    }
+                    if (playback.queue.isNotEmpty()) {
+                        Button(onClick = { vm.createTogetherSession(); }, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.People, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("创建房间（我是房主）")
+                        }
+                    } else {
+                        Text("先在播放器选择一首歌曲，再作为房主开房", color = Color(0xFFFFBE5C), fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp))
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = codeText,
+                        onValueChange = { codeText = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("输入对方邀请码", color = Color(0xFF8F99A9)) },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp)
+                    )
+                    Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(onClick = { if (codeText.isNotBlank()) vm.joinTogetherCode(codeText) }, enabled = codeText.isNotBlank(), modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Default.Login, null, Modifier.size(17.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("加入房间")
+                        }
+                        OutlinedButton(onClick = ::pasteFromClipboard, modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Default.ContentPaste, null, Modifier.size(17.dp))
+                            Spacer(Modifier.width(5.dp))
+                            Text("粘贴二维码/邀请")
+                        }
+                    }
+                }
+                TogetherConnection.Listening -> {
+                    Text("邀请好友加入：", color = Color(0xFF9BA5B5), fontSize = 13.sp)
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Surface(shape = RoundedCornerShape(14.dp), color = Color.White.copy(alpha = .1f)) {
+                            Text(together.code ?: "-", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Black, modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp).clickable {
+                                val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                manager.setPrimaryClip(android.content.ClipData.newPlainText("invite", together.code))
+                            })
+                        }
+                        Spacer(Modifier.width(4.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("邀请码已复制", color = Color(0xFF8F99A9), fontSize = 12.sp)
+                            Text(if (together.connectMode == TogetherConnectMode.MultiPath) "多路径：局域网直连 + 服务器/公网候选" else "仅局域网直连", color = Color(0xFF5B6577), fontSize = 11.sp)
+                        }
+                    }
+                    Spacer(Modifier.height(14.dp))
+                    together.inviteText?.let {
+                        Surface(shape = RoundedCornerShape(18.dp), color = Color.White.copy(alpha = .08f)) {
+                            Column(Modifier.padding(14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("扫描二维码加入", color = Color(0xFF9BA5B5), fontSize = 13.sp)
+                                Spacer(Modifier.height(10.dp))
+                                TogetherQrCode(it, Modifier.size(190.dp))
+                                Spacer(Modifier.height(6.dp))
+                                OutlinedButton(onClick = {
+                                    val manager = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                    manager.setPrimaryClip(android.content.ClipData.newPlainText("invite", it))
+                                }) { Text("复制完整邀请") }
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text("等待好友加入，双方将同步播放同一首歌", color = Color(0xFF5B6577), fontSize = 12.sp, modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp))
+                }
+                TogetherConnection.Connecting -> Box(Modifier.fillMaxWidth().padding(vertical = 40.dp), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(Modifier.size(26.dp), strokeWidth = 3.dp)
+                        Spacer(Modifier.height(12.dp))
+                        Text("正在直连房主…", color = Color(0xFF8F99A9), fontSize = 12.sp)
+                    }
+                }
+                TogetherConnection.Connected -> {
+                    Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Surface(Modifier.size(40.dp), CircleShape, color = MaterialTheme.colorScheme.primary.copy(alpha = .16f)) {
+                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Icon(Icons.Default.People, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                if (together.isHost) "与 ${together.peer?.nickname ?: "好友"} 一起听中"
+                                else "房主 ${together.peer?.nickname ?: ""} 的房间",
+                                color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold
+                            )
+                            Text(if (together.connectMode == TogetherConnectMode.MultiPath) "跨网多路径直连" else "局域网直连", color = Color(0xFF8F99A9), fontSize = 11.sp)
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text("共享队列", color = Color(0xFF9BA5B5), fontSize = 13.sp, modifier = Modifier.padding(vertical = 4.dp))
+                    if (together.sharedQueue.isEmpty()) {
+                        Text("暂无共享队列", color = Color(0xFF5B6577), fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
+                    } else {
+                        LazyColumn(Modifier.heightIn(max = 240.dp)) {
+                            itemsIndexed(together.sharedQueue) { index, entry ->
+                                ListItem(
+                                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                                    headlineContent = { Text(entry.title, color = if (index == together.sharedIndex) MaterialTheme.colorScheme.primary else Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                    supportingContent = { Text(entry.artist.ifBlank { "未知歌手" }, color = Color(0xFF8F99A9), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                                    leadingContent = { Icon(if (index == together.sharedIndex) Icons.Default.PlayArrow else Icons.Default.MusicNote, null, tint = if (index == together.sharedIndex) MaterialTheme.colorScheme.primary else Color(0xFF5B6577)) },
+                                    modifier = Modifier.clickable { vm.togetherPlayIndex(index) }
+                                )
+                            }
+                        }
+                    }
+                }
+                TogetherConnection.Error -> {
+                    Box(Modifier.fillMaxWidth().padding(vertical = 20.dp), contentAlignment = Alignment.Center) {
+                        Text(together.error ?: "发生错误", color = Color(0xFFFF8A96), fontSize = 13.sp, textAlign = TextAlign.Center)
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable private fun TogetherQrCode(content: String, modifier: Modifier = Modifier) {
+    val bitmap = remember(content) { qrBitmap(content) }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "一起听邀请二维码",
+            modifier = modifier
+        )
+    } else {
+        Box(modifier.background(Color.White.copy(alpha = .08f), RoundedCornerShape(10.dp)), contentAlignment = Alignment.Center) {
+            Text("二维码不可用", color = Color(0xFF8F99A9), fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable private fun TogetherEmojiBar(vm: MusicViewModel, modifier: Modifier = Modifier) {
+    Row(modifier, horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+        TogetherReaction.entries.forEach { reaction ->
+            Surface(
+                shape = CircleShape,
+                color = Color.White.copy(alpha = .06f),
+                modifier = Modifier.size(42.dp).clickable { vm.togetherSendReaction(reaction) },
+                contentColor = Color.White
+            ) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(reaction.symbol, fontSize = 21.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable private fun TogetherReactionBubbles(vm: MusicViewModel, modifier: Modifier = Modifier) {
+    var bubble by remember { mutableStateOf<TogetherReactionEvent?>(null) }
+    var key by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        vm.togetherReactions.collect { event ->
+            bubble = event
+            key++
+            kotlinx.coroutines.delay(2_400)
+            if (bubble?.nickname == event.nickname && bubble?.reaction == event.reaction) bubble = null
+        }
+    }
+    val visible = bubble != null
+    AnimatedVisibility(visible = visible, enter = fadeIn(tween(200)) + expandVertically(), exit = fadeOut(tween(400)) + shrinkVertically(), modifier = modifier) {
+        bubble?.let { event ->
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Surface(shape = RoundedCornerShape(50.dp), color = Color(0xDD1E2531), shadowElevation = 6.dp) {
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(event.reaction.symbol, fontSize = 26.sp)
+                        Spacer(Modifier.width(8.dp))
+                        Column {
+                            Text(event.nickname, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(if (event.fromSelf) "发送了一个互动" else "正在拍一拍你", color = Color(0xFF8F99A9), fontSize = 10.sp)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun TogetherQueueSheet(together: TogetherSessionState, vm: MusicViewModel, close: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = close, containerColor = Color(0xFF171B23)) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
+            Row(Modifier.fillMaxWidth().padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("一起听 · 共享队列", color = Color.White, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                    Text("点击切歌（双方同步）", color = Color(0xFF8F99A9), fontSize = 12.sp)
+                }
+                TextButton(close) { Text("关闭") }
+            }
+            if (together.sharedQueue.isEmpty()) {
+                Box(Modifier.fillMaxWidth().padding(vertical = 30.dp), contentAlignment = Alignment.Center) { Text("队列为空", color = Color(0xFF5B6577)) }
+            } else {
+                LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                    itemsIndexed(together.sharedQueue) { index, entry ->
+                        ListItem(
+                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                            headlineContent = { Text(entry.title, color = if (index == together.sharedIndex) MaterialTheme.colorScheme.primary else Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            supportingContent = { Text(entry.artist.ifBlank { "未知歌手" }, color = Color(0xFF8F99A9), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            leadingContent = { Surface(Modifier.size(44.dp), RoundedCornerShape(12.dp), color = Color(0xFF252C38)) { Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Icon(Icons.Default.MusicNote, null, tint = if (index == together.sharedIndex) MaterialTheme.colorScheme.primary else Color(0xFF5B6577)) } } },
+                            modifier = Modifier.clickable { vm.togetherPlayIndex(index) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun qrBitmap(content: String): Bitmap? = runCatching {
+    val size = 512
+    val matrix = com.google.zxing.qrcode.QRCodeWriter().encode(content, com.google.zxing.BarcodeFormat.QR_CODE, size, size)
+    val pixels = IntArray(size * size)
+    for (y in 0 until size) {
+        for (x in 0 until size) {
+            pixels[y * size + x] = if (matrix.get(x, y)) android.graphics.Color.BLACK else android.graphics.Color.WHITE
+        }
+    }
+    Bitmap.createBitmap(pixels, size, size, Bitmap.Config.RGB_565)
+}.getOrNull()
+
+private fun statusTogether(together: TogetherSessionState): String = when (together.connection) {
+    TogetherConnection.Idle -> "创建房间邀请好友，或输入对方邀请码加入"
+    TogetherConnection.Listening -> "已开房 · 等待好友加入（对等控制 + 表情互动）"
+    TogetherConnection.Connecting -> "正在连接房主…"
+    TogetherConnection.Connected -> if (together.isHost) "已连接 · 与 ${together.peer?.nickname ?: "好友"} 一起听" else "已加入房主 ${together.peer?.nickname ?: ""} 一起听"
+    TogetherConnection.Error -> together.error ?: "会话出错"
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun PlayerScreen(vm: MusicViewModel, openMenu: () -> Unit, onOpenCastSheet: () -> Unit, onOpenTogetherSheet: () -> Unit) {
     val fmMode by vm.fmModeEnabled.collectAsStateWithLifecycle()
     val karaokeMode by vm.karaokeModeEnabled.collectAsStateWithLifecycle()
     val display = when {
@@ -852,13 +1273,13 @@ sealed class OnlineSearchUiState {
         when (mode) {
             "karaoke" -> KaraokePlayerScreen(vm, openMenu)
             "fm" -> FmPlayerScreen(vm, openMenu)
-            else -> TraditionalPlayerScreen(vm, openMenu, onOpenCastSheet)
+            else -> TraditionalPlayerScreen(vm, openMenu, onOpenCastSheet, onOpenTogetherSheet)
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Composable private fun TraditionalPlayerScreen(vm: MusicViewModel, openMenu: () -> Unit, onOpenCastSheet: () -> Unit) {
+@Composable private fun TraditionalPlayerScreen(vm: MusicViewModel, openMenu: () -> Unit, onOpenCastSheet: () -> Unit, onOpenTogetherSheet: () -> Unit) {
     val state by vm.playback.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var showQueue by remember { mutableStateOf(false) }
@@ -866,6 +1287,7 @@ sealed class OnlineSearchUiState {
     val beatEffect by vm.beatEffect.collectAsStateWithLifecycle()
     val bottomEffect by vm.bottomEffect.collectAsStateWithLifecycle()
     val castState by vm.castState.collectAsStateWithLifecycle()
+    val togetherState by vm.togetherState.collectAsStateWithLifecycle()
     val artworkColors by produceState(initialValue = ArtworkColors.fallback(theme), state.song?.albumArtUri, theme) {
         value = loadArtworkColors(context, state.song?.albumArtUri, theme)
     }
@@ -896,11 +1318,14 @@ sealed class OnlineSearchUiState {
     val ambient by animateColorAsState(ambientTarget, tween(650), label = "ambient")
     val artworkScale by animateFloatAsState(pulseScale, tween(420), label = "artworkPulse")
     val castConnected = castState.connection == CastSessionController.Connection.Connected
+    val togetherConnected = togetherState.connection == TogetherConnection.Connected
+    val sessionActive = togetherConnected && togetherState.inSession
     val displayPlaying = if (castConnected) castState.playing else state.playing
     val song = state.song
     var showArtworkPicker by remember { mutableStateOf(false) }
     var showSongDetails by remember { mutableStateOf(false) }
     var showLyrics by remember { mutableStateOf(false) }
+    var showSessionQueue by remember { mutableStateOf(false) }
     LaunchedEffect(song?.mediaStoreId) { showLyrics = false }
     Box(
         Modifier.fillMaxSize()
@@ -932,6 +1357,34 @@ sealed class OnlineSearchUiState {
             }
         }
     }
+    if (togetherState.connection != TogetherConnection.Idle && !castConnected) {
+        val togetherLabel = when {
+            togetherState.connection == TogetherConnection.Connected && togetherState.isHost -> "与 ${togetherState.peer?.nickname ?: "好友"} 一起听"
+            togetherState.connection == TogetherConnection.Connected && togetherState.isMember -> "房主 ${togetherState.peer?.nickname ?: ""}"
+            togetherState.connection == TogetherConnection.Listening -> "等待加入 ${togetherState.code ?: ""}"
+            else -> "一起听"
+        }
+        Surface(
+            Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(top = 56.dp, end = 12.dp).clickable(onClick = onOpenTogetherSheet),
+            shape = RoundedCornerShape(50.dp),
+            color = Color(0xFF1E2531).copy(alpha = .94f),
+            shadowElevation = 6.dp
+        ) {
+            Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.People, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(7.dp))
+                Text(
+                    togetherLabel,
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 170.dp)
+                )
+            }
+        }
+    }
+    TogetherReactionBubbles(vm, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 150.dp))
     if (bottomEffect && !showLyrics && !castConnected) {
         BottomSpectrumStage(
             levelsFlow = vm.player.spectrum,
@@ -994,7 +1447,11 @@ sealed class OnlineSearchUiState {
             value = if (sliderDuration > 0) sliderPosition.toFloat() / sliderDuration else 0f,
             onValueChange = {
                 val target = (it * sliderDuration).toLong()
-                if (castConnected) vm.castSeek(target) else vm.player.seek(target)
+                when {
+                    castConnected -> vm.castSeek(target)
+                    sessionActive -> vm.togetherSeek(target)
+                    else -> vm.player.seek(target)
+                }
             },
             modifier = Modifier.height(20.dp),
             colors = SliderDefaults.colors(
@@ -1010,19 +1467,49 @@ sealed class OnlineSearchUiState {
             }
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(time(sliderPosition), color = Color(0xFF8A94A5), fontSize = 12.sp); Text(time(sliderDuration), color = Color(0xFF8A94A5), fontSize = 12.sp) }
+        if (sessionActive) {
+            Spacer(Modifier.height(6.dp))
+            TogetherEmojiBar(vm, Modifier.fillMaxWidth())
+        }
         Spacer(Modifier.height(16.dp))
+        val sessionMode = if (sessionActive) runCatching { PlaybackMode.valueOf(togetherState.sharedMode) }.getOrDefault(state.mode) else state.mode
         Row(Modifier.fillMaxWidth().height(76.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
-            PlaybackModeButton(state.mode, enabled = !castConnected) { vm.player.setPlaybackMode(state.mode.next()) }
-            IconButton(onClick = { if (castConnected) vm.castPrevious() else vm.player.previous() }, Modifier.size(52.dp)) { Icon(Icons.Default.SkipPrevious, "上一首", Modifier.size(32.dp), tint = Color.White) }
-            IconButton(onClick = { if (castConnected) vm.castTogglePlayPause() else vm.player.toggle() }, Modifier.size(64.dp)) { Icon(if (displayPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, "播放或暂停", Modifier.size(38.dp), tint = Color.White) }
-            IconButton(onClick = { if (castConnected) vm.castNext() else vm.player.next() }, Modifier.size(52.dp)) { Icon(Icons.Default.SkipNext, "下一首", Modifier.size(32.dp), tint = Color.White) }
-            IconButton(onClick = { showQueue = true }, modifier = Modifier.size(52.dp), enabled = !castConnected) { Icon(Icons.Default.QueueMusic, "播放列表", tint = if (castConnected) Color(0xFF5B6577) else Color(0xFFB3BDCC)) }
+            PlaybackModeButton(
+                sessionMode,
+                enabled = !castConnected && !togetherState.connection.toString().equals(TogetherConnection.Connecting.name)
+            ) {
+                val nextMode = sessionMode.next()
+                if (sessionActive) vm.togetherSetMode(nextMode) else vm.player.setPlaybackMode(nextMode)
+            }
+            IconButton(onClick = {
+                when {
+                    castConnected -> vm.castPrevious()
+                    sessionActive -> vm.togetherPrevious()
+                    else -> vm.player.previous()
+                }
+            }, Modifier.size(52.dp)) { Icon(Icons.Default.SkipPrevious, "上一首", Modifier.size(32.dp), tint = Color.White) }
+            IconButton(onClick = {
+                when {
+                    castConnected -> vm.castTogglePlayPause()
+                    sessionActive -> vm.togetherTogglePlayPause()
+                    else -> vm.player.toggle()
+                }
+            }, Modifier.size(64.dp)) { Icon(if (displayPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, "播放或暂停", Modifier.size(38.dp), tint = Color.White) }
+            IconButton(onClick = {
+                when {
+                    castConnected -> vm.castNext()
+                    sessionActive -> vm.togetherNext()
+                    else -> vm.player.next()
+                }
+            }, Modifier.size(52.dp)) { Icon(Icons.Default.SkipNext, "下一首", Modifier.size(32.dp), tint = Color.White) }
+            IconButton(onClick = { if (sessionActive) showSessionQueue = true else showQueue = true }, modifier = Modifier.size(52.dp), enabled = !castConnected) { Icon(Icons.Default.QueueMusic, "播放列表", tint = if (castConnected) Color(0xFF5B6577) else Color(0xFFB3BDCC)) }
         }
         state.error?.let { Text(it, color = Color(0xFFFF8A96), fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp)) }
         Spacer(Modifier.weight(if (showLyrics) .08f else .5f))
     }
     }
     if (showQueue) QueueSheet(state, vm) { showQueue = false }
+    if (showSessionQueue) TogetherQueueSheet(togetherState, vm) { showSessionQueue = false }
     if (showArtworkPicker && song != null) AlbumArtworkSheet(song.album, listOf(song), vm, allowReplace = true) { showArtworkPicker = false }
     if (showSongDetails && song != null) SongDetailsSheet(
         song = song,
@@ -2196,6 +2683,60 @@ sealed class OnlineSearchUiState {
             leadingContent = { Icon(Icons.Default.Notes, null) },
             trailingContent = { Switch(checked = vm.onlineLyricsEnabled.collectAsStateWithLifecycle().value, onCheckedChange = vm::setOnlineLyricsEnabled) }
         )
+        Text("一起听", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 14.dp, bottom = 2.dp))
+        val togetherMode by vm.togetherConnectMode.collectAsStateWithLifecycle()
+        ListItem(
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            headlineContent = { Text("连接方式", color = Color.White) },
+            supportingContent = {
+                Text(
+                    when (togetherMode) {
+                        TogetherConnectMode.Lan -> "仅局域网直连：不发起公网探测"
+                        TogetherConnectMode.MultiPath -> "跨网多路径直连探测：优先局域网，失败自动尝试公网直连"
+                    },
+                    color = Color.Gray
+                )
+            },
+            leadingContent = { Icon(Icons.Default.Public, null) }
+        )
+        Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf(
+                TogetherConnectMode.Lan to "仅局域网",
+                TogetherConnectMode.MultiPath to "跨网多路径(默认)"
+            ).forEach { (mode, label) ->
+                FilterChip(
+                    selected = togetherMode == mode,
+                    onClick = { vm.setTogetherConnectMode(mode) },
+                    label = { Text(label, fontSize = 12.sp) }
+                )
+            }
+        }
+        val serverEnabled by vm.togetherServerEnabled.collectAsStateWithLifecycle()
+        val serverAddress by vm.togetherServerAddress.collectAsStateWithLifecycle()
+        ListItem(
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            headlineContent = { Text("公网中转服务器（可选）", color = Color.White) },
+            supportingContent = {
+                Text(
+                    if (serverEnabled) "跨网多路径时将自动经你的服务器中转音频与控制" else "开启后填写地址，用于跨网可靠直连",
+                    color = Color.Gray
+                )
+            },
+            leadingContent = { Icon(Icons.Default.Dns, null) },
+            trailingContent = { Switch(checked = serverEnabled, onCheckedChange = vm::setTogetherServerEnabled) }
+        )
+        if (serverEnabled) {
+            OutlinedTextField(
+                value = serverAddress,
+                onValueChange = vm::setTogetherServerAddress,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+                label = { Text("服务器地址（IP:端口）", color = Color(0xFF8F99A9)) },
+                placeholder = { Text("例如 1.2.3.4:9301", color = Color(0xFF5B6577)) },
+                singleLine = true,
+                shape = RoundedCornerShape(14.dp)
+            )
+            Text("服务器仅转发数据、不保存音乐；不可达时 App 只提示，不会自动回退到 UPnP 通道", color = Color(0xFF5B6577), fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
+        }
         ListItem(
             colors = ListItemDefaults.colors(containerColor = Color.Transparent),
             headlineContent = { Text("音乐节拍动态效果", color = Color.White) },

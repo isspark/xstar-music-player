@@ -43,6 +43,7 @@ dependencies {
     implementation("androidx.navigation3:navigation3-runtime:1.0.0")
     implementation("androidx.navigation3:navigation3-ui:1.0.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-core:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     implementation("androidx.room:room-runtime:2.8.4")
     implementation("androidx.room:room-ktx:2.8.4")
     ksp("androidx.room:room-compiler:2.8.4")
@@ -53,4 +54,5 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("androidx.palette:palette-ktx:1.0.0")
+    implementation("com.google.zxing:core:3.5.3")
 }

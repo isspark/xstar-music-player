@@ -680,3 +680,50 @@ online_lyrics_enabled: Boolean，默认 true
 ### R-010：直链时效
 
 公共服务的歌曲直链带时效（约 20 分钟）。应用只在用户点击下载时解析并立即流式落盘，不持久化远端地址；下载中断后需重新解析。
+
+
+## 19. 一起听（Listen Together）设计落点
+
+### 19.1 架构
+
+- 角色：房主（Host）拥有房间、曲库与本地播放；成员（Member）以“跟随模式”播放房主 HTTP 推流。
+- 无第三方服务器：两端通过邀请码/二维码交换候选地址后 TCP 直连；音频由房主 cast/LocalMusicServer 增强（会话端口 + /art 封面端点 + 按 token 注册）推给成员，成员 ExoPlayer 播放该 http 流。
+- 时间轴主导：房主每秒向成员推送同步帧，成员做漂移纠偏（阈值约 800ms）并跟随播放/暂停/切歌/seek。
+- 对等控制：成员的控制操作经 TCP 回传房主执行，再经同步帧广播；两端 UI 通过统一 MusicViewModel 播放动作路由（本地 / 一起听 / 投屏）。
+- 连接方式由 DataStore 	ogether_connect_mode 持久化，默认跨网多路径探测：先局域网候选直连，失败后房主经 UPnP IGD（NatProbe）自动映射公网端口作为第二候选；两候选均失败给出可读降级提示。
+- 局域网内的“输码加入”通过 UDP 多播（TogetherDiscovery）按会话码定位房间；二维码内容为完整邀请 JSON。
+- 会话由 TogetherService 前台服务保活，会话期间不写本地播放快照；模式与 FM/卡拉OK/投屏互斥。
+
+### 19.2 新增/修改模块
+
+- 	ogether/TogetherSessionController.kt：会话状态机 + 自身 MediaController（读/控同一 PlaybackService）实现房主快照与成员跟随。
+- 	ogether/{TogetherModels, TogetherProtocol, TogetherTransport, NatProbe, TogetherService}.kt：模型/JSON 帧/链路与发现/UPnP/前台服务。
+- cast/LocalMusicServer.kt：start(port)、egisterForToken、egisterArtForToken、/art 端点。
+- PlayerController.ensureProgressUpdates()：成员跟随期间保证 UI 进度刷新。
+- MainActivity.kt：设置项、抽屉入口、TogetherSheet（开房/加入/二维码/共享队列/表情）、播放页胶囊、表情气泡、控制路由。
+- docs/requirements.md（5.15）、README.md 已同步。
+
+### 19.3 验收重点
+
+- 同 Wi-Fi/热点真机：开房、输码/粘贴加入、对等控制、共享队列点歌、表情气泡、锁屏/后台续播、房主/成员离开处理。
+- 成员无本地歌曲仍能收听房主推流；封面/歌词/进度两端一致。
+- 跨网多路径（UPnP 可用/不可用）与仅局域网模式行为与提示符合预期；会话期间本地快照不被 http 队列污染。
+
+### 19.4 风险
+
+- R-011：跨网无中转直连受双方 NAT 限制，多数路由器默认关闭 UPnP、CGNAT 下不可行；失败时提示改用同一 Wi-Fi/开启 UPnP 或端口转发。见 R-012。
+- R-012：一起听依赖房主上行带宽，且采用“秒级快照 + 阈值纠偏”的近似协同而非逐采样同步；明文局域网协议未加密，适合短时效会话。同步/安全/带宽策略可在后续按真实网络反馈迭代。
+
+
+## 20. 自建公网中转服务器（可选）设计落点
+
+- 目标：让「一起听」跨互联网可靠工作，彻底摆脱 NAT/UPnP/CGNAT；服务器为自建（server/），仅做字节级转发，不解析、不落盘任何音乐内容。
+- 服务端（Go 单二进制，单 TCP 端口）：CTRL <code> host|member <nick> 房间配对并双向透明转发控制字节；TUNNEL <code> 保活媒体隧道；成员媒体请求 GET /room/<code>/... 经隧道转发到房主本机 LocalMusicServer，响应以 [int32 len][chunk] 分帧流式回传，零长度帧结束（避免整首歌曲在房主端内存缓冲）。
+- App 端：
+  - 新增服务器候选：TogetherInvite.serverControlHost/serverHttpBase；候选统一为 {host,port,mediaBase,viaServer}，成员按 局域网 → 服务器（或未配置服务器时的 UPnP 公网映射）顺序尝试，成功后以 mediaBase 拼 /stream、/art。
+  - 房主开房（多路径且配置服务器）：同时保持局域网监听，并连接服务器注册房间 + 打开隧道 pump；同一时刻只接受一名成员，先到先得，另一来源被拒/关闭。
+  - 服务器不可达时仅提示、不自动回退 UPnP；未配置服务器时行为保持为 局域网 → UPnP。
+  - 设置新增「公网中转服务器」开关 + 地址；DataStore 	ogether_server_enabled / 	ogether_server_address 持久化。
+  - LocalMusicServer /art 增加 Content-Length，保证隧道按长度分帧正确。
+- 部署：server/install.sh 编译单二进制并注册 systemd，放行 TCP 端口；无 TLS（明文，与 App cleartext 配置一致），TLS 留作后续。
+- 风险 R-013：中转流量明文且依赖自建服务器在线；会话码无鉴权仅做配对。若需正式使用应加 TLS 与访问控制。

@@ -48,5 +48,9 @@
             android:name=".cast.CastSessionService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
+        <service
+            android:name=".together.TogetherService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
     </application>
 </manifest>

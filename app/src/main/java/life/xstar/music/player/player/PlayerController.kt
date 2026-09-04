@@ -124,6 +124,12 @@ class PlayerController(context: Context) {
     fun playFmQueue(songs: List<SongEntity>, startIndex: Int = 0, position: Long = 0, playing: Boolean = true) =
         restoreQueue(songs, startIndex, position, PlaybackMode.Sequential, playing, fmMode = true)
 
+    fun ensureProgressUpdates() = controllerFuture.addListener({
+        val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
+        attachListener(controller)
+        startProgressUpdates(controller)
+    }, executor)
+
     fun randomSong() = controllerFuture.addListener({
         val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
         if (controller.mediaItemCount <= 1) return@addListener
@@ -149,6 +155,13 @@ class PlayerController(context: Context) {
 
     fun next() = controllerFuture.addListener({ controllerFuture.get().seekToNextMediaItem() }, executor)
     fun previous() = controllerFuture.addListener({ controllerFuture.get().seekToPreviousMediaItem() }, executor)
+    fun jumpTo(index: Int) = controllerFuture.addListener({
+        val controller = controllerFuture.get()
+        if (index in 0 until controller.mediaItemCount) {
+            controller.seekTo(index, 0)
+            controller.play()
+        }
+    }, executor)
     fun seek(position: Long) = controllerFuture.addListener({ controllerFuture.get().seekTo(position) }, executor)
     fun updateSong(song: SongEntity) {
         if (_state.value.song?.mediaStoreId != song.mediaStoreId) return
