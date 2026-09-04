@@ -134,6 +134,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val songs = repo.songs().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val favorites = repo.favorites().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val playlists = repo.playlists().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    val singingRecords = repo.singingRecords().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val playback = player.state
     val castState: StateFlow<CastSessionState> = castController.state
     val togetherState: StateFlow<TogetherSessionState> = togetherController.state
@@ -601,6 +602,35 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         val currentId = saved.queue.getOrNull(saved.index)
         return RestoredQueue(songs, songs.indexOfFirst { it.mediaStoreId == currentId }.coerceAtLeast(0))
     }
+
+    suspend fun persistSingingRecord(song: SongEntity, sourceFile: File, score: SingingScore, durationMs: Long): Long = withContext(Dispatchers.IO) {
+        val directory = File(appContext.getExternalFilesDir(null) ?: appContext.filesDir, "singing").apply { mkdirs() }
+        val createdAt = System.currentTimeMillis()
+        val target = File(directory, "sing_${song.mediaStoreId}_${createdAt}.wav")
+        sourceFile.inputStream().use { input -> target.outputStream().use { output -> input.copyTo(output) } }
+        repo.saveSingingRecord(
+            SingingRecordEntity(
+                songId = song.mediaStoreId,
+                songTitle = song.title,
+                songArtist = song.artist,
+                albumArtUri = song.albumArtUri,
+                filePath = target.absolutePath,
+                total = score.total,
+                pitch = score.pitch,
+                activity = score.activity,
+                lightweight = score.lightweight,
+                durationMs = durationMs,
+                createdAt = createdAt
+            )
+        )
+    }
+    fun updateSingingRecordScore(id: Long, score: SingingScore) = viewModelScope.launch {
+        repo.updateSingingRecordScore(id, score.total, score.pitch, score.activity, score.lightweight)
+    }
+    fun deleteSingingRecord(record: SingingRecordEntity) = viewModelScope.launch(Dispatchers.IO) {
+        runCatching { File(record.filePath).delete() }
+        repo.deleteSingingRecord(record)
+    }
     override fun onCleared() {
         vocalReferenceJob?.cancel()
         player.release()
@@ -655,12 +685,14 @@ sealed class OnlineSearchUiState {
         entry<OnlineRoute> { OnlineScreen(vm, openMenu) }
         entry<EqualizerRoute> { EqualizerScreen(vm, openMenu) }
         entry<SettingsRoute> { SettingsScreen(vm, openMenu) }
+        entry<SingingHistoryRoute> { SingingHistoryScreen(vm, openMenu, goKaraoke = { vm.setKaraokeMode(true) }) }
     }
     val drawerRoutes = listOf(
         PlayerRoute to (Icons.Default.Headphones to "正在播放"),
         LibraryRoute to (Icons.Default.LibraryMusic to "音乐库"),
         FavoritesRoute to (Icons.Default.Favorite to "我的收藏"),
         PlaylistsRoute to (Icons.Default.QueueMusic to "播放列表"),
+        SingingHistoryRoute to (Icons.Default.Mic to "我的演唱"),
         OnlineRoute to (Icons.Default.CloudDownload to "在线搜歌"),
         EqualizerRoute to (Icons.Default.Equalizer to "均衡器"),
         SettingsRoute to (Icons.Default.Settings to "设置")
@@ -1839,78 +1871,193 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
     }
 }
 
+private data class PendingTake(val takeId: Int, val startMs: Long, val notes: List<MicNote>, val recordId: Long? = null)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun KaraokeScoreSheet(vm: MusicViewModel, song: SongEntity, close: () -> Unit) {
     val context = LocalContext.current
     val appContext = context.applicationContext
     val playback by vm.playback.collectAsStateWithLifecycle()
     val reference by vm.vocalReference.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
     val recorder = remember { KaraokeMicRecorder() }
     val playerRef = remember { arrayOfNulls<MediaPlayer>(1) }
     var recording by remember { mutableStateOf(false) }
+    var processing by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<SingingScore?>(null) }
     var previewPath by remember { mutableStateOf<String?>(null) }
     var recordStartMs by remember { mutableStateOf(0L) }
     var previewing by remember { mutableStateOf(false) }
+    var resumePlayback by remember { mutableStateOf(false) }
+    var takeId by remember { mutableStateOf(0) }
+    var pendingTake by remember { mutableStateOf<PendingTake?>(null) }
+    var persisted by remember { mutableStateOf(false) }
     var permissionGranted by remember { mutableStateOf(context.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted -> permissionGranted = granted }
     val live by recorder.live.collectAsStateWithLifecycle()
-    val readyFrames = (reference as? VocalReferenceState.Ready)?.frames
 
     LaunchedEffect(song.mediaStoreId) { vm.requestVocalReference(song) }
+
+    LaunchedEffect(reference) {
+        val state = reference
+        if (state !is VocalReferenceState.Ready) return@LaunchedEffect
+        val take = pendingTake ?: return@LaunchedEffect
+        if (take.takeId != takeId) return@LaunchedEffect
+        val score = withContext(Dispatchers.Default) {
+            VocalPitchAnalyzer.computeScore(state.frames, take.notes, take.startMs)
+        }
+        if (pendingTake?.takeId == take.takeId) {
+            result = score
+            pendingTake?.recordId?.let { id -> vm.updateSingingRecordScore(id, score) }
+            pendingTake = null
+        }
+    }
+
+    fun resumeSongAfterPreview() {
+        if (resumePlayback) {
+            resumePlayback = false
+            vm.player.toggle()
+        }
+    }
+
+    fun pauseSongForPreview() {
+        if (playback.playing) {
+            resumePlayback = true
+            vm.player.pause()
+        } else {
+            resumePlayback = false
+        }
+    }
+
+    fun stopPreview() {
+        val player = playerRef[0] ?: return
+        playerRef[0] = null
+        runCatching { player.stop() }
+        runCatching { player.release() }
+        if (previewing) {
+            previewing = false
+            resumeSongAfterPreview()
+        }
+    }
+
+    fun deleteCurrentRecording() {
+        previewPath?.let { runCatching { File(it).delete() } }
+        previewPath = null
+    }
+
     DisposableEffect(Unit) {
         onDispose {
             recorder.discard()
-            runCatching { playerRef[0]?.release() }
-            playerRef[0] = null
+            stopPreview()
+            resumeSongAfterPreview()
+            deleteCurrentRecording()
         }
     }
 
     fun finishRecording() {
-        if (!recording) return
+        if (!recording || processing) return
         recording = false
-        val captured = recorder.stop() ?: return
-        val score = VocalPitchAnalyzer.computeScore(readyFrames, captured.notes, recordStartMs)
-        result = score
-        val file = File(appContext.cacheDir, "karaoke_${System.currentTimeMillis()}.wav")
-        if (writeWav16Mono(file, captured.samples, captured.sampleRate)) previewPath = file.absolutePath
+        processing = true
+        val thisTake = takeId
+        val startMs = recordStartMs
+        scope.launch {
+            val captured = withContext(Dispatchers.IO) { recorder.stop() }
+            if (captured == null) {
+                processing = false
+                return@launch
+            }
+            val refState = vm.vocalReference.value
+            val refAtFinish = (refState as? VocalReferenceState.Ready)?.frames
+            val score = withContext(Dispatchers.Default) {
+                VocalPitchAnalyzer.computeScore(refAtFinish, captured.notes, startMs)
+            }
+            val path = withContext(Dispatchers.IO) {
+                val file = File(appContext.cacheDir, "karaoke_${System.currentTimeMillis()}.wav")
+                if (writeWav16Mono(file, captured.samples, captured.sampleRate)) file.absolutePath else null
+            }
+            val savedId = if (path != null) {
+                val durationMs = captured.samples.size * 1000L / captured.sampleRate
+                withContext(Dispatchers.IO) { runCatching { vm.persistSingingRecord(song, File(path), score, durationMs) }.getOrNull() }
+            } else null
+            result = score
+            persisted = savedId != null
+            deleteCurrentRecording()
+            previewPath = path
+            pendingTake = if (refAtFinish == null && (refState is VocalReferenceState.Computing || refState is VocalReferenceState.Idle)) {
+                PendingTake(thisTake, startMs, captured.notes, savedId)
+            } else {
+                null
+            }
+            processing = false
+        }
+    }
+
+    fun startRecording() {
+        if (recording || processing) return
+        stopPreview()
+        deleteCurrentRecording()
+        if (!permissionGranted) {
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        if (!recorder.start()) return
+        takeId += 1
+        pendingTake = null
+        persisted = false
+        result = null
+        recordStartMs = playback.position
+        recording = true
     }
 
     fun togglePreview() {
         val current = playerRef[0]
         if (current?.isPlaying == true) {
-            current.stop()
-            current.release()
-            playerRef[0] = null
-            previewing = false
+            stopPreview()
             return
         }
+        if (current != null) {
+            playerRef[0] = null
+            runCatching { current.release() }
+            if (previewing) {
+                previewing = false
+                resumeSongAfterPreview()
+            }
+        }
         val path = previewPath ?: return
-        previewing = false
+        val player = MediaPlayer()
         runCatching {
-            val player = MediaPlayer()
             player.setDataSource(path)
             player.setOnCompletionListener {
                 runCatching { it.release() }
-                playerRef[0] = null
-                previewing = false
+                if (playerRef[0] === it) playerRef[0] = null
+                if (previewing) {
+                    previewing = false
+                    resumeSongAfterPreview()
+                }
             }
             player.prepare()
+            pauseSongForPreview()
             player.start()
             playerRef[0] = player
             previewing = true
+        }.onFailure {
+            runCatching { player.release() }
+            if (resumePlayback) resumeSongAfterPreview()
         }
     }
 
-    ModalBottomSheet(onDismissRequest = { if (!recording) close() }, containerColor = Color(0xFF171B23)) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 10.dp)) {
+    ModalBottomSheet(onDismissRequest = { if (!recording && !processing) close() }, containerColor = Color(0xFF171B23)) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp, vertical = 10.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("演唱评分", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold)
                     Text(song.title, color = Color(0xFF8F99A9), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                if (recording) TextButton(onClick = ::finishRecording) { Text("结束", color = Color(0xFFFF8A96)) }
-                else IconButton(close) { Icon(Icons.Default.Close, "关闭", tint = Color.White) }
+                when {
+                    processing -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
+                    recording -> TextButton(onClick = ::finishRecording) { Text("结束", color = Color(0xFFFF8A96)) }
+                    else -> IconButton(close) { Icon(Icons.Default.Close, "关闭", tint = Color.White) }
+                }
             }
             Spacer(Modifier.height(8.dp))
             when (val state = reference) {
@@ -1926,61 +2073,52 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
             Spacer(Modifier.height(14.dp))
 
             val score = result
-            if (score != null) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(86.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = .18f)), contentAlignment = Alignment.Center) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(gradeLabel(score.total), color = MaterialTheme.colorScheme.primary, fontSize = 30.sp, fontWeight = FontWeight.Black)
-                            Text("$score.total", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            when {
+                score != null -> {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(86.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = .18f)), contentAlignment = Alignment.Center) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(gradeLabel(score.total), color = MaterialTheme.colorScheme.primary, fontSize = 30.sp, fontWeight = FontWeight.Black)
+                                Text("${score.total}", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                        Spacer(Modifier.width(18.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(if (score.lightweight) "活跃度评分(轻量)" else "综合评分", color = Color(0xFFC5CDDA), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Spacer(Modifier.height(5.dp))
+                            Row {
+                                ScoreChip("音准", score.pitch)
+                                Spacer(Modifier.width(8.dp))
+                                ScoreChip("活跃度", score.activity)
+                            }
+                            if (score.lightweight) Text("未获得参考音高,按演唱时长与音量评估", color = Color(0xFF818C9C), fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
                         }
                     }
-                    Spacer(Modifier.width(18.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(if (score.lightweight) "活跃度评分(轻量)" else "综合评分", color = Color(0xFFC5CDDA), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.height(5.dp))
-                        Row {
-                            ScoreChip("音准", score.pitch)
-                            Spacer(Modifier.width(8.dp))
-                            ScoreChip("活跃度", score.activity)
+                    Spacer(Modifier.height(14.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(onClick = {
+                            stopPreview()
+                            result = null
+                        }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.Refresh, null, Modifier.size(17.dp)); Spacer(Modifier.width(6.dp)); Text("再唱一次") }
+                        Button(onClick = ::togglePreview, enabled = previewPath != null && !processing, modifier = Modifier.weight(1f)) {
+                            Icon(if (previewing) Icons.Default.Stop else Icons.Default.PlayArrow, null, Modifier.size(17.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(if (previewing) "停止试听" else "试听演唱")
                         }
-                        if (score.lightweight) Text("未获得参考音高,按演唱时长与音量评估", color = Color(0xFF818C9C), fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
+                    }
+                    if (persisted) {
+                        Spacer(Modifier.height(8.dp))
+                        Text("已保存到「我的演唱」", color = Color(0xFF55D6A9), fontSize = 11.sp)
                     }
                 }
-                Spacer(Modifier.height(14.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedButton(onClick = { result = null }, modifier = Modifier.weight(1f)) { Icon(Icons.Default.Refresh, null, Modifier.size(17.dp)); Spacer(Modifier.width(6.dp)); Text("再唱一次") }
-                    Button(onClick = ::togglePreview, enabled = previewPath != null, modifier = Modifier.weight(1f)) {
-                        Icon(if (previewing) Icons.Default.Stop else Icons.Default.PlayArrow, null, Modifier.size(17.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(if (previewing) "停止试听" else "试听演唱")
+                processing -> Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = Color.White.copy(alpha = .06f)) {
+                    Row(Modifier.padding(horizontal = 18.dp, vertical = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Text("正在生成评分与试听…", color = Color(0xFFC5CDDA), fontSize = 14.sp)
                     }
                 }
-            } else if (!recording) {
-                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = Color.White.copy(alpha = .06f)) {
-                    Column(Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(Icons.Default.Mic, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.height(10.dp))
-                        Text("点击开始,跟随伴奏演唱并录音", color = Color(0xFFC5CDDA), fontSize = 14.sp, textAlign = TextAlign.Center)
-                        Text("结束后给出音准与活跃度评分,并支持试听", color = Color(0xFF818C9C), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
-                        Spacer(Modifier.height(12.dp))
-                        Button(
-                            onClick = {
-                                if (permissionGranted) {
-                                    if (recorder.start()) {
-                                        recordStartMs = playback.position
-                                        previewPath = null
-                                        recording = true
-                                    }
-                                } else {
-                                    permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) { Text(if (permissionGranted) "开始演唱" else "授权麦克风后开始") }
-                    }
-                }
-            } else {
-                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = Color(0xFFFF5F74).copy(alpha = .08f)) {
+                recording -> Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = Color(0xFFFF5F74).copy(alpha = .08f)) {
                     Column(Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(Modifier.size(10.dp).clip(CircleShape).background(Color(0xFFFF5F74)))
@@ -1997,6 +2135,19 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
                             fontWeight = FontWeight.Bold
                         )
                         Text("点击上方「结束」完成演唱与评分", color = Color(0xFF818C9C), fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
+                else -> Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = Color.White.copy(alpha = .06f)) {
+                    Column(Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Default.Mic, null, Modifier.size(40.dp), tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.height(10.dp))
+                        Text("点击开始,跟随伴奏演唱并录音", color = Color(0xFFC5CDDA), fontSize = 14.sp, textAlign = TextAlign.Center)
+                        Text("结束后给出音准与活跃度评分,并支持试听", color = Color(0xFF818C9C), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
+                        Spacer(Modifier.height(12.dp))
+                        Button(
+                            onClick = ::startRecording,
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text(if (permissionGranted) "开始演唱" else "授权麦克风后开始") }
                     }
                 }
             }
@@ -2214,6 +2365,183 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
     val label = when (mode) { PlaybackMode.Shuffle -> "随机"; PlaybackMode.RepeatOne -> "单曲"; PlaybackMode.Sequential -> "顺序" }
     val tint = if (!enabled) Color(0xFF4B5464) else if (mode == PlaybackMode.Sequential) Color(0xFFB3BDCC) else MaterialTheme.colorScheme.primary
     IconButton(onClick = onClick, modifier = Modifier.size(52.dp), enabled = enabled) { Icon(when (mode) { PlaybackMode.Shuffle -> Icons.Default.Shuffle; PlaybackMode.RepeatOne -> Icons.Default.RepeatOne; PlaybackMode.Sequential -> Icons.Default.FormatListNumbered }, label, tint = tint) }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun SingingHistoryScreen(vm: MusicViewModel, openMenu: () -> Unit, goKaraoke: () -> Unit) {
+    val records by vm.singingRecords.collectAsStateWithLifecycle()
+    var selected by remember { mutableStateOf<SingingRecordEntity?>(null) }
+    var pendingDelete by remember { mutableStateOf<SingingRecordEntity?>(null) }
+    Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) {
+        PageHeader(openMenu)
+        Text("我的演唱", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        Text(if (records.isEmpty()) "卡拉OK每次跟唱结束都会自动保存" else "共 ${records.size} 条演唱记录 · 点击可播放与查看评分", color = Color(0xFF818C9C), fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp, bottom = 6.dp))
+        if (records.isEmpty()) {
+            EmptyState("还没有演唱记录", "进入卡拉OK模式，点开「演唱评分」录完一遍后，录音和评分会自动保存到这里。", "去卡拉OK跟唱", goKaraoke)
+        } else {
+            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(vertical = 6.dp)) {
+                items(records, key = { it.id }) { record ->
+                    val fileExists = remember(record.id, record.filePath) { File(record.filePath).exists() }
+                    ListItem(
+                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                        headlineContent = { Text(record.songTitle, color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        supportingContent = {
+                            Column {
+                                if (record.songArtist.isNotBlank()) Text(record.songArtist, color = Color(0xFF8F99A9), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    "${dateTimeText(record.createdAt)} · ${time(record.durationMs)}${if (fileExists) "" else " · 音频已丢失"} · 音准 ${record.pitch ?: "--"} · 活跃度 ${record.activity}",
+                                    color = if (fileExists) Color(0xFF8F99A9) else Color(0xFFFF8A96),
+                                    fontSize = 12.sp
+                                )
+                            }
+                        },
+                        leadingContent = {
+                            Surface(Modifier.size(48.dp), RoundedCornerShape(13.dp), color = Color(0xFF252C38)) {
+                                if (record.albumArtUri.isNullOrBlank()) Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Mic, null, tint = Color(0xFF8F99A9), modifier = Modifier.size(22.dp)) }
+                                else ArtworkImage(record.albumArtUri, Color(0xFF252C38))
+                            }
+                        },
+                        trailingContent = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(gradeLabel(record.total), color = gradeColor(record.total), fontSize = 17.sp, fontWeight = FontWeight.Black)
+                                Text(" ${record.total}", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                IconButton(onClick = { pendingDelete = record }) {
+                                    Icon(Icons.Default.DeleteOutline, "删除", tint = Color(0xFFFF8A96))
+                                }
+                            }
+                        },
+                        modifier = Modifier.clickable(enabled = fileExists) { selected = record }
+                    )
+                }
+            }
+        }
+    }
+    selected?.let { SingingRecordSheet(it, vm) { selected = null } }
+    pendingDelete?.let { record ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("删除这条演唱记录？") },
+            text = { Text("录音文件和评分记录都会一并删除，且无法恢复。") },
+            confirmButton = { TextButton({
+                vm.deleteSingingRecord(record)
+                pendingDelete = null
+            }) { Text("删除", color = Color(0xFFFF8A96)) } },
+            dismissButton = { TextButton({ pendingDelete = null }) { Text("取消") } }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun SingingRecordSheet(record: SingingRecordEntity, vm: MusicViewModel, close: () -> Unit) {
+    val playerRef = remember { arrayOfNulls<MediaPlayer>(1) }
+    var playing by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+
+    fun releasePlayer() {
+        val player = playerRef[0] ?: return
+        playerRef[0] = null
+        runCatching { player.stop() }
+        runCatching { player.release() }
+        playing = false
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { releasePlayer() }
+    }
+
+    fun togglePlay() {
+        val current = playerRef[0]
+        if (current?.isPlaying == true) {
+            releasePlayer()
+            return
+        }
+        releasePlayer()
+        runCatching {
+            val player = MediaPlayer()
+            player.setDataSource(record.filePath)
+            player.setOnCompletionListener {
+                runCatching { it.release() }
+                if (playerRef[0] === it) playerRef[0] = null
+                playing = false
+            }
+            player.prepare()
+            player.start()
+            playerRef[0] = player
+            playing = true
+        }
+    }
+
+    ModalBottomSheet(onDismissRequest = { if (!confirmDelete) close() }, containerColor = Color(0xFF171B23)) {
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp, vertical = 12.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(record.songTitle, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (record.songArtist.isNotBlank()) Text(record.songArtist, color = Color(0xFF8F99A9), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                IconButton(close) { Icon(Icons.Default.Close, "关闭", tint = Color.White) }
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(72.dp).clip(CircleShape).background(gradeColor(record.total).copy(alpha = .16f)), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(gradeLabel(record.total), color = gradeColor(record.total), fontSize = 25.sp, fontWeight = FontWeight.Black)
+                        Text("${record.total}", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                Spacer(Modifier.width(18.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(if (record.lightweight) "活跃度评分(轻量)" else "综合评分", color = Color(0xFFC5CDDA), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(5.dp))
+                    Row {
+                        ScoreChip("音准", record.pitch)
+                        Spacer(Modifier.width(8.dp))
+                        ScoreChip("活跃度", record.activity)
+                    }
+                    if (record.lightweight) Text("该遍录制时参考音高尚未就绪", color = Color(0xFF818C9C), fontSize = 11.sp, modifier = Modifier.padding(top = 5.dp))
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            Text("演唱于 ${dateTimeText(record.createdAt)} · 录音时长 ${time(record.durationMs)}", color = Color(0xFF818C9C), fontSize = 12.sp)
+            Spacer(Modifier.height(16.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(onClick = { confirmDelete = true }, modifier = Modifier.weight(1f)) {
+                    Icon(Icons.Default.DeleteOutline, null, Modifier.size(17.dp), tint = Color(0xFFFF8A96))
+                    Spacer(Modifier.width(6.dp))
+                    Text("删除", color = Color(0xFFFF8A96))
+                }
+                Button(onClick = ::togglePlay, modifier = Modifier.weight(1f)) {
+                    Icon(if (playing) Icons.Default.Stop else Icons.Default.PlayArrow, null, Modifier.size(17.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (playing) "停止播放" else "播放演唱")
+                }
+            }
+            Spacer(Modifier.height(18.dp))
+        }
+    }
+    if (confirmDelete) AlertDialog(
+        onDismissRequest = { confirmDelete = false },
+        title = { Text("删除这条演唱记录？") },
+        text = { Text("录音文件和评分记录都会删除，且无法恢复。") },
+        confirmButton = { TextButton({
+            releasePlayer()
+            vm.deleteSingingRecord(record)
+            confirmDelete = false
+            close()
+        }) { Text("删除", color = Color(0xFFFF8A96)) } },
+        dismissButton = { TextButton({ confirmDelete = false }) { Text("取消") } }
+    )
+}
+
+private fun gradeColor(score: Int): Color = when {
+    score >= 90 -> Color(0xFFFFC53D)
+    score >= 80 -> Color(0xFF4FC3F7)
+    score >= 70 -> Color(0xFF81C784)
+    else -> Color(0xFFB0BEC5)
+}
+
+private fun dateTimeText(ms: Long): String {
+    val calendar = java.util.Calendar.getInstance().apply { timeInMillis = ms }
+    return "%04d-%02d-%02d %02d:%02d".format(calendar.get(java.util.Calendar.YEAR), calendar.get(java.util.Calendar.MONTH) + 1, calendar.get(java.util.Calendar.DAY_OF_MONTH), calendar.get(java.util.Calendar.HOUR_OF_DAY), calendar.get(java.util.Calendar.MINUTE))
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

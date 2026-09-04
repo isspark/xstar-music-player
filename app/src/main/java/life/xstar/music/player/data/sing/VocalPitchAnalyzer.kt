@@ -110,24 +110,48 @@ object VocalPitchAnalyzer {
     private fun centsBetween(a: Float, b: Float): Float = abs(1200f * log2(a / b))
 
     fun computeScore(reference: List<VoiceFrame>?, notes: List<MicNote>, songStartMs: Long): SingingScore {
-        if (notes.isEmpty()) return SingingScore(0, 0, 0, false)
-        val voiced = notes.mapNotNull { note -> note.frequency?.let { note to it } }
-        val activity = (voiced.size * 100f / notes.size).roundToInt().coerceIn(0, 100)
-        val scored = mutableListOf<Boolean>()
-        if (voiced.isNotEmpty() && !reference.isNullOrEmpty()) {
-            for ((note, frequency) in voiced) {
-                val songTimeMs = songStartMs + note.timeMs
-                val nearest = nearestReference(reference, songTimeMs)
-                if (nearest != null) {
-                    val semitones = 12f * log2(frequency / nearest.frequency)
-                    scored.add(abs(semitones) <= 1.0f)
-                }
-            }
-            val pitch = if (scored.isEmpty()) null else (scored.count { it } * 100f / scored.size).roundToInt().coerceIn(0, 100)
-            val total = if (pitch == null) activity else (0.85f * pitch + 0.15f * activity).roundToInt().coerceIn(0, 100)
-            return SingingScore(total, pitch, activity, lightweight = false)
+        if (notes.isEmpty()) return SingingScore(0, null, 0, lightweight = true)
+        if (reference.isNullOrEmpty()) {
+            val activity = trimSilenceActivity(notes)
+            return SingingScore(activity, null, activity, lightweight = true)
         }
-        return SingingScore(activity, null, activity, lightweight = true)
+        var eligible = 0
+        var voiced = 0
+        val scored = mutableListOf<Boolean>()
+        for (note in notes) {
+            val songTimeMs = songStartMs + note.timeMs
+            val nearest = nearestReference(reference, songTimeMs) ?: continue
+            eligible++
+            val frequency = note.frequency
+            if (frequency != null) {
+                voiced++
+                val semitones = 12f * log2(frequency / nearest.frequency)
+                scored.add(abs(semitones) <= 1.0f)
+            }
+        }
+        val activity = if (eligible == 0) 0 else (voiced * 100f / eligible).roundToInt().coerceIn(0, 100)
+        if (scored.isEmpty()) {
+            val fallback = trimSilenceActivity(notes)
+            return SingingScore(fallback, null, fallback, lightweight = true)
+        }
+        val pitch = (scored.count { it } * 100f / scored.size).roundToInt().coerceIn(0, 100)
+        val total = (0.85f * pitch + 0.15f * activity).roundToInt().coerceIn(0, 100)
+        return SingingScore(total, pitch, activity, lightweight = false)
+    }
+
+    private fun trimSilenceActivity(notes: List<MicNote>): Int {
+        var first = -1
+        var last = -1
+        for (index in notes.indices) {
+            if (notes[index].frequency != null) {
+                if (first < 0) first = index
+                last = index
+            }
+        }
+        if (first < 0 || last < first) return 0
+        var voiced = 0
+        for (index in first..last) if (notes[index].frequency != null) voiced++
+        return (voiced * 100f / (last - first + 1)).roundToInt().coerceIn(0, 100)
     }
 
     private fun nearestReference(reference: List<VoiceFrame>, timeMs: Long): VoiceFrame? {

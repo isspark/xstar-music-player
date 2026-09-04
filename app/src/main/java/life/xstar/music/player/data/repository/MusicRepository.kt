@@ -18,18 +18,22 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 
-class MusicRepository(private val context: Context, private val dao: SongDao, private val playlistDao: PlaylistDao) {
+class MusicRepository(private val context: Context, private val dao: SongDao, private val playlistDao: PlaylistDao, private val singingDao: SingingDao) {
     fun songs(): Flow<List<SongEntity>> = dao.observeSongs()
     fun search(query: String): Flow<List<SongEntity>> = dao.search(query)
     fun favorites(): Flow<List<SongEntity>> = dao.observeFavorites()
     fun playlists(): Flow<List<PlaylistEntity>> = playlistDao.observePlaylists()
     fun playlistSongs(id: Long): Flow<List<PlaylistSongEntity>> = playlistDao.observeSongs(id)
+    fun singingRecords(): Flow<List<SingingRecordEntity>> = singingDao.observeAll()
     suspend fun toggleFavorite(id: Long) = dao.toggleFavorite(id)
     suspend fun createPlaylist(name: String) = playlistDao.insert(PlaylistEntity(name = name))
     suspend fun deletePlaylist(playlist: PlaylistEntity) = playlistDao.delete(playlist)
     suspend fun addToPlaylist(playlistId: Long, songId: Long) = playlistDao.addSong(PlaylistSongEntity(playlistId, songId, playlistDao.nextPosition(playlistId)))
     suspend fun removeFromPlaylist(playlistId: Long, songId: Long) = playlistDao.remove(playlistId, songId)
     suspend fun renamePlaylist(id: Long, name: String) = playlistDao.rename(id, name.trim())
+    suspend fun saveSingingRecord(record: SingingRecordEntity): Long = singingDao.insert(record)
+    suspend fun updateSingingRecordScore(id: Long, total: Int, pitch: Int?, activity: Int, lightweight: Boolean) = singingDao.updateScore(id, total, pitch, activity, lightweight)
+    suspend fun deleteSingingRecord(record: SingingRecordEntity) = singingDao.delete(record)
     suspend fun enrichMissingArtwork() = Unit
 
     suspend fun getSong(id: Long): SongEntity? = dao.findById(id)

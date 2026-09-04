@@ -7,10 +7,11 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [SongEntity::class, PlaylistEntity::class, PlaylistSongEntity::class], version = 5, exportSchema = false)
+@Database(entities = [SongEntity::class, PlaylistEntity::class, PlaylistSongEntity::class, SingingRecordEntity::class], version = 6, exportSchema = false)
 abstract class MusicDatabase : RoomDatabase() {
     abstract fun songDao(): SongDao
     abstract fun playlistDao(): PlaylistDao
+    abstract fun singingDao(): SingingDao
 
     companion object {
         fun create(context: Context) = Room.databaseBuilder(
@@ -57,6 +58,26 @@ abstract class MusicDatabase : RoomDatabase() {
         }, object : Migration(4, 5) {
             override fun migrate(database: SupportSQLiteDatabase) {
                 database.execSQL("ALTER TABLE songs ADD COLUMN onlineId TEXT")
+            }
+        }, object : Migration(5, 6) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS singing_records (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        songId INTEGER NOT NULL,
+                        songTitle TEXT NOT NULL,
+                        songArtist TEXT NOT NULL,
+                        albumArtUri TEXT,
+                        filePath TEXT NOT NULL,
+                        total INTEGER NOT NULL,
+                        pitch INTEGER,
+                        activity INTEGER NOT NULL,
+                        lightweight INTEGER NOT NULL,
+                        durationMs INTEGER NOT NULL,
+                        createdAt INTEGER NOT NULL
+                    )
+                """.trimIndent())
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_singing_records_createdAt ON singing_records(createdAt)")
             }
         }).build()
     }
