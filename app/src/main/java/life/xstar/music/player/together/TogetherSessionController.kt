@@ -547,9 +547,9 @@ class TogetherSessionController(
             peer = TogetherPeer(generateDeviceId(), hello.nickname),
             error = null
         )
-        startHostPublishIfNeeded()
         val host = _state.value.me ?: TogetherPeer(deviceId, nickname)
         reader.write(TogetherMessage.Welcome(host, TogetherPeer(generateDeviceId(), hello.nickname)))
+        startHostPublishIfNeeded()
         pushSnapshot()
     }
 
@@ -612,15 +612,13 @@ class TogetherSessionController(
         if (appliedSourceId != song.sourceId || controller.mediaItemCount == 0) {
             controller.setMediaItems(listOf(entity.toMediaItem()), 0, 0)
             controller.prepare()
-            controller.seekTo(snap.positionMs.coerceAtLeast(0))
             if (snap.playing) controller.play() else controller.pause()
+            lastSyncSeekAt = 0L
             appliedSourceId = song.sourceId
         } else {
             if (snap.playing && !controller.isPlaying) controller.play()
             else if (!snap.playing && controller.isPlaying) controller.pause()
-            if (snap.durationMs > 0 && kotlin.math.abs(snap.positionMs - controller.currentPosition) > 800) {
-                controller.seekTo(snap.positionMs.coerceIn(0, snap.durationMs - 1))
-            }
+            maybeSyncSeek(controller, snap)
         }
         _state.value = _state.value.copy(
             sharedQueue = snap.queue,
@@ -630,10 +628,29 @@ class TogetherSessionController(
         )
     }
 
+    private var lastSyncSeekAt = 0L
+
+    /** 追赶房主进度。只在成员明显落后时向前 seek，绝不因成员超前而后退 seek（后退会打断已缓冲好的连续播放）。 */
+    private fun maybeSyncSeek(controller: MediaController, snap: TogetherMessage.Snapshot) {
+        if (!snap.playing) return
+        if (controller.playbackState != Player.STATE_READY) return
+        if (snap.durationMs <= 0) return
+        val now = System.currentTimeMillis()
+        if (now - lastSyncSeekAt < 4_000) return
+        val drift = snap.positionMs - controller.currentPosition
+        // 仅向前追赶（落后超过 5s），倒退会导致 seek 打断已缓冲的连续播放。
+        if (drift < 5_000) return
+        // 若现有缓冲已足够覆盖差距（缓冲末端已越过房主位置），无需 seek。
+        if (controller.bufferedPosition > snap.positionMs + 3_000) return
+        controller.seekTo(snap.positionMs.coerceIn(0, snap.durationMs - 1))
+        lastSyncSeekAt = now
+    }
+
     private fun togetherSongToEntity(song: TogetherSong): SongEntity {
         val base = activeMediaBase.trim().trimEnd('/')
         val url = "$base/stream?t=${song.token}"
         val artUrl = if (song.artToken.isNotBlank()) "$base/art?t=${song.artToken}" else null
+        Log.i(TAG, "togetherSongToEntity sourceId=${song.sourceId} url=$url")
         return SongEntity(
             mediaStoreId = song.sourceId,
             title = song.title,

@@ -54,9 +54,10 @@ type room struct {
 
 	mediaMu sync.Mutex
 
-	relayDone chan struct{}
-	closeOnce sync.Once
-	relayOnce sync.Once
+	relayDone    chan struct{}
+	relayStarted chan struct{}
+	closeOnce    sync.Once
+	relayOnce    sync.Once
 }
 
 type hub struct {
@@ -99,11 +100,14 @@ func (r *room) closeAll(_ string) {
 }
 
 func newRoom(h *hub, code string) *room {
-	r := &room{code: code, relayDone: make(chan struct{})}
+	r := &room{code: code, relayDone: make(chan struct{}), relayStarted: make(chan struct{})}
 	h.put(code, r)
 	go func() {
 		select {
 		case <-r.relayDone:
+			return
+		case <-r.relayStarted:
+			// Relay is live; teardown is driven by peer disconnects instead.
 			return
 		case <-time.After(waitRoom):
 			h.mu.Lock()
@@ -153,6 +157,7 @@ func (h *hub) handleConn(conn net.Conn) {
 		_ = conn.SetDeadline(time.Time{})
 		h.handleTunnel(conn, br, first)
 	default:
+		_ = conn.SetDeadline(time.Time{})
 		h.handleMedia(conn, br, first)
 	}
 }
@@ -228,6 +233,13 @@ func (h *hub) handleControl(conn net.Conn, br *bufio.Reader, first string) {
 	if ready {
 		r.startRelay(h, code)
 	}
+
+	// Keep this control socket open for the lifetime of the room. handleConn
+	// defers conn.Close(), so returning here would immediately tear down the
+	// just-registered host/member connection before its peer arrives. Block
+	// until the room ends (either peer disconnects, wait window expires, or the
+	// session is replaced), mirroring handleTunnel.
+	<-r.relayDone
 }
 
 func (r *room) startRelay(h *hub, code string) {
@@ -241,6 +253,7 @@ func (r *room) startRelay(h *hub, code string) {
 		}
 		_ = host.SetDeadline(time.Time{})
 		_ = member.SetDeadline(time.Time{})
+		close(r.relayStarted)
 		// Peer A -> Peer B. When either side dies the whole session is torn down.
 		go func() {
 			_, _ = io.Copy(member, hostBR)
@@ -276,12 +289,23 @@ func (h *hub) handleTunnel(conn net.Conn, br *bufio.Reader, first string) {
 	}
 
 	h.mu.Lock()
+	// A previous tunnel may still be registered if this is a reconnect from the
+	// same host after a mid-stream abort; supersede it.
+	if old := r.tunnel; old != nil && old != conn {
+		_ = old.Close()
+	}
 	r.tunnel = conn
 	r.tunnelBR = br
 	h.mu.Unlock()
 
 	<-r.relayDone
 	_ = conn.Close()
+	h.mu.Lock()
+	if r.tunnel == conn {
+		r.tunnel = nil
+		r.tunnelBR = nil
+	}
+	h.mu.Unlock()
 	h.drop(code, r)
 }
 
@@ -316,8 +340,20 @@ func (h *hub) handleMedia(conn net.Conn, br *bufio.Reader, first string) {
 	tunnel, tunnelBR := r.tunnel, r.tunnelBR
 	h.mu.Unlock()
 	if tunnel == nil || tunnelBR == nil {
-		writeHTTP(conn, "503 Service Unavailable", "host tunnel not ready")
-		return
+		// The tunnel is briefly down while the host pump reconnects after an
+		// aborted response. Give it a short window instead of failing fast, so
+		// the member's immediate retry is served instead of hitting a 503.
+		deadline := time.Now().Add(4 * time.Second)
+		for (tunnel == nil || tunnelBR == nil) && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+			h.mu.Lock()
+			tunnel, tunnelBR = r.tunnel, r.tunnelBR
+			h.mu.Unlock()
+		}
+		if tunnel == nil || tunnelBR == nil {
+			writeHTTP(conn, "503 Service Unavailable", "host tunnel not ready")
+			return
+		}
 	}
 
 	_ = tunnel.SetWriteDeadline(time.Now().Add(15 * time.Second))
@@ -327,6 +363,8 @@ func (h *hub) handleMedia(conn net.Conn, br *bufio.Reader, first string) {
 	}
 
 	// Read the streamed, zero-terminated framed response from the host pump.
+	frameNo := 0
+	totalBytes := 0
 	for {
 		tunnel.SetReadDeadline(time.Now().Add(120 * time.Second))
 		resp, err := readFrame(tunnelBR)
@@ -337,10 +375,34 @@ func (h *hub) handleMedia(conn net.Conn, br *bufio.Reader, first string) {
 		if len(resp) == 0 {
 			break
 		}
+		frameNo++
+		totalBytes += len(resp)
+		if frameNo == 1 {
+			preview := len(resp)
+			if preview > 24 {
+				preview = 24
+			}
+			log.Printf("media code=%s firstFrame len=%d head=%q", code, len(resp), string(resp[:preview]))
+		}
 		if _, err := conn.Write(resp); err != nil {
+			// The member hung up mid-stream. The host pump is single-threaded
+			// and would keep streaming the remainder of this response forever,
+			// blocking every later media request behind a multi-MB drain. Tear
+			// down the tunnel instead so the pump's next write fails and it
+			// reconnects, leaving the room ready for the member's next request
+			// almost immediately.
+			log.Printf("media code=%s member write failed after %d frames %d bytes; closing tunnel for re-establish", code, frameNo, totalBytes)
+			h.mu.Lock()
+			if r.tunnel == tunnel {
+				r.tunnel = nil
+				r.tunnelBR = nil
+			}
+			h.mu.Unlock()
+			_ = tunnel.Close()
 			return
 		}
 	}
+	log.Printf("media code=%s response complete frames=%d bytes=%d", code, frameNo, totalBytes)
 }
 
 func mediaPath(first string) string {

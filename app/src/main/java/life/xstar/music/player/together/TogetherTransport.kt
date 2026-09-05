@@ -303,6 +303,11 @@ private fun stripRoomPrefix(request: ByteArray, code: String): ByteArray {
  * and, for every forwarded member HTTP request, dials the local [originPort]
  * LocalMusicServer on loopback and streams the full response back as a sequence
  * of [int32 len][chunk] frames terminated by a zero-length frame.
+ *
+ * The relay tears the tunnel down whenever the member aborts a response
+ * mid-stream (so the single pump thread is never stuck streaming a multi-MB
+ * response nobody is reading). This pump therefore reconnects and re-sends its
+ * TUNNEL registration whenever the connection is dropped.
  */
 fun startServerTunnelPump(
     host: String,
@@ -311,43 +316,90 @@ fun startServerTunnelPump(
     originPort: Int,
     stop: () -> Boolean
 ): Thread = Thread({
-    val socket = runCatching {
-        val s = Socket()
-        s.connect(InetSocketAddress(host, port), 5_000)
-        s.tcpNoDelay = true
-        s
-    }.getOrNull() ?: return@Thread
-    try {
-        val output = BufferedOutputStream(socket.getOutputStream())
-        output.write(("TUNNEL $code\r\n").toByteArray(Charsets.UTF_8))
-        output.flush()
-        val input = socket.getInputStream()
-        while (!stop()) {
-            val request = readUntilDoubleCrlf(input) ?: break
-            val ok = runCatching {
-                val local = Socket("127.0.0.1", originPort)
-                local.use { client ->
-                    val originRequest = stripRoomPrefix(request, code)
-                    client.getOutputStream().write(originRequest)
-                    client.getOutputStream().flush()
-                    val body = client.getInputStream()
-                    val buffer = ByteArray(32 * 1024)
-                    while (true) {
-                        val n = body.read(buffer)
-                        if (n < 0) break
-                        if (!runCatching { writeTunnelFrame(output, buffer, n); true }.getOrDefault(false)) {
-                            return@use false
-                        }
-                    }
-                    true
-                }
-            }.getOrDefault(false)
-            if (!ok) {
-                runCatching { writeTunnelFrame(output, tunnelError("502 Bad Gateway"), tunnelError("502 Bad Gateway").size) }
+    android.util.Log.i("TogetherPump", "pump thread start host=$host port=$port code=$code originPort=$originPort")
+    while (!stop()) {
+        val socket = runCatching {
+            val s = Socket()
+            s.connect(InetSocketAddress(host, port), 5_000)
+            s.tcpNoDelay = true
+            s
+        }.getOrNull()
+        if (socket == null) {
+            android.util.Log.w("TogetherPump", "pump connect to relay $host:$port FAILED, retrying in 1.5s")
+            try {
+                Thread.sleep(1_500)
+            } catch (e: InterruptedException) {
+                break
             }
-            runCatching { writeTunnelEnd(output) }
+            continue
         }
-    } finally {
-        runCatching { socket.close() }
+        android.util.Log.i("TogetherPump", "pump connected to relay $host:$port, sending TUNNEL $code")
+        try {
+            val output = BufferedOutputStream(socket.getOutputStream())
+            output.write(("TUNNEL $code\r\n").toByteArray(Charsets.UTF_8))
+            output.flush()
+            val input = socket.getInputStream()
+            while (!stop()) {
+                android.util.Log.i("TogetherPump", "pump waiting for request...")
+                val request = readUntilDoubleCrlf(input) ?: run {
+                    android.util.Log.w("TogetherPump", "pump readUntilDoubleCrlf returned null (tunnel closed by relay); reconnecting")
+                    break
+                }
+                android.util.Log.i("TogetherPump", "pump got request: ${String(request, 0, kotlin.math.min(request.size, 200), Charsets.UTF_8).lines().firstOrNull()}")
+                val ok = runCatching {
+                    val local = Socket("127.0.0.1", originPort)
+                    local.use { client ->
+                        val originRequest = stripRoomPrefix(request, code)
+                        android.util.Log.i("TogetherPump", "forward request to local origin: ${String(originRequest, 0, originRequest.size, Charsets.UTF_8).lines().firstOrNull()} (code=$code port=$originPort)")
+                        client.getOutputStream().write(originRequest)
+                        client.getOutputStream().flush()
+                        val body = client.getInputStream()
+                        val buffer = ByteArray(32 * 1024)
+                        var firstChunk: String? = null
+                        var firstChunkHex: String? = null
+                        while (true) {
+                            val n = body.read(buffer)
+                            if (n < 0) break
+                            if (firstChunk == null && n > 0) {
+                                firstChunk = String(buffer, 0, kotlin.math.min(n, 80), Charsets.ISO_8859_1)
+                                firstChunkHex = buffer.copyOfRange(0, kotlin.math.min(n, 16)).joinToString("") { "%02x".format(it) }
+                                android.util.Log.i("TogetherPump", "origin first chunk ascii=[$firstChunk] hex=$firstChunkHex")
+                            }
+                            if (!runCatching { writeTunnelFrame(output, buffer, n); true }.getOrDefault(false)) {
+                                return@use false
+                            }
+                        }
+                        true
+                    }
+                }.getOrDefault(false)
+                if (!ok) {
+                    // Origin request failed (e.g. local server refused). If the
+                    // tunnel socket is still alive, answer the member with a
+                    // 502 so its request terminates instead of hanging. If the
+                    // write fails here the socket was torn down by the relay
+                    // (member aborted) and the read below returns null, which
+                    // triggers the reconnect path.
+                    android.util.Log.w("TogetherPump", "origin request failed code=$code port=$originPort")
+                    val err = tunnelError("502 Bad Gateway")
+                    val wrote = runCatching { writeTunnelFrame(output, err, err.size); true }.getOrDefault(false)
+                    if (wrote) runCatching { writeTunnelEnd(output) }
+                } else {
+                    runCatching { writeTunnelEnd(output) }
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("TogetherPump", "pump error: ${e.javaClass.simpleName}: ${e.message}")
+        } finally {
+            runCatching { socket.close() }
+        }
+        if (!stop()) {
+            android.util.Log.i("TogetherPump", "pump reconnecting in 1.5s...")
+            try {
+                Thread.sleep(1_500)
+            } catch (e: InterruptedException) {
+                break
+            }
+        }
     }
+    android.util.Log.i("TogetherPump", "pump thread exited")
 }, "xstar-together-tunnel").apply { isDaemon = true; start() }
