@@ -42,21 +42,27 @@ internal class TogetherLink internal constructor(private val socket: Socket) {
             val bytes = ByteArray(length)
             input.readFully(bytes)
             TogetherProtocol.decodeMessage(bytes)
+        }.onFailure {
+            android.util.Log.w("TogetherLink", "read failed: ${it.javaClass.simpleName}: ${it.message}")
         }.getOrNull()
         if (msg != null) lastActivity = System.currentTimeMillis()
         return msg
     }
 
-    fun write(message: TogetherMessage): Boolean = synchronized(writeLock) {
-        val ok = runCatching {
-            val bytes = TogetherProtocol.encodeMessage(message)
-            output.writeInt(bytes.size)
-            output.write(bytes)
-            output.flush()
-            true
-        }.getOrDefault(false)
-        if (ok) lastActivity = System.currentTimeMillis()
-        ok
+    suspend fun write(message: TogetherMessage): Boolean = withContext(Dispatchers.IO) {
+        synchronized(writeLock) {
+            val ok = runCatching {
+                val bytes = TogetherProtocol.encodeMessage(message)
+                output.writeInt(bytes.size)
+                output.write(bytes)
+                output.flush()
+                true
+            }.onFailure {
+                android.util.Log.w("TogetherLink", "write ${message::class.simpleName} failed: ${it.javaClass.simpleName}: ${it.message}")
+            }.getOrDefault(false)
+            if (ok) lastActivity = System.currentTimeMillis()
+            ok
+        }
     }
 
     fun close() {
@@ -76,6 +82,8 @@ internal class TogetherLink internal constructor(private val socket: Socket) {
             socket.connect(InetSocketAddress(host, port), timeoutMs)
             socket.tcpNoDelay = true
             TogetherLink(socket)
+        }.onFailure {
+            android.util.Log.i("TogetherLink", "connect $host:$port failed: ${it.javaClass.simpleName}: ${it.message}")
         }.getOrNull()
     }
 }
@@ -98,35 +106,51 @@ object TogetherDiscovery {
     private const val PROTO = "XSTAR-TOGETHER-V1"
     private const val LOCATE = "XSTAR-TOGETHER-LOCATE"
 
-    private fun buildMulticast(context: Context): MulticastSocket? = runCatching {
+    private class MulticastHandle(val socket: MulticastSocket, val lock: WifiManager.MulticastLock) {
+        fun release() {
+            runCatching { socket.leaveGroup(InetAddress.getByName(GROUP)) }
+            runCatching { socket.close() }
+            runCatching { if (lock.isHeld) lock.release() }
+        }
+    }
+
+    private fun buildMulticast(context: Context): MulticastHandle? = runCatching {
         val manager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         val lock = manager.createMulticastLock("xstar_together_mcast")
         lock.setReferenceCounted(false)
+        lock.acquire()
         val socket = MulticastSocket(PORT)
         socket.reuseAddress = true
         socket.joinGroup(InetAddress.getByName(GROUP))
         socket.timeToLive = 2
-        socket
+        MulticastHandle(socket, lock)
     }.getOrNull()
 
     fun advertiseAsync(context: Context, invite: TogetherInvite, stop: () -> Boolean): Thread =
         Thread({
             val payload = TogetherProtocol.base64(TogetherProtocol.encodeInvite(invite))
             val line = "$PROTO code=${invite.code} payload=$payload\r\n"
-            val socket = buildMulticast(context)
-            if (socket == null) return@Thread
-            val group = runCatching { InetAddress.getByName(GROUP) }.getOrNull() ?: return@Thread
+            val handle = buildMulticast(context)
+            if (handle == null) return@Thread
+            val group = runCatching { InetAddress.getByName(GROUP) }.getOrNull()
+            if (group == null) {
+                handle.release()
+                return@Thread
+            }
             try {
                 val bytes = line.toByteArray(Charsets.UTF_8)
                 while (!stop()) {
                     runCatching {
-                        socket.send(DatagramPacket(bytes, bytes.size, group, PORT))
+                        handle.socket.send(DatagramPacket(bytes, bytes.size, group, PORT))
                     }
-                    Thread.sleep(1_500)
+                    try {
+                        Thread.sleep(1_500)
+                    } catch (e: InterruptedException) {
+                        break
+                    }
                 }
             } finally {
-                runCatching { socket.leaveGroup(group) }
-                runCatching { socket.close() }
+                handle.release()
             }
         }, "xstar-together-advertise").apply { isDaemon = true; start() }
 
@@ -134,8 +158,12 @@ object TogetherDiscovery {
         withContext(Dispatchers.IO) {
             val result = mutableListOf<TogetherInvite>()
             val seen = mutableSetOf<String>()
-            val socket = buildMulticast(context) ?: return@withContext emptyList()
-            val group = runCatching { InetAddress.getByName(GROUP) }.getOrNull() ?: return@withContext emptyList()
+            val handle = buildMulticast(context) ?: return@withContext emptyList()
+            val group = runCatching { InetAddress.getByName(GROUP) }.getOrNull()
+            if (group == null) {
+                handle.release()
+                return@withContext emptyList()
+            }
             try {
                 val request = "$LOCATE code=$code\r\n".toByteArray(Charsets.UTF_8)
                 var probe = 0
@@ -143,13 +171,13 @@ object TogetherDiscovery {
                 val buffer = ByteArray(16 * 1024)
                 while (System.currentTimeMillis() < deadline) {
                     if (probe < 4) {
-                        runCatching { socket.send(DatagramPacket(request, request.size, group, PORT)) }
+                        runCatching { handle.socket.send(DatagramPacket(request, request.size, group, PORT)) }
                         probe++
                     }
-                    runCatching { socket.soTimeout = 300 }
+                    runCatching { handle.socket.soTimeout = 300 }
                     runCatching {
                         val packet = DatagramPacket(buffer, buffer.size)
-                        socket.receive(packet)
+                        handle.socket.receive(packet)
                         val text = String(packet.data, 0, packet.length, Charsets.UTF_8).trim()
                         val parsed = parseAnnounce(text)
                         if (parsed != null && parsed.code == code && seen.add(parsed.code + parsed.controlHost)) {
@@ -158,9 +186,9 @@ object TogetherDiscovery {
                     }
                 }
             } finally {
-                runCatching { socket.leaveGroup(group) }
-                runCatching { socket.close() }
+                handle.release()
             }
+            android.util.Log.i("TogetherDiscovery", "locateInvites code=$code found=${result.size}")
             result
         }
 
@@ -176,6 +204,27 @@ fun localIpV4Fallback(): String? = runCatching {
     java.net.NetworkInterface.getNetworkInterfaces().toList().flatMap { iface ->
         if (iface.isLoopback || !iface.isUp) emptyList() else iface.inetAddresses.toList()
     }.filterIsInstance<java.net.Inet4Address>().firstOrNull { !it.isLoopbackAddress }?.hostAddress
+}.getOrNull()
+
+private fun isPrivateLanIp(ip: String): Boolean =
+    ip.startsWith("192.168.") || ip.startsWith("10.") || (ip.startsWith("172.") && runCatching {
+        val second = ip.substringAfter('.').substringBefore('.').toInt()
+        second in 16..31
+    }.getOrDefault(false))
+
+private val cellularInterfaceNames = listOf("rmnet", "pdp", "ccmni", "wwan", "cell", "ppp", "clat", "tun", "vpn")
+
+/** 优先返回 Wi-Fi 局域网 IPv4 地址，避免取到蜂窝/VPN 网卡的 IP。 */
+fun preferredLanIpV4(): String? = runCatching {
+    val candidates = java.net.NetworkInterface.getNetworkInterfaces().toList()
+        .filter { !it.isLoopback && it.isUp }
+        .flatMap { iface -> iface.inetAddresses.toList().map { iface.name.lowercase() to it } }
+        .filter { (_, addr) -> addr is java.net.Inet4Address && !addr.isLoopbackAddress }
+        .map { (name, addr) -> name to addr.hostAddress.orEmpty() }
+    candidates.firstOrNull { (name, ip) -> name.contains("wlan") && isPrivateLanIp(ip) }?.second
+        ?: candidates.firstOrNull { (name, ip) -> isPrivateLanIp(ip) && cellularInterfaceNames.none { name.contains(it) } }?.second
+        ?: candidates.firstOrNull { (name, _) -> name.contains("wlan") }?.second
+        ?: candidates.firstOrNull()?.second
 }.getOrNull()
 
 internal const val TUNNEL_MAX_REQUEST = 64 * 1024

@@ -128,17 +128,19 @@ class LocalMusicServer(private val context: Context) {
             val spec = token?.let { specs[it] }
             val artUri = token?.let { artSpecs[it] }
 
-            when {
-                path == "/art" -> {
-                    if (artUri == null) respond(output, "404 Not Found", null, byteArrayOf())
-                    else if (method == "HEAD") respondHeadUri(output, artUri)
-                    else if (method == "GET") respondUri(output, artUri)
-                    else respond(output, "405 Method Not Allowed", null, byteArrayOf())
+            runCatching {
+                when {
+                    path == "/art" -> {
+                        if (artUri == null) respond(output, "404 Not Found", null, byteArrayOf())
+                        else if (method == "HEAD") respondHeadUri(output, artUri)
+                        else if (method == "GET") respondUri(output, artUri)
+                        else respond(output, "405 Method Not Allowed", null, byteArrayOf())
+                    }
+                    spec == null -> respond(output, "404 Not Found", null, byteArrayOf())
+                    method == "HEAD" -> respondHead(output, spec)
+                    method == "GET" -> respondStream(output, spec, headers["range"])
+                    else -> respond(output, "405 Method Not Allowed", null, byteArrayOf())
                 }
-                spec == null -> respond(output, "404 Not Found", null, byteArrayOf())
-                method == "HEAD" -> respondHead(output, spec)
-                method == "GET" -> respondStream(output, spec, headers["range"])
-                else -> respond(output, "405 Method Not Allowed", null, byteArrayOf())
             }
         }
     }

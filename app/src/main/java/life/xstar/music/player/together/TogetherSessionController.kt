@@ -2,6 +2,7 @@ package life.xstar.music.player.together
 
 import android.content.ComponentName
 import android.content.Context
+import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -224,7 +225,7 @@ class TogetherSessionController(
     private fun startAdvertise(invite: TogetherInvite) {
         stopAdvertise()
         advertiseThread = TogetherDiscovery.advertiseAsync(context, invite) {
-            _state.value.connection != TogetherConnection.Idle && _state.value.isHost && _state.value.connection != TogetherConnection.Connected
+            _state.value.connection != TogetherConnection.Listening || !_state.value.isHost
         }
     }
 
@@ -238,8 +239,9 @@ class TogetherSessionController(
         acceptJob = scope.launch(Dispatchers.IO) {
             val server = listener ?: return@launch
             while (isActive && _state.value.roomOpen) {
-                val accepted = server.acceptBlocking() ?: continue
-                withContext(Dispatchers.Main) {
+            val accepted = server.acceptBlocking() ?: continue
+            Log.i(TAG, "host accepted connection from ${accepted.remote}")
+            withContext(Dispatchers.Main) {
                     if (!_state.value.roomOpen || _state.value.connection == TogetherConnection.Connected) {
                         accepted.close()
                         return@withContext
@@ -449,11 +451,13 @@ class TogetherSessionController(
 
     private suspend fun join(invite: TogetherInvite) {
         val candidates = buildCandidates(invite)
+        Log.i(TAG, "join code=${invite.code} mode=${_state.value.connectMode} candidates=${candidates.joinToString { "${it.host}:${it.port} viaServer=${it.viaServer}" }}")
         if (candidates.isEmpty()) {
             fail("无法解析任何连接地址，请重新获取邀请二维码")
             return
         }
         for (candidate in candidates) {
+            Log.i(TAG, "join trying ${candidate.host}:${candidate.port} viaServer=${candidate.viaServer}")
             val established = withContext(Dispatchers.IO) {
                 if (candidate.viaServer) {
                     connectServerControl(candidate.host, candidate.port, "CTRL ${invite.code} member $nickname", candidate.timeoutMs)
@@ -461,6 +465,7 @@ class TogetherSessionController(
                     TogetherLink.connect(candidate.host, candidate.port, candidate.timeoutMs)
                 }
             }
+            Log.i(TAG, "join candidate ${candidate.host}:${candidate.port} result=${established != null}")
             if (established != null) {
                 activeMediaBase = candidate.mediaBase
                 memberConnected(established, invite)
@@ -478,12 +483,14 @@ class TogetherSessionController(
         val ok = established.write(
             TogetherMessage.Hello(TogetherProtocol.VERSION, "member", nickname, _state.value.connectMode.name)
         )
+        Log.i(TAG, "memberConnected hello sent=$ok")
         if (!ok) {
             established.close()
             fail("连接失败，请重试")
             return
         }
         val welcome = withContext(Dispatchers.IO) { established.read() }
+        Log.i(TAG, "memberConnected welcome=$welcome")
         if (welcome !is TogetherMessage.Welcome) {
             established.close()
             fail("房主未正确响应")
@@ -505,7 +512,9 @@ class TogetherSessionController(
 
     private suspend fun runLinkReader(reader: TogetherLink) {
         while (currentCoroutineContext().isActive) {
-            val msg = withContext(Dispatchers.IO) { reader.read() } ?: break
+            val msg = withContext(Dispatchers.IO) { reader.read() }
+            Log.i(TAG, "link reader got=$msg")
+            if (msg == null) break
             when (msg) {
                 is TogetherMessage.Hello -> onHostGotHello(reader, msg)
                 is TogetherMessage.Welcome -> Unit
@@ -525,6 +534,7 @@ class TogetherSessionController(
     }
 
     private suspend fun onHostGotHello(reader: TogetherLink, hello: TogetherMessage.Hello) {
+        Log.i(TAG, "host got hello role=${hello.role} nickname=${hello.nickname} version=${hello.version}")
         val current = link
         if (current != null && current !== reader) {
             reader.write(TogetherMessage.Bye("房间已有成员"))
@@ -641,15 +651,17 @@ class TogetherSessionController(
     fun sendReaction(reaction: TogetherReaction) {
         if (_state.value.connection != TogetherConnection.Connected) return
         val msg = TogetherMessage.Reaction(reaction.name, nickname)
-        val sent = link?.write(msg) == true
-        if (sent) {
-            _reactions.tryEmit(TogetherReactionEvent(reaction, _state.value.peer?.nickname ?: "好友", fromSelf = true))
+        scope.launch {
+            val sent = link?.write(msg) == true
+            if (sent) {
+                _reactions.tryEmit(TogetherReactionEvent(reaction, _state.value.peer?.nickname ?: "好友", fromSelf = true))
+            }
         }
     }
 
     fun sendControl(action: String, index: Int = -1, positionMs: Long = -1, mode: String = "") {
         if (_state.value.role == TogetherRole.Member && _state.value.connection == TogetherConnection.Connected) {
-            link?.write(TogetherMessage.Control(action, index, positionMs, mode))
+            scope.launch { link?.write(TogetherMessage.Control(action, index, positionMs, mode)) }
         }
     }
 
@@ -664,9 +676,11 @@ class TogetherSessionController(
     }
 
     private fun endSessionInternal(reason: String) {
-        runCatching { link?.write(TogetherMessage.Bye(reason)) }
-        link?.close()
+        val byeLink = link
         link = null
+        if (byeLink != null) {
+            scope.launch { runCatching { byeLink.write(TogetherMessage.Bye(reason)) }; runCatching { byeLink.close() } }
+        }
         linkReaderJob?.cancel()
         linkReaderJob = null
         acceptJob?.cancel()
@@ -745,8 +759,11 @@ class TogetherSessionController(
         }
     }
 
-    private suspend fun localIp(): String =
-        withContext(Dispatchers.IO) { server.localIpV4() ?: localIpV4Fallback() ?: "127.0.0.1" }
+    private suspend fun localIp(): String = withContext(Dispatchers.IO) {
+        val ip = preferredLanIpV4() ?: localIpV4Fallback() ?: "127.0.0.1"
+        Log.i(TAG, "localIp=$ip")
+        ip
+    }
 
     private fun fail(message: String) {
         stopBackground()
