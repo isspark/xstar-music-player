@@ -138,7 +138,6 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val playback = player.state
     val castState: StateFlow<CastSessionState> = castController.state
     val togetherState: StateFlow<TogetherSessionState> = togetherController.state
-    val togetherReactions = togetherController.reactions
     val equalizerState = player.equalizerState
     private var castResumeAfterStop = false
     private val _scanState = MutableStateFlow(ScanState())
@@ -287,8 +286,9 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     fun artworkCandidates(artist: String, album: String) = viewModelScope.async { repo.findArtworkCandidates(artist, album) }
     fun saveArtwork(artist: String, album: String, candidate: ArtworkCandidate) = viewModelScope.launch { repo.saveArtworkForAlbum(artist, album, candidate) }
     fun findLyrics(songOverride: SongEntity? = null) = viewModelScope.launch {
-        val song = songOverride ?: when (castState.value.connection) {
-            CastSessionController.Connection.Connected -> castState.value.song
+        val song = songOverride ?: when {
+            castState.value.connection == CastSessionController.Connection.Connected -> castState.value.song
+            togetherState.value.connection == TogetherConnection.Connected && togetherState.value.isMember -> togetherController.currentSharedSongEntity()
             else -> playback.value.song
         } ?: return@launch
         if (!onlineLyricsEnabled.value) {
@@ -441,6 +441,8 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         }
     }
     fun togetherSendReaction(reaction: TogetherReaction) = togetherController.sendReaction(reaction)
+    fun togetherSendMessage(text: String) = togetherController.sendMessage(text)
+    fun togetherCurrentSharedSong(): SongEntity? = togetherController.currentSharedSongEntity()
     fun setFmMode(enabled: Boolean) = viewModelScope.launch {
         if (enabled == preferences.isFmModeEnabled()) return@launch
         if (enabled) {
@@ -866,6 +868,7 @@ sealed class OnlineSearchUiState {
                 modifier = Modifier.fillMaxSize()
             )
             BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
+            TogetherBarrageOverlay(vm, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 84.dp).widthIn(max = 340.dp))
             if (showCastSheet) CastControlSheet(vm) { showCastSheet = false }
             if (showTogetherSheet) TogetherSheet(vm, togetherState) { showTogetherSheet = false }
         }
@@ -1040,7 +1043,9 @@ sealed class OnlineSearchUiState {
     }
 
     ModalBottomSheet(onDismissRequest = close, containerColor = Color(0xFF171B23)) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 6.dp)) {
+        Column(
+            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 20.dp, vertical = 6.dp)
+        ) {
             Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("一起听", color = Color.White, fontSize = 21.sp, fontWeight = FontWeight.Bold)
@@ -1151,12 +1156,26 @@ sealed class OnlineSearchUiState {
                             Text(if (together.connectMode == TogetherConnectMode.MultiPath) "跨网多路径直连" else "局域网直连", color = Color(0xFF8F99A9), fontSize = 11.sp)
                         }
                     }
-                    Spacer(Modifier.height(4.dp))
-                    Text("共享队列", color = Color(0xFF9BA5B5), fontSize = 13.sp, modifier = Modifier.padding(vertical = 4.dp))
+                    val currentSong: SongEntity? = if (together.isHost) playback.song else vm.togetherCurrentSharedSong()
+                    currentSong?.let { song ->
+                        Surface(Modifier.fillMaxWidth().padding(top = 4.dp), RoundedCornerShape(16.dp), color = Color(0xFF202836)) {
+                            Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Surface(Modifier.size(46.dp), RoundedCornerShape(12.dp), color = Color(0xFF2A3342)) { ArtworkImage(song.albumArtUri, Color(0xFF2A3342)) }
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(song.title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(song.artist.ifBlank { "未知歌手" }, color = Color(0xFF8F99A9), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                                if (together.isMember) Text("同步播放", color = MaterialTheme.colorScheme.primary, fontSize = 10.sp)
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text("共享队列", color = Color(0xFF9BA5B5), fontSize = 13.sp, modifier = Modifier.padding(vertical = 2.dp))
                     if (together.sharedQueue.isEmpty()) {
-                        Text("暂无共享队列", color = Color(0xFF5B6577), fontSize = 12.sp, modifier = Modifier.padding(vertical = 8.dp))
+                        Text("暂无共享队列", color = Color(0xFF5B6577), fontSize = 12.sp, modifier = Modifier.padding(vertical = 6.dp))
                     } else {
-                        LazyColumn(Modifier.heightIn(max = 240.dp)) {
+                        LazyColumn(Modifier.heightIn(max = 150.dp)) {
                             itemsIndexed(together.sharedQueue) { index, entry ->
                                 ListItem(
                                     colors = ListItemDefaults.colors(containerColor = Color.Transparent),
@@ -1168,6 +1187,10 @@ sealed class OnlineSearchUiState {
                             }
                         }
                     }
+                    Spacer(Modifier.height(8.dp))
+                    Text("聊天 · 表情", color = Color(0xFF9BA5B5), fontSize = 13.sp, modifier = Modifier.padding(vertical = 2.dp))
+                    TogetherEmojiBar(vm, Modifier.fillMaxWidth().padding(vertical = 4.dp), compact = true)
+                    TogetherChatPanel(vm, together.messages)
                 }
                 TogetherConnection.Error -> {
                     Box(Modifier.fillMaxWidth().padding(vertical = 20.dp), contentAlignment = Alignment.Center) {
@@ -1195,48 +1218,124 @@ sealed class OnlineSearchUiState {
     }
 }
 
-@Composable private fun TogetherEmojiBar(vm: MusicViewModel, modifier: Modifier = Modifier) {
+@Composable private fun TogetherEmojiBar(vm: MusicViewModel, modifier: Modifier = Modifier, compact: Boolean = false) {
     Row(modifier, horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
         TogetherReaction.entries.forEach { reaction ->
             Surface(
                 shape = CircleShape,
                 color = Color.White.copy(alpha = .06f),
-                modifier = Modifier.size(42.dp).clickable { vm.togetherSendReaction(reaction) },
+                modifier = Modifier.size(if (compact) 36.dp else 42.dp).clickable { vm.togetherSendReaction(reaction) },
                 contentColor = Color.White
             ) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(reaction.symbol, fontSize = 21.sp)
+                    Text(reaction.symbol, fontSize = if (compact) 18.sp else 21.sp)
                 }
             }
         }
     }
 }
 
-@Composable private fun TogetherReactionBubbles(vm: MusicViewModel, modifier: Modifier = Modifier) {
-    var bubble by remember { mutableStateOf<TogetherReactionEvent?>(null) }
-    var key by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
-        vm.togetherReactions.collect { event ->
-            bubble = event
-            key++
-            kotlinx.coroutines.delay(2_400)
-            if (bubble?.nickname == event.nickname && bubble?.reaction == event.reaction) bubble = null
+private fun reactionLabel(symbol: String): String =
+    TogetherReaction.entries.firstOrNull { it.symbol == symbol }?.label ?: "互动"
+
+@Composable private fun TogetherMessagePill(msg: TogetherChatMessage, modifier: Modifier = Modifier) {
+    Surface(modifier, shape = RoundedCornerShape(50.dp), color = Color(0xE61A212D), shadowElevation = 5.dp) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (msg.fromSelf) "我" else msg.nickname,
+                color = if (msg.fromSelf) Color(0xFF9DB8FF) else Color(0xFFFFCF8F),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.width(8.dp))
+            when (msg.kind) {
+                TogetherChatKind.Reaction -> Text(msg.text + " " + reactionLabel(msg.text), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                TogetherChatKind.Text -> Text(msg.text, color = Color.White, fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            }
         }
     }
-    val visible = bubble != null
-    AnimatedVisibility(visible = visible, enter = fadeIn(tween(200)) + expandVertically(), exit = fadeOut(tween(400)) + shrinkVertically(), modifier = modifier) {
-        bubble?.let { event ->
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Surface(shape = RoundedCornerShape(50.dp), color = Color(0xDD1E2531), shadowElevation = 6.dp) {
-                    Row(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(event.reaction.symbol, fontSize = 26.sp)
-                        Spacer(Modifier.width(8.dp))
-                        Column {
-                            Text(event.nickname, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(if (event.fromSelf) "发送了一个互动" else "正在拍一拍你", color = Color(0xFF8F99A9), fontSize = 10.sp)
+}
+
+/** 悬浮弹幕：把最近的表情互动和聊天以弹幕形式短暂展示在任意页面上方。 */
+@Composable private fun TogetherBarrageOverlay(vm: MusicViewModel, modifier: Modifier = Modifier) {
+    val t by vm.togetherState.collectAsStateWithLifecycle()
+    if (t.connection != TogetherConnection.Connected) return
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(400)
+            now = System.currentTimeMillis()
+        }
+    }
+    val items = t.messages.filter { msg -> now - msg.at in 0..3_800 }.takeLast(3)
+    if (items.isEmpty()) return
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        items.forEach { msg -> TogetherMessagePill(msg) }
+    }
+}
+
+/** 一起听底部弹窗内的聊天区：发送文字消息，也把表情互动作为消息展示出来。 */
+@Composable private fun TogetherChatPanel(vm: MusicViewModel, messages: List<TogetherChatMessage>, modifier: Modifier = Modifier) {
+    var draft by remember { mutableStateOf("") }
+    val listState = rememberLazyListState()
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) listState.animateScrollToItem((messages.size - 1).coerceAtLeast(0))
+    }
+    Column(modifier) {
+        if (messages.isEmpty()) {
+            Box(Modifier.fillMaxWidth().height(54.dp), contentAlignment = Alignment.Center) {
+                Text("还没有互动，发个表情或说句话吧", color = Color(0xFF5B6577), fontSize = 12.sp)
+            }
+        } else {
+            LazyColumn(state = listState, modifier = Modifier.heightIn(max = 190.dp)) {
+                items(messages) { msg ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        horizontalArrangement = if (msg.fromSelf) Arrangement.End else Arrangement.Start
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = if (msg.fromSelf) Color(0xFF2E3A52) else Color(0xFF232B38),
+                            modifier = Modifier.widthIn(max = 260.dp)
+                        ) {
+                            Column(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
+                                Text(
+                                    if (msg.fromSelf) "我" else msg.nickname,
+                                    color = if (msg.fromSelf) Color(0xFF9DB8FF) else Color(0xFFFFCF8F),
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                when (msg.kind) {
+                                    TogetherChatKind.Reaction -> Text(msg.text + " " + reactionLabel(msg.text), color = Color.White, fontSize = 16.sp)
+                                    TogetherChatKind.Text -> Text(msg.text, color = Color.White, fontSize = 13.sp)
+                                }
+                            }
                         }
                     }
                 }
+            }
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("说点什么…", color = Color(0xFF6A7486), fontSize = 13.sp) },
+                singleLine = true,
+                shape = RoundedCornerShape(24.dp)
+            )
+            Spacer(Modifier.width(8.dp))
+            IconButton(onClick = {
+                if (draft.isNotBlank()) {
+                    vm.togetherSendMessage(draft)
+                    draft = ""
+                }
+            }, enabled = draft.isNotBlank()) {
+                Icon(Icons.Filled.Send, "发送", tint = if (draft.isNotBlank()) MaterialTheme.colorScheme.primary else Color(0xFF5B6577))
             }
         }
     }
@@ -1320,8 +1419,12 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
     val bottomEffect by vm.bottomEffect.collectAsStateWithLifecycle()
     val castState by vm.castState.collectAsStateWithLifecycle()
     val togetherState by vm.togetherState.collectAsStateWithLifecycle()
-    val artworkColors by produceState(initialValue = ArtworkColors.fallback(theme), state.song?.albumArtUri, theme) {
-        value = loadArtworkColors(context, state.song?.albumArtUri, theme)
+    val sessionSharedSong = remember(togetherState.connection, togetherState.role, togetherState.sharedSong) {
+        if (togetherState.isMember && togetherState.connection == TogetherConnection.Connected) vm.togetherCurrentSharedSong() else null
+    }
+    val song = sessionSharedSong ?: state.song
+    val artworkColors by produceState(initialValue = ArtworkColors.fallback(theme), song?.albumArtUri, theme) {
+        value = loadArtworkColors(context, song?.albumArtUri, theme)
     }
     val pulseColors = artworkColors.pulseColors
     var ambientTarget by remember { mutableStateOf(artworkColors.primary) }
@@ -1353,7 +1456,6 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
     val togetherConnected = togetherState.connection == TogetherConnection.Connected
     val sessionActive = togetherConnected && togetherState.inSession
     val displayPlaying = if (castConnected) castState.playing else state.playing
-    val song = state.song
     var showArtworkPicker by remember { mutableStateOf(false) }
     var showSongDetails by remember { mutableStateOf(false) }
     var showLyrics by remember { mutableStateOf(false) }
@@ -1416,7 +1518,6 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
             }
         }
     }
-    TogetherReactionBubbles(vm, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 150.dp))
     if (bottomEffect && !showLyrics && !castConnected) {
         BottomSpectrumStage(
             levelsFlow = vm.player.spectrum,
@@ -2630,7 +2731,11 @@ private fun dateTimeText(ms: Long): String {
 @Composable private fun ArtworkImage(uri: String?, tint: Color) {
     if (uri.isNullOrBlank()) DefaultArtwork(tint)
     else {
-        val model = if (uri.startsWith("content://") || uri.startsWith("file://")) Uri.parse(uri) else Uri.fromFile(File(uri))
+        val model: Any = when {
+            uri.startsWith("http://") || uri.startsWith("https://") -> uri
+            uri.startsWith("content://") || uri.startsWith("file://") -> Uri.parse(uri)
+            else -> Uri.fromFile(File(uri))
+        }
         SubcomposeAsyncImage(model = model, contentDescription = "专辑封面", modifier = Modifier.fillMaxSize().clip(CircleShape), contentScale = ContentScale.Crop, error = { DefaultArtwork(tint) }, loading = { DefaultArtwork(tint) })
     }
 }
@@ -3136,9 +3241,19 @@ private data class ArtworkColors(val primary: Color, val light: Color, val dark:
 
 private suspend fun loadArtworkColors(context: android.content.Context, artworkUri: String?, theme: ThemeAccent): ArtworkColors = withContext(Dispatchers.IO) {
     if (artworkUri.isNullOrBlank()) return@withContext ArtworkColors.fallback(theme)
-    val openArtwork = {
-        if (artworkUri.startsWith("content://") || artworkUri.startsWith("file://")) context.contentResolver.openInputStream(Uri.parse(artworkUri))
-        else File(artworkUri).inputStream()
+    fun openArtwork(): java.io.InputStream? = when {
+        artworkUri.startsWith("http://") || artworkUri.startsWith("https://") ->
+            runCatching {
+                val connection = (java.net.URL(artworkUri).openConnection() as java.net.HttpURLConnection).apply {
+                    connectTimeout = 6_000
+                    readTimeout = 8_000
+                    requestMethod = "GET"
+                }
+                if (connection.responseCode in 200..299) connection.inputStream else null
+            }.getOrNull()
+        artworkUri.startsWith("content://") || artworkUri.startsWith("file://") ->
+            context.contentResolver.openInputStream(android.net.Uri.parse(artworkUri))
+        else -> runCatching { java.io.File(artworkUri).inputStream() }.getOrNull()
     }
     runCatching {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }

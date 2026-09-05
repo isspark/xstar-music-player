@@ -9,8 +9,8 @@ enum class TogetherRole { Host, Member }
 
 enum class TogetherConnection { Idle, Listening, Connecting, Connected, Error }
 
-enum class TogetherReaction(val symbol: String) {
-    Heart("❤️"), Clap("👏"), Groove("🎵"), Laugh("😂"), Party("🥳")
+enum class TogetherReaction(val symbol: String, val label: String) {
+    Heart("❤️", "爱心"), Clap("👏", "鼓掌"), Groove("🎵", "蹦迪"), Laugh("😂", "大笑"), Party("🥳", "派对")
 }
 
 @Serializable
@@ -72,7 +72,10 @@ sealed interface TogetherMessage {
     ) : TogetherMessage
 
     @Serializable @SerialName("reaction")
-    data class Reaction(val type: String, val nickname: String) : TogetherMessage
+    data class Reaction(val reaction: String, val nickname: String) : TogetherMessage
+
+    @Serializable @SerialName("chat")
+    data class Chat(val nickname: String, val text: String, val ts: Long = 0) : TogetherMessage
 
     @Serializable @SerialName("ping")
     data class Ping(val t: Long) : TogetherMessage
@@ -84,7 +87,16 @@ sealed interface TogetherMessage {
     data class Bye(val reason: String) : TogetherMessage
 }
 
-data class TogetherReactionEvent(val reaction: TogetherReaction, val nickname: String, val fromSelf: Boolean)
+enum class TogetherChatKind { Reaction, Text }
+
+data class TogetherChatMessage(
+    val kind: TogetherChatKind,
+    val nickname: String,
+    val text: String,
+    val fromSelf: Boolean,
+    val ts: Long = 0,
+    val at: Long = 0
+)
 
 data class TogetherSessionState(
     val role: TogetherRole? = null,
@@ -99,6 +111,8 @@ data class TogetherSessionState(
     val sharedQueue: List<TogetherQueueEntry> = emptyList(),
     val sharedIndex: Int = -1,
     val sharedMode: String = "Sequential",
+    val sharedSong: TogetherSong? = null,
+    val messages: List<TogetherChatMessage> = emptyList(),
     val error: String? = null
 ) {
     val inSession: Boolean

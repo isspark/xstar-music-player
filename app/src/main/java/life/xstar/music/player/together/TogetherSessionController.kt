@@ -17,12 +17,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -43,6 +41,7 @@ class TogetherSessionController(
         private const val HEARTBEAT_INTERVAL_MS = 8_000L
         private const val WATCHDOG_INTERVAL_MS = 5_000L
         private const val WATCHDOG_TIMEOUT_MS = 45_000L
+        private const val MAX_MESSAGES = 200
         private fun generateDeviceId(): String =
             "peer-" + java.lang.Long.toHexString(System.currentTimeMillis()) + "-" + Integer.toHexString((Math.random() * 0xFFFFFF).toInt())
     }
@@ -55,9 +54,6 @@ class TogetherSessionController(
 
     private val _state = MutableStateFlow(TogetherSessionState())
     val state: StateFlow<TogetherSessionState> = _state.asStateFlow()
-
-    private val _reactions = MutableSharedFlow<TogetherReactionEvent>(extraBufferCapacity = 32)
-    val reactions: SharedFlow<TogetherReactionEvent> = _reactions.asSharedFlow()
 
     private var listener: TogetherListener? = null
     private var link: TogetherLink? = null
@@ -520,6 +516,7 @@ class TogetherSessionController(
                 is TogetherMessage.Welcome -> Unit
                 is TogetherMessage.Snapshot -> if (_state.value.isMember) applySnapshot(msg)
                 is TogetherMessage.Reaction -> emitReaction(msg)
+                is TogetherMessage.Chat -> appendIncomingChat(msg)
                 is TogetherMessage.Control -> if (_state.value.isHost) applyRemoteControl(msg)
                 is TogetherMessage.Ping -> reader.write(TogetherMessage.Pong(msg.t))
                 is TogetherMessage.Pong -> Unit
@@ -603,11 +600,16 @@ class TogetherSessionController(
         val controller = controllerOrNull() ?: return
         if (song == null || song.token.isBlank()) {
             if (controller.isPlaying) controller.pause()
-            _state.value = _state.value.copy(sharedQueue = snap.queue, sharedIndex = snap.index, sharedMode = snap.mode)
+            _state.value = _state.value.copy(
+                sharedQueue = snap.queue,
+                sharedIndex = snap.index,
+                sharedMode = snap.mode,
+                sharedSong = null
+            )
             return
         }
+        val entity = togetherSongToEntity(song)
         if (appliedSourceId != song.sourceId || controller.mediaItemCount == 0) {
-            val entity = togetherSongToEntity(song)
             controller.setMediaItems(listOf(entity.toMediaItem()), 0, 0)
             controller.prepare()
             controller.seekTo(snap.positionMs.coerceAtLeast(0))
@@ -623,7 +625,8 @@ class TogetherSessionController(
         _state.value = _state.value.copy(
             sharedQueue = snap.queue,
             sharedIndex = snap.index,
-            sharedMode = snap.mode
+            sharedMode = snap.mode,
+            sharedSong = song
         )
     }
 
@@ -646,6 +649,8 @@ class TogetherSessionController(
         )
     }
 
+    fun currentSharedSongEntity(): SongEntity? = _state.value.sharedSong?.let { togetherSongToEntity(it) }
+
     // ---------------- Public actions ----------------
 
     fun sendReaction(reaction: TogetherReaction) {
@@ -653,9 +658,18 @@ class TogetherSessionController(
         val msg = TogetherMessage.Reaction(reaction.name, nickname)
         scope.launch {
             val sent = link?.write(msg) == true
-            if (sent) {
-                _reactions.tryEmit(TogetherReactionEvent(reaction, _state.value.peer?.nickname ?: "好友", fromSelf = true))
-            }
+            if (sent) appendMessage(TogetherChatKind.Reaction, nickname, reaction.symbol, fromSelf = true)
+        }
+    }
+
+    fun sendMessage(text: String) {
+        if (_state.value.connection != TogetherConnection.Connected) return
+        val trimmed = text.trim().take(300)
+        if (trimmed.isEmpty()) return
+        val msg = TogetherMessage.Chat(nickname, trimmed, System.currentTimeMillis())
+        scope.launch {
+            val sent = link?.write(msg) == true
+            if (sent) appendMessage(TogetherChatKind.Text, nickname, trimmed, fromSelf = true)
         }
     }
 
@@ -742,9 +756,22 @@ class TogetherSessionController(
         }
     }
 
-    private suspend fun emitReaction(msg: TogetherMessage.Reaction) {
-        val reaction = runCatching { TogetherReaction.valueOf(msg.type) }.getOrNull() ?: return
-        _reactions.emit(TogetherReactionEvent(reaction, msg.nickname, fromSelf = false))
+    private fun emitReaction(msg: TogetherMessage.Reaction) {
+        val reaction = runCatching { TogetherReaction.valueOf(msg.reaction) }.getOrNull() ?: return
+        appendMessage(TogetherChatKind.Reaction, msg.nickname, reaction.symbol, fromSelf = false)
+    }
+
+    private fun appendIncomingChat(msg: TogetherMessage.Chat) {
+        appendMessage(TogetherChatKind.Text, msg.nickname, msg.text, fromSelf = false)
+    }
+
+    private fun appendMessage(kind: TogetherChatKind, fromNickname: String, text: String, fromSelf: Boolean) {
+        val time = System.currentTimeMillis()
+        _state.update { current ->
+            current.copy(
+                messages = (current.messages + TogetherChatMessage(kind, fromNickname, text, fromSelf, time, time)).takeLast(MAX_MESSAGES)
+            )
+        }
     }
 
     private suspend fun controllerOrNull(): MediaController? = suspendCancellableCoroutine { cont ->
