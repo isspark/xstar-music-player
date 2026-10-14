@@ -22,6 +22,10 @@ class PlaybackPreferences(private val context: Context) {
     private val positionKey = longPreferencesKey("position_ms")
     private val foldersKey = stringSetPreferencesKey("music_folders")
     private val themeKey = stringPreferencesKey("theme_accent")
+    private val playerThemeKey = stringPreferencesKey("player_scene_theme")
+    private val playerBackgroundKey = stringPreferencesKey("player_background_uri")
+    private val playerDiscOpacityKey = stringPreferencesKey("player_disc_opacity")
+    private val playerDiscVisibleKey = booleanPreferencesKey("player_disc_visible")
     private val beatEffectKey = booleanPreferencesKey("beat_effect")
     private val bottomEffectKey = booleanPreferencesKey("bottom_effect")
     private val onlineArtworkKey = booleanPreferencesKey("online_artwork_enabled")
@@ -51,6 +55,12 @@ class PlaybackPreferences(private val context: Context) {
     val theme: Flow<ThemeAccent> = context.playbackDataStore.data.map { values ->
         runCatching { ThemeAccent.valueOf(values[themeKey] ?: ThemeAccent.Blue.name) }.getOrDefault(ThemeAccent.Blue)
     }
+    val playerBackground: Flow<String> = context.playbackDataStore.data.map { it[playerBackgroundKey].orEmpty() }
+    val playerTheme: Flow<PlayerTheme> = context.playbackDataStore.data.map { values ->
+        PlayerTheme.fromStored(values[playerThemeKey])
+    }
+    val playerDiscOpacity: Flow<Float> = context.playbackDataStore.data.map { it[playerDiscOpacityKey]?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0.42f }
+    val playerDiscVisible: Flow<Boolean> = context.playbackDataStore.data.map { it[playerDiscVisibleKey] ?: true }
     val beatEffect: Flow<Boolean> = context.playbackDataStore.data.map { it[beatEffectKey] ?: true }
     val bottomEffect: Flow<Boolean> = context.playbackDataStore.data.map { it[bottomEffectKey] ?: true }
     val onlineArtworkEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[onlineArtworkKey] ?: true }
@@ -134,6 +144,14 @@ class PlaybackPreferences(private val context: Context) {
     }
 
     suspend fun setTheme(theme: ThemeAccent) = context.playbackDataStore.edit { it[themeKey] = theme.name }
+    suspend fun setPlayerTheme(theme: PlayerTheme) = context.playbackDataStore.edit { it[playerThemeKey] = theme.name }
+    suspend fun setPlayerBackground(uri: String?) = context.playbackDataStore.edit { values ->
+        if (uri.isNullOrBlank()) values.remove(playerBackgroundKey) else values[playerBackgroundKey] = uri
+    }
+    suspend fun setPlayerDiscOpacity(opacity: Float) = context.playbackDataStore.edit { values ->
+        values[playerDiscOpacityKey] = opacity.coerceIn(0f, 1f).toString()
+    }
+    suspend fun setPlayerDiscVisible(visible: Boolean) = context.playbackDataStore.edit { values -> values[playerDiscVisibleKey] = visible }
     suspend fun setBeatEffect(enabled: Boolean) = context.playbackDataStore.edit { it[beatEffectKey] = enabled }
     suspend fun setBottomEffect(enabled: Boolean) = context.playbackDataStore.edit { it[bottomEffectKey] = enabled }
     suspend fun setOnlineArtworkEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineArtworkKey] = enabled }
@@ -185,3 +203,17 @@ data class SavedPlayback(
     val playing: Boolean = false
 )
 enum class ThemeAccent { Blue, Violet, Rose, Emerald, Amber }
+
+enum class PlayerTheme(val title: String, val subtitle: String) {
+    Classic("经典播放器", "专辑光碟 · 原有界面"),
+    Orbital("星际漫游", "星球轨道 · 长按召唤流星"),
+    Theatre("歌词剧场", "逐句舞台 · 滑动探索歌词"),
+    Momo("音乐生物", "MOMO 陪伴 · 长按投喂星星"),
+    Liquid("液态光碟", "流彩 CD · 长按晕开色彩"),
+    Tape("口袋磁带", "复古随身听 · 长按翻面"),
+    NightTrain("深夜列车", "雨夜车窗 · 长按在玻璃写字");
+
+    companion object {
+        fun fromStored(value: String?): PlayerTheme = entries.firstOrNull { it.name == value } ?: Classic
+    }
+}

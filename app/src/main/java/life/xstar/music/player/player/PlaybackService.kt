@@ -1,6 +1,8 @@
 package life.xstar.music.player.player
 
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
 import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
@@ -24,6 +26,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import life.xstar.music.player.MainActivity
 import life.xstar.music.player.XstarApplication
 
 @OptIn(UnstableApi::class)
@@ -32,19 +35,21 @@ class PlaybackService : MediaSessionService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var equalizer: PlaybackEqualizer
     private lateinit var karaoke: KaraokeDspController
-    private lateinit var spectrum: SpectrumCapturer
+    private lateinit var spectrum: SpectrumAudioProcessor
+    private var spectrumJob: Job? = null
     private var equalizerPersistenceJob: Job? = null
     private var karaokePersistenceJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
+        spectrum = SpectrumAudioProcessor()
         karaoke = KaraokeDspController(::broadcastKaraokeState)
         val renderersFactory = object : DefaultRenderersFactory(this) {
             override fun buildAudioSink(
                 context: Context,
                 enableFloatOutput: Boolean,
                 enableAudioTrackPlaybackParams: Boolean
-            ): AudioSink = karaoke.createAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams)
+            ): AudioSink = karaoke.createAudioSink(context, enableAudioTrackPlaybackParams, spectrum)
         }
         val player = ExoPlayer.Builder(this, renderersFactory)
             .setAudioAttributes(
@@ -57,30 +62,43 @@ class PlaybackService : MediaSessionService() {
             .build()
         karaoke.bind(player)
         equalizer = PlaybackEqualizer(::broadcastEqualizerState)
-        spectrum = SpectrumCapturer(::broadcastSpectrum)
         player.addListener(object : Player.Listener {
             override fun onAudioSessionIdChanged(audioSessionId: Int) {
                 equalizer.attach(audioSessionId)
-                spectrum.attach(audioSessionId)
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
-                spectrum.ensureSession(player.audioSessionId)
-                spectrum.setEnabled(isPlaying)
-            }
-
-            override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) {
-                spectrum.ensureSession(player.audioSessionId)
+                spectrumJob?.cancel()
+                if (isPlaying) {
+                    spectrumJob = scope.launch {
+                        while (player.isPlaying) {
+                            broadcastSpectrum(spectrum.levels)
+                            delay(33)
+                        }
+                    }
+                } else {
+                    broadcastSpectrum(FloatArray(SPECTRUM_BAND_COUNT))
+                }
             }
         })
-        mediaSession = MediaSession.Builder(this, player).setCallback(sessionCallback).build()
+        val sessionActivity = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        mediaSession = MediaSession.Builder(this, player)
+            .setSessionActivity(sessionActivity)
+            .setCallback(sessionCallback)
+            .build()
         scope.launch {
             equalizer.updateSettings((application as XstarApplication).playbackPreferences.readEqualizer())
             karaoke.updateSettings((application as XstarApplication).playbackPreferences.readKaraoke())
             val session = player.audioSessionId
             if (session != C.AUDIO_SESSION_ID_UNSET) {
                 equalizer.attach(session)
-                spectrum.attach(session)
             }
         }
     }
@@ -90,7 +108,6 @@ class PlaybackService : MediaSessionService() {
     override fun onDestroy() {
         equalizer.release()
         karaoke.release()
-        spectrum.release()
         scope.cancel()
         mediaSession?.run {
             player.release()

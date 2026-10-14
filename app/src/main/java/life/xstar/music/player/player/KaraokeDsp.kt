@@ -19,11 +19,12 @@ class KaraokeDspController(private val onStateChanged: (KaraokeState) -> Unit) {
 
     fun createAudioSink(
         context: Context,
-        enableFloatOutput: Boolean,
-        enableAudioTrackPlaybackParams: Boolean
+        enableAudioTrackPlaybackParams: Boolean,
+        spectrumProcessor: SpectrumAudioProcessor
     ): AudioSink = DefaultAudioSink.Builder(context)
-        .setAudioProcessorChain(DefaultAudioSink.DefaultAudioProcessorChain(vocalProcessor))
-        .setEnableFloatOutput(enableFloatOutput)
+        .setAudioProcessorChain(DefaultAudioSink.DefaultAudioProcessorChain(vocalProcessor, spectrumProcessor))
+        // The custom processors require 16-bit PCM; float output bypasses this chain.
+        .setEnableFloatOutput(false)
         .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
         .build()
 

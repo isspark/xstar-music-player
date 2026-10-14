@@ -12,7 +12,14 @@ import android.os.SystemClock
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import android.os.Bundle
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.platform.LocalLayoutDirection
+import life.xstar.music.player.ui.player.FloatingNavigationHandle
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.LocalActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -41,6 +48,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -51,7 +59,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -77,6 +87,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
@@ -99,6 +110,9 @@ import life.xstar.music.player.data.local.*
 import life.xstar.music.player.data.audio.AudioQuality
 import life.xstar.music.player.data.preferences.PlaybackPreferences
 import life.xstar.music.player.data.preferences.ThemeAccent
+import life.xstar.music.player.data.preferences.PlayerTheme
+import life.xstar.music.player.ui.player.ScenePlayer
+import life.xstar.music.player.ui.player.PlayerThemePicker
 import life.xstar.music.player.data.repository.MusicRepository
 import life.xstar.music.player.data.repository.ArtworkCandidate
 import life.xstar.music.player.data.repository.ScanProgress
@@ -120,12 +134,33 @@ import life.xstar.music.player.navigation.*
 import life.xstar.music.player.player.*
 
 class MainActivity : ComponentActivity() {
+    private lateinit var musicViewModel: MusicViewModel
+
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         enableEdgeToEdge()
         val app = application as XstarApplication
         val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, PlayerController(this), app.playbackPreferences, LyricsRepository(this), app.castController, app.onlineMusicRepository, app.togetherController, app.applicationContext))[MusicViewModel::class.java]
+        musicViewModel = vm
         setContent { val theme by vm.theme.collectAsStateWithLifecycle(); XstarTheme(theme) { XstarApp(vm) } }
+        handleIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
+    }
+
+    private fun handleIntent(intent: Intent?) {
+        if (intent?.action == ACTION_OPEN_PLAYER) {
+            window.decorView.post { musicViewModel.openPlayer.tryEmit(Unit) }
+            intent.action = null
+        }
+    }
+
+    companion object {
+        const val ACTION_OPEN_PLAYER = "life.xstar.music.player.action.OPEN_PLAYER"
     }
 }
 
@@ -150,6 +185,10 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     private var suppressPlaybackPersistence = false
     val folders = preferences.folders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val theme = preferences.theme.stateIn(viewModelScope, SharingStarted.Eagerly, ThemeAccent.Blue)
+    val playerTheme = preferences.playerTheme.stateIn(viewModelScope, SharingStarted.Eagerly, PlayerTheme.Classic)
+    val playerBackground = preferences.playerBackground.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+    val playerDiscOpacity = preferences.playerDiscOpacity.stateIn(viewModelScope, SharingStarted.Eagerly, .42f)
+    val playerDiscVisible = preferences.playerDiscVisible.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val beatEffect = preferences.beatEffect.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val bottomEffect = preferences.bottomEffect.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val onlineArtworkEnabled = preferences.onlineArtworkEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
@@ -209,24 +248,28 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
                 state.song?.mediaStoreId?.let { id -> library.firstOrNull { it.mediaStoreId == id } }
             }.filterNotNull().distinctUntilChanged().collect(player::updateSong)
         }
-        val activeTrackId = combine(castState, playback) { cast, local ->
-            if (cast.connection == CastSessionController.Connection.Connected) cast.song?.mediaStoreId else local.song?.mediaStoreId
-        }.distinctUntilChanged()
+        val activeSong = combine(castState, playback, togetherState) { cast, local, together ->
+            when {
+                cast.connection == CastSessionController.Connection.Connected -> cast.song
+                together.connection == TogetherConnection.Connected && together.isMember -> togetherController.currentSharedSongEntity()
+                else -> local.song
+            }
+        }.distinctUntilChangedBy { it?.mediaStoreId }
+        val activeTrackId = activeSong.map { it?.mediaStoreId }.distinctUntilChanged()
         viewModelScope.launch {
-            combine(activeTrackId, fmModeEnabled, onlineLyricsEnabled) { id, fm, online -> Triple(id, fm, online) }
-                .distinctUntilChanged().collect { (id, fm, online) ->
-                val song = id?.let { repo.getSong(it) }
+            combine(activeSong, onlineLyricsEnabled) { song, online -> song to online }
+                .distinctUntilChanged().collectLatest { (song, online) ->
                 lyrics.value = if (song == null) LyricsState.Idle else LyricsState.Loading
                 if (song != null) {
                     val local = runCatching { lyricsRepository.loadLocalOrEmbedded(song) }.getOrNull()
-                    if (local != null) {
+                    currentCoroutineContext().ensureActive()
+                    if (local != null && local.lines.isNotEmpty()) {
                         lyrics.value = LyricsState.Loaded(local)
-                    } else if (fm && online) {
+                    } else if (online) {
                         val candidate = runCatching { lyricsRepository.findOnline(song).firstOrNull() }.getOrNull()
-                        val document = candidate?.let { lyricsRepository.save(it, song) }
-                        if (id == song.mediaStoreId) {
-                            lyrics.value = document?.let { LyricsState.Loaded(it) } ?: LyricsState.NotFound
-                        }
+                        val document = candidate?.let { runCatching { lyricsRepository.save(it, song) }.getOrNull() }
+                        currentCoroutineContext().ensureActive()
+                        lyrics.value = document?.let { LyricsState.Loaded(it) } ?: LyricsState.NotFound
                     } else {
                         lyrics.value = LyricsState.NotFound
                     }
@@ -279,6 +322,10 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         }
     }
     fun setTheme(theme: ThemeAccent) = viewModelScope.launch { preferences.setTheme(theme) }
+    fun setPlayerTheme(theme: PlayerTheme) = viewModelScope.launch { preferences.setPlayerTheme(theme) }
+    fun setPlayerBackground(uri: String?) = viewModelScope.launch { preferences.setPlayerBackground(uri) }
+    fun setPlayerDiscOpacity(opacity: Float) = viewModelScope.launch { preferences.setPlayerDiscOpacity(opacity) }
+    fun setPlayerDiscVisible(visible: Boolean) = viewModelScope.launch { preferences.setPlayerDiscVisible(visible) }
     fun setBeatEffect(enabled: Boolean) = viewModelScope.launch { preferences.setBeatEffect(enabled) }
     fun setBottomEffect(enabled: Boolean) = viewModelScope.launch { preferences.setBottomEffect(enabled) }
     fun setOnlineArtworkEnabled(enabled: Boolean) = viewModelScope.launch { preferences.setOnlineArtworkEnabled(enabled) }
@@ -297,7 +344,13 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         }
         lyrics.value = LyricsState.Loading
         val candidates = runCatching { lyricsRepository.findOnline(song) }.getOrDefault(emptyList())
-        lyrics.value = if (candidates.isEmpty()) LyricsState.Error("未找到歌词，请检查歌曲标签或稍后重试") else LyricsState.Candidates(song, candidates)
+        val document = candidates.firstOrNull()?.let { runCatching { lyricsRepository.save(it, song) }.getOrNull() }
+        val current = when {
+            castState.value.connection == CastSessionController.Connection.Connected -> castState.value.song
+            togetherState.value.connection == TogetherConnection.Connected && togetherState.value.isMember -> togetherController.currentSharedSongEntity()
+            else -> playback.value.song
+        }
+        if (current?.mediaStoreId == song.mediaStoreId) lyrics.value = document?.let { LyricsState.Loaded(it) } ?: LyricsState.NotFound
     }
     fun saveLyrics(candidate: life.xstar.music.player.data.lyrics.LyricsCandidate) = viewModelScope.launch {
         val candidateSong = (lyrics.value as? LyricsState.Candidates)?.song
@@ -674,6 +727,17 @@ sealed class OnlineSearchUiState {
     val castState by vm.castState.collectAsStateWithLifecycle()
     val togetherState by vm.togetherState.collectAsStateWithLifecycle()
     val songs by vm.songs.collectAsStateWithLifecycle()
+    val selectedPlayerTheme by vm.playerTheme.collectAsStateWithLifecycle()
+    val immersivePlayer = navigationState.topLevelRoute == PlayerRoute && selectedPlayerTheme != PlayerTheme.Classic && !fmMode && !karaokeMode
+    val activity = LocalActivity.current
+    DisposableEffect(activity, immersivePlayer) {
+        val controller = activity?.window?.let { WindowCompat.getInsetsController(it, it.decorView) }
+        if (immersivePlayer) {
+            controller?.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller?.hide(WindowInsetsCompat.Type.systemBars())
+        } else controller?.show(WindowInsetsCompat.Type.systemBars())
+        onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
+    }
     var showCastSheet by remember { mutableStateOf(false) }
     var showTogetherSheet by remember { mutableStateOf(false) }
     val accent = theme.color()
@@ -699,10 +763,20 @@ sealed class OnlineSearchUiState {
         EqualizerRoute to (Icons.Default.Equalizer to "均衡器"),
         SettingsRoute to (Icons.Default.Settings to "设置")
     )
-    ModalNavigationDrawer(drawerState = drawerState, gesturesEnabled = true, drawerContent = {
+    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+    ModalNavigationDrawer(drawerState = drawerState, gesturesEnabled = drawerState.isOpen, drawerContent = {
+      CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
         ModalDrawerSheet(drawerContainerColor = Color(0xFF10131A)) {
             Column(Modifier.fillMaxHeight().width(300.dp).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
-                Spacer(Modifier.height(44.dp)); Text("XSTAR", fontSize = 30.sp, fontWeight = FontWeight.Black, color = Color.White); Text("YOUR MUSIC. YOUR SPACE.", color = Color(0xFF7E8A9A), fontSize = 11.sp); Spacer(Modifier.height(34.dp))
+                Spacer(Modifier.height(24.dp))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("XSTAR", fontSize = 30.sp, fontWeight = FontWeight.Black, color = Color.White, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { scope.launch { drawerState.close() } }) {
+                        Icon(Icons.Default.Close, "关闭菜单", tint = Color(0xFFADB6C5))
+                    }
+                }
+                Text("YOUR MUSIC. YOUR SPACE.", color = Color(0xFF7E8A9A), fontSize = 11.sp)
+                Spacer(Modifier.height(34.dp))
                 drawerRoutes.forEach { (route, item) ->
                     NavigationDrawerItem(label = { Text(item.second) }, icon = { Icon(item.first, null) }, selected = route == navigationState.topLevelRoute, onClick = { navigator.navigate(route); scope.launch { drawerState.close() } }, modifier = Modifier.padding(vertical = 3.dp))
                 }
@@ -857,10 +931,23 @@ sealed class OnlineSearchUiState {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                     ThemeAccent.entries.forEach { accent -> ThemeSwatch(accent, theme == accent) { vm.setTheme(accent) } }
                 }
-                Text("从屏幕左侧向右滑动打开菜单", color = Color(0xFF697382), fontSize = 12.sp, modifier = Modifier.padding(12.dp)); Spacer(Modifier.height(20.dp))
+                val playerTheme by vm.playerTheme.collectAsStateWithLifecycle()
+                Text("播放界面", color = Color(0xFF9BA5B5), fontSize = 13.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp))
+                PlayerTheme.entries.forEach { scene ->
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { vm.setPlayerTheme(scene) }.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(scene.title, color = if (scene == playerTheme) accent else Color.White, fontSize = 14.sp)
+                            Text(scene.subtitle, color = Color(0xFF808B9B), fontSize = 11.sp)
+                        }
+                        if (scene == playerTheme) Icon(Icons.Default.Check, "已选择", tint = accent, modifier = Modifier.size(18.dp))
+                    }
+                }
+                Text("点击悬浮按钮打开导航，可拖动到屏幕边缘收起", color = Color(0xFF697382), fontSize = 12.sp, modifier = Modifier.padding(12.dp)); Spacer(Modifier.height(20.dp))
             }
         }
+      }
     }) {
+      CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(accent.copy(alpha = .22f), Color(0xFF090B10)), endY = 1100f))) {
             NavDisplay(
                 entries = navigationState.toDecoratedEntries(entryProvider),
@@ -868,10 +955,13 @@ sealed class OnlineSearchUiState {
                 modifier = Modifier.fillMaxSize()
             )
             BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
+            if (immersivePlayer) FloatingNavigationHandle(onOpen = openMenu)
             TogetherBarrageOverlay(vm, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 84.dp).widthIn(max = 340.dp))
             if (showCastSheet) CastControlSheet(vm) { showCastSheet = false }
             if (showTogetherSheet) TogetherSheet(vm, togetherState) { showTogetherSheet = false }
         }
+      }
+    }
     }
 }
 
@@ -1395,6 +1485,7 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
 @Composable private fun PlayerScreen(vm: MusicViewModel, openMenu: () -> Unit, onOpenCastSheet: () -> Unit, onOpenTogetherSheet: () -> Unit) {
     val fmMode by vm.fmModeEnabled.collectAsStateWithLifecycle()
     val karaokeMode by vm.karaokeModeEnabled.collectAsStateWithLifecycle()
+    val playerTheme by vm.playerTheme.collectAsStateWithLifecycle()
     val display = when {
         karaokeMode -> "karaoke"
         fmMode -> "fm"
@@ -1404,9 +1495,55 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
         when (mode) {
             "karaoke" -> KaraokePlayerScreen(vm, openMenu)
             "fm" -> FmPlayerScreen(vm, openMenu)
-            else -> TraditionalPlayerScreen(vm, openMenu, onOpenCastSheet, onOpenTogetherSheet)
+            else -> if (playerTheme == PlayerTheme.Classic) TraditionalPlayerScreen(vm, openMenu, onOpenCastSheet, onOpenTogetherSheet)
+                else ScenePlayerScreen(vm, playerTheme, openMenu, onOpenCastSheet, onOpenTogetherSheet)
         }
     }
+}
+
+@Composable private fun ScenePlayerScreen(vm: MusicViewModel, theme: PlayerTheme, openMenu: () -> Unit, openCast: () -> Unit, openTogether: () -> Unit) {
+    val state by vm.playback.collectAsStateWithLifecycle()
+    val cast by vm.castState.collectAsStateWithLifecycle()
+    val together by vm.togetherState.collectAsStateWithLifecycle()
+    val lyrics by vm.lyrics.collectAsStateWithLifecycle()
+    val favorites by vm.favorites.collectAsStateWithLifecycle()
+    val castConnected = cast.connection == CastSessionController.Connection.Connected
+    val session = together.connection == TogetherConnection.Connected && together.inSession
+    val sharedSong = remember(together.connection, together.role, together.sharedSong) {
+        if (together.isMember && together.connection == TogetherConnection.Connected) vm.togetherCurrentSharedSong() else null
+    }
+    val song = sharedSong ?: state.song
+    var showQueue by remember { mutableStateOf(false) }
+    var showDetails by remember { mutableStateOf(false) }
+    var showArtwork by remember { mutableStateOf(false) }
+    var showLyrics by remember { mutableStateOf(false) }
+    val mode = if (session) runCatching { PlaybackMode.valueOf(together.sharedMode) }.getOrDefault(state.mode) else state.mode
+    ScenePlayer(
+        theme = theme, song = song, lyrics = lyrics,
+        playing = if (castConnected) cast.playing else state.playing,
+        position = if (castConnected) cast.positionMs else state.position,
+        duration = if (castConnected) cast.durationMs else state.duration,
+        favorite = favorites.any { it.mediaStoreId == song?.mediaStoreId },
+        playbackMode = mode, error = state.error,
+        connectionLabel = when { castConnected -> cast.device?.friendlyName ?: "投屏中"; session -> "一起听 · ${together.peer?.nickname ?: "好友"}"; else -> null },
+        onConnection = { if (castConnected) openCast() else openTogether() },
+        onMenu = openMenu, onTheme = vm::setPlayerTheme,
+        onToggle = { when { castConnected -> vm.castTogglePlayPause(); session -> vm.togetherTogglePlayPause(); else -> vm.player.toggle() } },
+        onPrevious = { when { castConnected -> vm.castPrevious(); session -> vm.togetherPrevious(); else -> vm.player.previous() } },
+        onNext = { when { castConnected -> vm.castNext(); session -> vm.togetherNext(); else -> vm.player.next() } },
+        onSeek = { target -> when { castConnected -> vm.castSeek(target); session -> vm.togetherSeek(target); else -> vm.player.seek(target) } },
+        onFavorite = { song?.let { vm.favorite(it.mediaStoreId) } },
+        onQueue = { if (castConnected) openCast() else showQueue = true },
+        onMode = { if (!castConnected) { if (session) vm.togetherSetMode(mode.next()) else vm.player.setPlaybackMode(mode.next()) } },
+        onDetails = { showDetails = true }, onFindLyrics = { vm.findLyrics() }, onLyrics = { showLyrics = true }
+    )
+    if (showQueue) { if (session) TogetherQueueSheet(together, vm) { showQueue = false } else QueueSheet(state, vm) { showQueue = false } }
+    if (showLyrics) {
+        @OptIn(ExperimentalMaterial3Api::class)
+        ModalBottomSheet(onDismissRequest = { showLyrics = false }, containerColor = Color(0xFF171B23)) { LyricsPanel(vm, Modifier.fillMaxWidth().height(460.dp)) { showLyrics = false } }
+    }
+    if (showArtwork && song != null) AlbumArtworkSheet(song.album, listOf(song), vm, allowReplace = true) { showArtwork = false }
+    if (showDetails && song != null) SongDetailsSheet(song, getArtwork = { showDetails = false; showArtwork = true }, getLyrics = { showDetails = false; showLyrics = true; vm.findLyrics() }, close = { showDetails = false })
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1414,9 +1551,13 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
     val state by vm.playback.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var showQueue by remember { mutableStateOf(false) }
+    var showThemePicker by remember { mutableStateOf(false) }
     val theme by vm.theme.collectAsStateWithLifecycle()
     val beatEffect by vm.beatEffect.collectAsStateWithLifecycle()
     val bottomEffect by vm.bottomEffect.collectAsStateWithLifecycle()
+    val playerBackground by vm.playerBackground.collectAsStateWithLifecycle()
+    val playerDiscOpacity by vm.playerDiscOpacity.collectAsStateWithLifecycle()
+    val playerDiscVisible by vm.playerDiscVisible.collectAsStateWithLifecycle()
     val castState by vm.castState.collectAsStateWithLifecycle()
     val togetherState by vm.togetherState.collectAsStateWithLifecycle()
     val sessionSharedSong = remember(togetherState.connection, togetherState.role, togetherState.sharedSong) {
@@ -1456,19 +1597,24 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
     val togetherConnected = togetherState.connection == TogetherConnection.Connected
     val sessionActive = togetherConnected && togetherState.inSession
     val displayPlaying = if (castConnected) castState.playing else state.playing
+    val sessionMode = if (sessionActive) runCatching { PlaybackMode.valueOf(togetherState.sharedMode) }.getOrDefault(state.mode) else state.mode
     var showArtworkPicker by remember { mutableStateOf(false) }
     var showSongDetails by remember { mutableStateOf(false) }
     var showLyrics by remember { mutableStateOf(false) }
+    var showPlayerControls by remember { mutableStateOf(false) }
+    var controlInteraction by remember { mutableIntStateOf(0) }
     var showSessionQueue by remember { mutableStateOf(false) }
     LaunchedEffect(song?.mediaStoreId) { showLyrics = false }
-    Box(
+    BoxWithConstraints(
         Modifier.fillMaxSize()
             .background(artworkColors.dark)
             .background(Brush.radialGradient(listOf(artworkColors.light.copy(alpha = .42f), Color.Transparent), center = Offset(120f, 80f), radius = 820f))
             .background(Brush.radialGradient(listOf(ambient.copy(alpha = .48f), Color.Transparent), center = Offset(920f, 620f), radius = 1050f))
             .background(Brush.radialGradient(listOf(artworkColors.primary.copy(alpha = .24f), Color.Transparent, artworkColors.dark.copy(alpha = .72f)), center = Offset(520f, 430f), radius = 1300f))
     ) {
+    PlayerBackground(playerBackground)
     IconButton(openMenu, Modifier.statusBarsPadding().padding(10.dp).align(Alignment.TopStart)) { Icon(Icons.Default.Menu, "菜单", tint = Color.White) }
+    IconButton({ showThemePicker = true }, Modifier.statusBarsPadding().padding(top = 10.dp, end = 10.dp).align(Alignment.TopEnd)) { Icon(Icons.Default.Palette, "切换播放主题", tint = Color.White) }
     val castConnection = castState.connection
     if (castConnection != CastSessionController.Connection.Disconnected) {
         Surface(
@@ -1526,6 +1672,61 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
             modifier = Modifier.fillMaxWidth().height(BOTTOM_STAGE_HEIGHT).navigationBarsPadding().align(Alignment.BottomCenter)
         )
     }
+    LaunchedEffect(showPlayerControls, controlInteraction) {
+        if (showPlayerControls) {
+            delay(4_000)
+            showPlayerControls = false
+        }
+    }
+    if (!showPlayerControls) {
+        Box(
+            Modifier.align(Alignment.BottomCenter).zIndex(1f).navigationBarsPadding().padding(bottom = 4.dp)
+                .fillMaxWidth().height(58.dp).clickable { showPlayerControls = true; controlInteraction++ }
+        )
+    }
+    AnimatedVisibility(
+        visible = showPlayerControls,
+        modifier = Modifier.align(Alignment.BottomCenter).zIndex(2f).navigationBarsPadding().padding(horizontal = 12.dp, vertical = 10.dp),
+        enter = fadeIn(), exit = fadeOut()
+    ) {
+        Surface(Modifier.fillMaxWidth().widthIn(max = 420.dp), shape = RoundedCornerShape(28.dp), color = Color(0xFF171C25).copy(alpha = .94f), shadowElevation = 12.dp, border = BorderStroke(1.dp, theme.color().copy(alpha = .4f))) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 5.dp).clickable { controlInteraction++ }, verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
+                    PlaybackModeButton(sessionMode, enabled = !castConnected) {
+                        if (!castConnected) {
+                            val nextMode = sessionMode.next()
+                            if (sessionActive) vm.togetherSetMode(nextMode) else vm.player.setPlaybackMode(nextMode)
+                        }
+                    }
+                    IconButton(onClick = {
+                        when {
+                            castConnected -> vm.castPrevious()
+                            sessionActive -> vm.togetherPrevious()
+                            else -> vm.player.previous()
+                        }
+                    }) { Icon(Icons.Default.SkipPrevious, "上一首", tint = Color.White) }
+                    IconButton(onClick = {
+                        when {
+                            castConnected -> vm.castTogglePlayPause()
+                            sessionActive -> vm.togetherTogglePlayPause()
+                            else -> vm.player.toggle()
+                        }
+                    }) { Icon(if (displayPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, "播放或暂停", tint = Color.White) }
+                    IconButton(onClick = {
+                        when {
+                            castConnected -> vm.castNext()
+                            sessionActive -> vm.togetherNext()
+                            else -> vm.player.next()
+                        }
+                    }) { Icon(Icons.Default.SkipNext, "下一首", tint = Color.White) }
+                    IconButton(onClick = { if (!castConnected) { if (sessionActive) showSessionQueue = true else showQueue = true } }, enabled = !castConnected) {
+                        Icon(Icons.Default.QueueMusic, "播放列表", tint = if (castConnected) Color(0xFF5B6577) else Color.White)
+                    }
+                    IconButton(onClick = { showLyrics = !showLyrics }) {
+                        Text("词", color = if (showLyrics) theme.color() else Color.White, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                    }
+            }
+        }
+    }
     Column(Modifier.fillMaxSize().padding(horizontal = 22.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.weight(if (showLyrics) .12f else .45f))
         BoxWithConstraints(
@@ -1533,9 +1734,8 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
             contentAlignment = Alignment.Center
         ) {
             val artworkSize = minOf(maxWidth - 48.dp, 330.dp)
-            if (showLyrics) LyricsPanel(vm, Modifier.fillMaxSize()) { showLyrics = false } else Box(
-                Modifier.size(artworkSize).scale(artworkScale).graphicsLayer { rotationZ = discRotation.value }.clickable { showLyrics = true },
-                contentAlignment = Alignment.Center
+            if (showLyrics) LyricsPanel(vm, Modifier.fillMaxSize()) { showLyrics = false } else if (playerDiscVisible) Box(
+                Modifier.size(artworkSize).scale(artworkScale).graphicsLayer { rotationZ = discRotation.value; alpha = playerDiscOpacity }, contentAlignment = Alignment.Center
             ) {
                 Surface(Modifier.fillMaxSize().clip(CircleShape), shape = CircleShape, tonalElevation = 12.dp, shadowElevation = 18.dp, color = Color(0xFF242B37)) {
                     Box(Modifier.fillMaxSize()) {
@@ -1576,6 +1776,7 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
         Spacer(Modifier.height(22.dp))
         val sliderDuration = if (castConnected) castState.durationMs else state.duration
         val sliderPosition = if (castConnected) castState.positionMs else state.position
+        val waveform = remember(song?.mediaStoreId, sliderDuration) { List(56) { index -> .18f + ((index * 37) % 83) / 100f } }
         Slider(
             value = if (sliderDuration > 0) sliderPosition.toFloat() / sliderDuration else 0f,
             onValueChange = {
@@ -1592,10 +1793,21 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
                 activeTrackColor = Color.White.copy(alpha = .9f),
                 inactiveTrackColor = Color.White.copy(alpha = .18f)
             ),
-            thumb = { Box(Modifier.size(8.dp).clip(CircleShape).background(Color.White)) },
+            thumb = { },
             track = { sliderPositions ->
-                Box(Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = .18f))) {
-                    Box(Modifier.fillMaxWidth(sliderPositions.value).fillMaxHeight().clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = .9f)))
+                Canvas(Modifier.fillMaxWidth().height(36.dp)) {
+                    val gap = size.width / waveform.size
+                    waveform.forEachIndexed { index, level ->
+                        val x = gap * index + gap / 2f
+                        val barHeight = size.height * level.coerceIn(.16f, 1f)
+                        val played = x / size.width <= sliderPositions.value
+                        drawRoundRect(
+                            color = if (played) artworkColors.light.copy(alpha = .9f) else Color.White.copy(alpha = .2f),
+                            topLeft = Offset(x - 1.5f, (size.height - barHeight) / 2f),
+                            size = Size(3f, barHeight),
+                            cornerRadius = CornerRadius(3f, 3f)
+                        )
+                    }
                 }
             }
         )
@@ -1605,43 +1817,13 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
             TogetherEmojiBar(vm, Modifier.fillMaxWidth())
         }
         Spacer(Modifier.height(16.dp))
-        val sessionMode = if (sessionActive) runCatching { PlaybackMode.valueOf(togetherState.sharedMode) }.getOrDefault(state.mode) else state.mode
-        Row(Modifier.fillMaxWidth().height(76.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
-            PlaybackModeButton(
-                sessionMode,
-                enabled = !castConnected && !togetherState.connection.toString().equals(TogetherConnection.Connecting.name)
-            ) {
-                val nextMode = sessionMode.next()
-                if (sessionActive) vm.togetherSetMode(nextMode) else vm.player.setPlaybackMode(nextMode)
-            }
-            IconButton(onClick = {
-                when {
-                    castConnected -> vm.castPrevious()
-                    sessionActive -> vm.togetherPrevious()
-                    else -> vm.player.previous()
-                }
-            }, Modifier.size(52.dp)) { Icon(Icons.Default.SkipPrevious, "上一首", Modifier.size(32.dp), tint = Color.White) }
-            IconButton(onClick = {
-                when {
-                    castConnected -> vm.castTogglePlayPause()
-                    sessionActive -> vm.togetherTogglePlayPause()
-                    else -> vm.player.toggle()
-                }
-            }, Modifier.size(64.dp)) { Icon(if (displayPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, "播放或暂停", Modifier.size(38.dp), tint = Color.White) }
-            IconButton(onClick = {
-                when {
-                    castConnected -> vm.castNext()
-                    sessionActive -> vm.togetherNext()
-                    else -> vm.player.next()
-                }
-            }, Modifier.size(52.dp)) { Icon(Icons.Default.SkipNext, "下一首", Modifier.size(32.dp), tint = Color.White) }
-            IconButton(onClick = { if (sessionActive) showSessionQueue = true else showQueue = true }, modifier = Modifier.size(52.dp), enabled = !castConnected) { Icon(Icons.Default.QueueMusic, "播放列表", tint = if (castConnected) Color(0xFF5B6577) else Color(0xFFB3BDCC)) }
-        }
+         Spacer(Modifier.height(12.dp))
         state.error?.let { Text(it, color = Color(0xFFFF8A96), fontSize = 12.sp, modifier = Modifier.padding(top = 8.dp)) }
         Spacer(Modifier.weight(if (showLyrics) .08f else .5f))
     }
     }
     if (showQueue) QueueSheet(state, vm) { showQueue = false }
+    if (showThemePicker) PlayerThemePicker(PlayerTheme.Classic, vm::setPlayerTheme) { showThemePicker = false }
     if (showSessionQueue) TogetherQueueSheet(togetherState, vm) { showSessionQueue = false }
     if (showArtworkPicker && song != null) AlbumArtworkSheet(song.album, listOf(song), vm, allowReplace = true) { showArtworkPicker = false }
     if (showSongDetails && song != null) SongDetailsSheet(
@@ -1657,6 +1839,7 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
     val state by vm.playback.collectAsStateWithLifecycle()
     val theme by vm.theme.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val playerBackground by vm.playerBackground.collectAsStateWithLifecycle()
     val artworkColors by produceState(initialValue = ArtworkColors.fallback(theme), state.song?.albumArtUri, theme) {
         value = loadArtworkColors(context, state.song?.albumArtUri, theme)
     }
@@ -1700,6 +1883,7 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
                 }
             }
     ) {
+        PlayerBackground(playerBackground)
         IconButton(openMenu, Modifier.statusBarsPadding().padding(10.dp).align(Alignment.TopStart).zIndex(2f)) {
             Icon(Icons.Default.Menu, "菜单", tint = Color.White)
         }
@@ -1754,12 +1938,14 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
     val state by vm.playback.collectAsStateWithLifecycle()
     val karaokeState by vm.player.karaokeState.collectAsStateWithLifecycle()
     val theme by vm.theme.collectAsStateWithLifecycle()
+    val playerBackground by vm.playerBackground.collectAsStateWithLifecycle()
     var expanded by remember { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
     var showScore by remember { mutableStateOf(false) }
     val song = state.song
     val mono = song?.channelCount == 1
     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(theme.color().copy(alpha = .18f), Color(0xFF0B0E14))))) {
+        PlayerBackground(playerBackground)
         Column(Modifier.fillMaxSize().systemBarsPadding(), horizontalAlignment = Alignment.CenterHorizontally) {
             Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(openMenu) { Icon(Icons.Default.Menu, "菜单", tint = Color.White) }
@@ -3036,15 +3222,23 @@ private fun dateTimeText(ms: Long): String {
 
 @Composable private fun SettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) {
     val context = LocalContext.current
+    val playerBackground by vm.playerBackground.collectAsStateWithLifecycle()
+    val playerDiscVisible by vm.playerDiscVisible.collectAsStateWithLifecycle()
+    val playerDiscOpacity by vm.playerDiscOpacity.collectAsStateWithLifecycle()
     val folders by vm.folders.collectAsStateWithLifecycle()
     val beatEffect by vm.beatEffect.collectAsStateWithLifecycle()
     val bottomEffect by vm.bottomEffect.collectAsStateWithLifecycle()
     val onlineArtwork by vm.onlineArtworkEnabled.collectAsStateWithLifecycle()
+    val onlineLyrics by vm.onlineLyricsEnabled.collectAsStateWithLifecycle()
     val onlineSearch by vm.onlineSearchEnabled.collectAsStateWithLifecycle()
     val onlinePlatform by vm.onlinePlatform.collectAsStateWithLifecycle()
     val onlineApiBase by vm.onlineApiBase.collectAsStateWithLifecycle()
     val downloadFolder by vm.downloadFolder.collectAsStateWithLifecycle()
     val scanState by vm.scanState.collectAsStateWithLifecycle()
+    val togetherMode by vm.togetherConnectMode.collectAsStateWithLifecycle()
+    val serverEnabled by vm.togetherServerEnabled.collectAsStateWithLifecycle()
+    val serverAddress by vm.togetherServerAddress.collectAsStateWithLifecycle()
+    var showAdvanced by rememberSaveable { mutableStateOf(false) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let { runCatching { context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }; vm.addFolder(it.toString()) }
     }
@@ -3054,18 +3248,91 @@ private fun dateTimeText(ms: Long): String {
             vm.setDownloadFolder(uri.toString())
         }
     }
+    val backgroundPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            vm.setPlayerBackground(uri.toString())
+        }
+    }
     val canScan = folders.isNotEmpty() || downloadFolder.isNotBlank()
-    Column(Modifier.fillMaxSize().systemBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
+    Column(Modifier.fillMaxSize().systemBarsPadding().imePadding().padding(horizontal = 18.dp)) {
         PageHeader(openMenu)
-        Text("在线搜歌下载", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
-        ListItem(
-            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-            headlineContent = { Text("允许在线搜索并下载", color = Color.White) },
-            supportingContent = { Text("搜索关键词会发送到公共音乐聚合服务，仅在你主动搜索时发生", color = Color.Gray) },
-            leadingContent = { Icon(Icons.Default.CloudDownload, null) },
-            trailingContent = { Switch(checked = onlineSearch, onCheckedChange = vm::setOnlineSearchEnabled) }
-        )
-        Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+        SettingsSection("播放与显示", "调整播放器的动态视觉效果") {
+            ListItem(
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                headlineContent = { Text("播放页面背景图片") },
+                supportingContent = { Text(if (playerBackground.isBlank()) "未设置，使用专辑封面氛围背景" else "已设置自定义背景图片", color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                leadingContent = { Icon(Icons.Default.Wallpaper, null, tint = MaterialTheme.colorScheme.primary) },
+                trailingContent = { if (playerBackground.isNotBlank()) IconButton({ vm.setPlayerBackground(null) }) { Icon(Icons.Default.Close, "清除背景图片") } else Icon(Icons.Default.ChevronRight, null) },
+                modifier = Modifier.clickable { backgroundPicker.launch(arrayOf("image/*")) }
+            )
+            SettingsDivider()
+            SettingsToggle("普通模式显示光碟", "关闭后隐藏播放页面中央的专辑光碟", Icons.Default.Album, playerDiscVisible, vm::setPlayerDiscVisible)
+            SettingsDivider()
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("光碟透明度")
+                        Text("背景图片设置后调整专辑光碟的透明程度", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                    }
+                    Text("${(playerDiscOpacity * 100).roundToInt()}%", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
+                }
+                Slider(
+                    value = playerDiscOpacity,
+                    onValueChange = vm::setPlayerDiscOpacity,
+                    valueRange = .05f..1f,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+            SettingsDivider()
+            SettingsToggle("音乐节拍动态效果", "播放时切换背景颜色并轻微缩放封面", Icons.Default.GraphicEq, beatEffect, vm::setBeatEffect)
+            SettingsDivider()
+            SettingsToggle("底部频谱特效", "播放时显示实时频谱律动与氛围粒子", Icons.Default.Equalizer, bottomEffect, vm::setBottomEffect)
+        }
+        SettingsSection("音乐库", "管理本地音乐文件夹与扫描") {
+            if (folders.isEmpty()) {
+                Text("还没有添加音乐文件夹", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp, modifier = Modifier.padding(16.dp))
+            }
+            folders.forEach { uri ->
+                ListItem(
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                    headlineContent = { Text(folderName(uri), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    supportingContent = { Text(uri, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    leadingContent = { Icon(Icons.Default.Folder, null, tint = MaterialTheme.colorScheme.primary) },
+                    trailingContent = { IconButton({ vm.removeFolder(uri) }, enabled = !scanState.running) { Icon(Icons.Default.Close, "移除文件夹") } }
+                )
+            }
+            OutlinedButton({ picker.launch(null) }, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), enabled = !scanState.running) {
+                Icon(Icons.Default.CreateNewFolder, null)
+                Spacer(Modifier.width(8.dp))
+                Text("添加音乐文件夹")
+            }
+            SettingsDivider()
+            ListItem(
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                headlineContent = { Text(if (scanState.running) "正在扫描音乐库" else "重新扫描音乐库") },
+                supportingContent = {
+                    Text(
+                        when {
+                            scanState.running && !scanState.currentFile.isNullOrBlank() -> "已发现 ${scanState.discovered} 首 · ${scanState.currentFile}"
+                            scanState.message != null -> scanState.message.orEmpty()
+                            !canScan -> "请先添加音乐文件夹或设置下载目录"
+                            else -> "同步音乐文件夹与下载目录中的音频"
+                        },
+                        color = if (scanState.failed) Color(0xFFFF8A96) else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis
+                    )
+                },
+                leadingContent = { Icon(if (scanState.running) Icons.Default.Radar else Icons.Default.Refresh, null, tint = MaterialTheme.colorScheme.primary) },
+                trailingContent = { if (scanState.running) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp) },
+                modifier = Modifier.clickable(enabled = !scanState.running && canScan) { vm.scan() }
+            )
+        }
+        SettingsSection("在线服务", "在线搜歌、下载、封面与歌词") {
+        SettingsToggle("在线搜歌与下载", "仅在主动搜索时将关键词发送到公共音乐聚合服务", Icons.Default.CloudDownload, onlineSearch, vm::setOnlineSearchEnabled)
+        Text("搜索平台", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(start = 16.dp, top = 4.dp))
+        FlowRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             supportedOnlinePlatforms.forEach { platform ->
                 FilterChip(
                     selected = onlinePlatform == platform.id,
@@ -3075,7 +3342,7 @@ private fun dateTimeText(ms: Long): String {
                 )
             }
         }
-        Spacer(Modifier.height(6.dp))
+        SettingsDivider()
         ListItem(
             colors = ListItemDefaults.colors(containerColor = Color.Transparent),
             headlineContent = { Text("下载目录", color = Color.White) },
@@ -3085,39 +3352,39 @@ private fun dateTimeText(ms: Long): String {
                     color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
             },
-            leadingContent = { Icon(Icons.Default.Save, null) },
+            leadingContent = { Icon(Icons.Default.Save, null, tint = MaterialTheme.colorScheme.primary) },
             trailingContent = {
                 if (downloadFolder.isNotBlank()) IconButton({ vm.setDownloadFolder(null) }) { Icon(Icons.Default.Close, "清除下载目录") }
+                else Icon(Icons.Default.ChevronRight, null)
             },
             modifier = Modifier.clickable { downloadPicker.launch(null) }
         )
+        ListItem(
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+            headlineContent = { Text("自定义搜索服务") },
+            supportingContent = { Text(if (onlineApiBase.isBlank()) "使用公共实例 · 可选高级设置" else "已配置自定义服务") },
+            leadingContent = { Icon(Icons.Default.Tune, null, tint = MaterialTheme.colorScheme.primary) },
+            trailingContent = { Icon(if (showAdvanced) Icons.Default.ExpandLess else Icons.Default.ExpandMore, if (showAdvanced) "收起" else "展开") },
+            modifier = Modifier.clickable { showAdvanced = !showAdvanced }
+        )
+        AnimatedVisibility(showAdvanced) {
         OutlinedTextField(
             value = onlineApiBase,
             onValueChange = vm::setOnlineApiBase,
             enabled = onlineSearch,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
             label = { Text("自定义服务地址（可选）", color = Color(0xFF8F99A9)) },
             placeholder = { Text("留空使用公共实例", color = Color(0xFF5B6577)) },
             singleLine = true,
             shape = RoundedCornerShape(14.dp)
         )
-        HorizontalDivider(color = Color.White.copy(alpha = .07f), modifier = Modifier.padding(vertical = 10.dp))
-        ListItem(
-            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-            headlineContent = { Text("允许获取在线专辑封面", color = Color.White) },
-            supportingContent = { Text("开启后可在专辑页面手动查询 iTunes 专辑封面", color = Color.Gray) },
-            leadingContent = { Icon(Icons.Default.CloudDownload, null) },
-            trailingContent = { Switch(checked = onlineArtwork, onCheckedChange = vm::setOnlineArtworkEnabled) }
-        )
-        ListItem(
-            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-            headlineContent = { Text("允许获取在线歌词", color = Color.White) },
-            supportingContent = { Text("本地 LRC 仍会优先使用", color = Color.Gray) },
-            leadingContent = { Icon(Icons.Default.Notes, null) },
-            trailingContent = { Switch(checked = vm.onlineLyricsEnabled.collectAsStateWithLifecycle().value, onCheckedChange = vm::setOnlineLyricsEnabled) }
-        )
-        Text("一起听", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 14.dp, bottom = 2.dp))
-        val togetherMode by vm.togetherConnectMode.collectAsStateWithLifecycle()
+        }
+        SettingsDivider()
+        SettingsToggle("在线专辑封面", "开启后可手动查询 iTunes 专辑封面", Icons.Default.Album, onlineArtwork, vm::setOnlineArtworkEnabled)
+        SettingsDivider()
+        SettingsToggle("在线歌词", "优先使用本地 LRC 歌词", Icons.Default.Notes, onlineLyrics, vm::setOnlineLyricsEnabled)
+        }
+        SettingsSection("一起听", "管理设备连接与跨网中转") {
         ListItem(
             colors = ListItemDefaults.colors(containerColor = Color.Transparent),
             headlineContent = { Text("连接方式", color = Color.White) },
@@ -3130,12 +3397,12 @@ private fun dateTimeText(ms: Long): String {
                     color = Color.Gray
                 )
             },
-            leadingContent = { Icon(Icons.Default.Public, null) }
+            leadingContent = { Icon(Icons.Default.Public, null, tint = MaterialTheme.colorScheme.primary) }
         )
-        Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        FlowRow(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf(
                 TogetherConnectMode.Lan to "仅局域网",
-                TogetherConnectMode.MultiPath to "跨网多路径(默认)"
+                TogetherConnectMode.MultiPath to "跨网多路径（默认）"
             ).forEach { (mode, label) ->
                 FilterChip(
                     selected = togetherMode == mode,
@@ -3144,75 +3411,72 @@ private fun dateTimeText(ms: Long): String {
                 )
             }
         }
-        val serverEnabled by vm.togetherServerEnabled.collectAsStateWithLifecycle()
-        val serverAddress by vm.togetherServerAddress.collectAsStateWithLifecycle()
-        ListItem(
-            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-            headlineContent = { Text("公网中转服务器（可选）", color = Color.White) },
-            supportingContent = {
-                Text(
-                    if (serverEnabled) "跨网多路径时将自动经你的服务器中转音频与控制" else "开启后填写地址，用于跨网可靠直连",
-                    color = Color.Gray
-                )
-            },
-            leadingContent = { Icon(Icons.Default.Dns, null) },
-            trailingContent = { Switch(checked = serverEnabled, onCheckedChange = vm::setTogetherServerEnabled) }
-        )
+        SettingsDivider()
+        SettingsToggle("公网中转服务器", "可选：跨网多路径时通过自建服务器中转音频与控制", Icons.Default.Dns, serverEnabled, vm::setTogetherServerEnabled)
         if (serverEnabled) {
             OutlinedTextField(
                 value = serverAddress,
                 onValueChange = vm::setTogetherServerAddress,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                 label = { Text("服务器地址（IP:端口）", color = Color(0xFF8F99A9)) },
                 placeholder = { Text("例如 1.2.3.4:9301", color = Color(0xFF5B6577)) },
                 singleLine = true,
                 shape = RoundedCornerShape(14.dp)
             )
-            Text("服务器仅转发数据、不保存音乐；不可达时 App 只提示，不会自动回退到 UPnP 通道", color = Color(0xFF5B6577), fontSize = 11.sp, modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
+            Text("服务器仅转发数据、不保存音乐；不可达时仅提示，不自动回退到 UPnP 通道", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 12.dp))
         }
-        ListItem(
-            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-            headlineContent = { Text("音乐节拍动态效果", color = Color.White) },
-            supportingContent = { Text("播放时切换背景颜色并轻微缩放封面", color = Color.Gray) },
-            leadingContent = { Icon(Icons.Default.GraphicEq, null) },
-            trailingContent = { Switch(checked = beatEffect, onCheckedChange = vm::setBeatEffect) }
-        )
-        ListItem(
-            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-            headlineContent = { Text("底部频谱特效", color = Color.White) },
-            supportingContent = { Text("播放时在页面底部显示实时频谱律动与氛围粒子", color = Color.Gray) },
-            leadingContent = { Icon(Icons.Default.Equalizer, null) },
-            trailingContent = { Switch(checked = bottomEffect, onCheckedChange = vm::setBottomEffect) }
-        )
-        Text("音乐文件夹", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(16.dp))
-        folders.forEach { uri ->
-            ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text(folderName(uri), color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) }, supportingContent = { Text(uri, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis) }, leadingContent = { Icon(Icons.Default.Folder, null) }, trailingContent = { IconButton({ vm.removeFolder(uri) }, enabled = !scanState.running) { Icon(Icons.Default.Close, "移除") } })
         }
-        OutlinedButton({ picker.launch(null) }, Modifier.padding(horizontal = 16.dp), enabled = !scanState.running) { Icon(Icons.Default.CreateNewFolder, null); Spacer(Modifier.width(8.dp)); Text("添加文件夹") }
-        ListItem(
-            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-            headlineContent = { Text(if (scanState.running) "正在扫描音乐库" else "重新扫描音乐库", color = Color.White) },
-            supportingContent = {
-                Text(
-                    when {
-                        scanState.running && !scanState.currentFile.isNullOrBlank() -> "已发现 ${scanState.discovered} 首 · ${scanState.currentFile}"
-                        scanState.message != null -> scanState.message.orEmpty()
-                        else -> "仅同步已选择文件夹中的音频"
-                    },
-                    color = if (scanState.failed) Color(0xFFFF8A96) else Color.Gray,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            },
-            leadingContent = { Icon(if (scanState.running) Icons.Default.Radar else Icons.Default.Refresh, null) },
-            trailingContent = { if (scanState.running) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp) },
-            modifier = Modifier.clickable(enabled = !scanState.running && canScan) { vm.scan() }
-        )
+        SettingsSection("关于", "应用信息") {
         ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("XSTAR", color = Color.White) }, supportingContent = { Text("本地音乐播放器 · 0.1.0", color = Color.Gray) }, leadingContent = { Icon(Icons.Default.Info, null) })
+        }
+        Spacer(Modifier.height(16.dp))
+        }
     }
+}
+
+@Composable
+private fun PlayerBackground(uri: String) {
+    if (uri.isBlank()) return
+    SubcomposeAsyncImage(
+        model = Uri.parse(uri), contentDescription = null,
+        modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop,
+        alpha = .34f, error = {}, loading = {}
+    )
+    Box(Modifier.fillMaxSize().background(Color(0xFF070A10).copy(alpha = .48f)))
+}
+
+@Composable
+private fun SettingsSection(title: String, subtitle: String, content: @Composable ColumnScope.() -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(Modifier.padding(horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(title, color = MaterialTheme.colorScheme.primary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+        }
+        Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface) {
+            Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), content = content)
+        }
+    }
+}
+
+@Composable
+private fun SettingsDivider() {
+    HorizontalDivider(color = Color.White.copy(alpha = .07f), modifier = Modifier.padding(horizontal = 16.dp))
+}
+
+@Composable
+private fun SettingsToggle(title: String, description: String, icon: androidx.compose.ui.graphics.vector.ImageVector, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    ListItem(
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        headlineContent = { Text(title) },
+        supportingContent = { Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant) },
+        leadingContent = { Icon(icon, null, tint = MaterialTheme.colorScheme.primary) },
+        trailingContent = { Switch(checked = checked, onCheckedChange = null) },
+        modifier = Modifier.toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
+    )
 }
 @Composable private fun EmptyState(title: String, text: String, action: String, click: () -> Unit) { Column(Modifier.fillMaxWidth().padding(42.dp), horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Default.LibraryMusic, null, Modifier.size(58.dp), tint = Color(0xFF65738A)); Spacer(Modifier.height(18.dp)); Text(title, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold); Text(text, color = Color.Gray, modifier = Modifier.padding(vertical = 12.dp)); Button(click) { Text(action) } } }
 private fun PlaybackMode.next() = when (this) { PlaybackMode.Sequential -> PlaybackMode.Shuffle; PlaybackMode.Shuffle -> PlaybackMode.RepeatOne; PlaybackMode.RepeatOne -> PlaybackMode.Sequential }
+private fun PlaybackMode.label() = when (this) { PlaybackMode.Sequential -> "顺序"; PlaybackMode.Shuffle -> "随机"; PlaybackMode.RepeatOne -> "单曲循环" }
 private fun time(ms: Long) = "%d:%02d".format(ms.coerceAtLeast(0) / 60_000, (ms.coerceAtLeast(0) / 1_000) % 60)
 private fun formatDb(levelMb: Int): String = if (levelMb == 0) "0 dB" else "%+.1f dB".format(levelMb / 100f)
 private fun formatFrequency(frequencyHz: Int): String = if (frequencyHz >= 1_000) {
@@ -3277,11 +3541,9 @@ private fun ThemeAccent.color() = when (this) { ThemeAccent.Blue -> Color(0xFF78
 private val BOTTOM_STAGE_HEIGHT = 132.dp
 
 private const val SPECTRUM_ATTACK_RATE = 12f
-private const val SPECTRUM_RELEASE_RATE = 1.6f
+private const val SPECTRUM_RELEASE_RATE = 10f
 private const val SPECTRUM_PAUSE_RELEASE_RATE = 8f
 private const val SPECTRUM_PARTICLE_COUNT = 20
-private const val SPECTRUM_REAL_FLOOR = 0.06f
-private const val SPECTRUM_REAL_WINDOW_MS = 5_000L
 
 @Composable
 private fun BottomSpectrumStage(
@@ -3294,23 +3556,24 @@ private fun BottomSpectrumStage(
     val now = remember { mutableFloatStateOf(0f) }
     val prevDrawT = remember { floatArrayOf(-1f) }
     val smooth = remember { FloatArray(SPECTRUM_BAND_COUNT) }
-    var lastMusicAt by remember { mutableLongStateOf(0L) }
     var animActive by remember { mutableStateOf(false) }
-
-    LaunchedEffect(levels) {
-        if (levels.size == SPECTRUM_BAND_COUNT && levels.any { it > SPECTRUM_REAL_FLOOR }) {
-            lastMusicAt = SystemClock.uptimeMillis()
-        }
-    }
+    val frameOrigin = remember { longArrayOf(0L) }
 
     LaunchedEffect(playing) {
         animActive = true
+        prevDrawT[0] = -1f
         if (playing) {
             smooth.fill(0f)
-            while (true) withFrameNanos { now.floatValue = it / 1_000_000_000f }
+            while (true) withFrameNanos {
+                if (frameOrigin[0] == 0L) frameOrigin[0] = it
+                now.floatValue = (it - frameOrigin[0]) / 1_000_000_000f
+            }
         } else {
             val end = SystemClock.uptimeMillis() + 700L
-            while (SystemClock.uptimeMillis() < end) withFrameNanos { now.floatValue = it / 1_000_000_000f }
+            while (SystemClock.uptimeMillis() < end) withFrameNanos {
+                if (frameOrigin[0] == 0L) frameOrigin[0] = it
+                now.floatValue = (it - frameOrigin[0]) / 1_000_000_000f
+            }
             animActive = false
         }
     }
@@ -3369,14 +3632,8 @@ private fun BottomSpectrumStage(
         val barW = (slot * 0.52f).coerceAtLeast(1.dp.toPx())
         val maxH = h * 0.82f
         val minBar = 1.5.dp.toPx()
-        val realFresh = levels.size == SPECTRUM_BAND_COUNT &&
-            (SystemClock.uptimeMillis() - lastMusicAt) < SPECTRUM_REAL_WINDOW_MS
         for (i in 0 until SPECTRUM_BAND_COUNT) {
-            val target = when {
-                !playing -> 0f
-                realFresh -> levels[i]
-                else -> pseudoSpectrum(i, t)
-            }
+            val target = if (playing) levels.getOrElse(i) { 0f } else 0f
             val current = smooth[i]
             val k = if (target > current) attack else release
             smooth[i] = current + (target - current) * k
@@ -3402,16 +3659,4 @@ private fun BottomSpectrumStage(
             }
         }
     }
-}
-
-private fun pseudoSpectrum(i: Int, t: Float): Float {
-    val n = SPECTRUM_BAND_COUNT.toFloat()
-    val x = i / n
-    val a = 0.5f + 0.5f * kotlin.math.sin(t * 1.1f + x * 4.2f)
-    val b = 0.5f + 0.5f * kotlin.math.sin(t * 0.7f - x * 6.3f)
-    val c = 0.5f + 0.5f * kotlin.math.sin(t * 2.3f + i * 0.35f + kotlin.math.sin(t * 0.9f) * 2.0f)
-    val swell = 0.72f + 0.28f * (0.5f + 0.5f * kotlin.math.sin(t * 1.7f + kotlin.math.sin(t * 0.23f) * 3.0f))
-    val base = (0.30f * a + 0.30f * b + 0.40f * c) * swell
-    val shape = 0.55f + 0.45f * kotlin.math.sin(x * kotlin.math.PI.toFloat())
-    return (base * shape).coerceIn(0.05f, 1f)
 }
