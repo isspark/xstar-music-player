@@ -1,9 +1,12 @@
 package life.xstar.music.player.data.lyrics
 
 private val timestamp = Regex("\\[(\\d{1,3}):(\\d{2})(?:[.:](\\d{1,3}))?\\]")
+private val offset = Regex("\\[offset\\s*:\\s*(-?\\d+)\\]", RegexOption.IGNORE_CASE)
 
 object LrcParser {
-    fun parse(content: String): List<LyricLine> = content
+    fun parse(content: String): List<LyricLine> {
+        val shift = offset.find(content)?.groupValues?.getOrNull(1)?.toLongOrNull() ?: 0L
+        return content
         .removePrefix("\uFEFF")
         .lineSequence()
         .flatMap { line ->
@@ -11,12 +14,13 @@ object LrcParser {
             if (matches.isEmpty()) emptySequence()
             else {
                 val text = line.substring(matches.last().range.last + 1).trim()
-                matches.asSequence().map { match -> LyricLine(parseTime(match), text) }
+                matches.asSequence().map { match -> LyricLine((parseTime(match) + shift).coerceAtLeast(0), text) }
             }
         }
         .filter { it.text.isNotBlank() }
         .sortedBy { it.timeMs }
         .toList()
+    }
 
     private fun parseTime(match: MatchResult): Long {
         val minutes = match.groupValues[1].toLong()

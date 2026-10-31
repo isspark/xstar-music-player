@@ -2,6 +2,7 @@ package life.xstar.music.player.data.repository
 
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlinx.coroutines.delay
 
 object HttpArtworkClient {
     fun getText(address: String): String? = runCatching {
@@ -19,4 +20,14 @@ object HttpArtworkClient {
             connection.disconnect()
         }
     }.getOrNull()
+
+    suspend fun getTextRetry(address: String, attempts: Int = 3): String? {
+        var result: String? = null
+        repeat(attempts.coerceAtLeast(1)) { attempt ->
+            result = getText(address)
+            if (result != null) return result
+            if (attempt + 1 < attempts) delay(300L shl attempt)
+        }
+        return result
+    }
 }

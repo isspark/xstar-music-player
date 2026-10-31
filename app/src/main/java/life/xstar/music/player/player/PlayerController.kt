@@ -262,7 +262,12 @@ class PlayerController(context: Context) {
         .setMediaId(mediaStoreId.toString())
         .setUri(uri)
         .setMediaMetadata(MediaMetadata.Builder().setTitle(title).setArtist(artist).setAlbumTitle(album).apply {
-            albumArtUri?.let { setArtworkUri(if (it.startsWith("content://") || it.startsWith("file://")) Uri.parse(it) else Uri.fromFile(File(it))) }
+            albumArtUri?.let {
+                setArtworkUri(
+                    if (it.startsWith("content://") || it.startsWith("file://") || it.startsWith("http://") || it.startsWith("https://")) Uri.parse(it)
+                    else Uri.fromFile(File(it))
+                )
+            }
         }.build())
         .build()
 }

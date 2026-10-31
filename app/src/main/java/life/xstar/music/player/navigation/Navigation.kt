@@ -39,6 +39,9 @@ data object EqualizerRoute : NavKey
 data object SettingsRoute : NavKey
 
 @Serializable
+data object AppearanceRoute : NavKey
+
+@Serializable
 data object SingingHistoryRoute : NavKey
 
 val startRoute: NavKey = PlayerRoute
@@ -51,6 +54,7 @@ val topLevelRoutes: Set<NavKey> = setOf(
     OnlineRoute,
     EqualizerRoute,
     SettingsRoute,
+    AppearanceRoute,
     SingingHistoryRoute
 )
 

@@ -7,8 +7,9 @@ import android.graphics.BitmapFactory
 import android.graphics.Bitmap
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
-import java.net.URLEncoder
-import org.json.JSONObject
+import life.xstar.music.player.data.artwork.ArtworkCandidate
+import life.xstar.music.player.data.artwork.ArtworkHttp
+import life.xstar.music.player.data.artwork.ArtworkProviderChain
 import life.xstar.music.player.data.local.*
 import life.xstar.music.player.data.audio.AudioAnalyzer
 import life.xstar.music.player.data.audio.stableSongId
@@ -19,6 +20,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 
 class MusicRepository(private val context: Context, private val dao: SongDao, private val playlistDao: PlaylistDao, private val singingDao: SingingDao) {
+    private val artworkChain = ArtworkProviderChain()
+
     fun songs(): Flow<List<SongEntity>> = dao.observeSongs()
     fun search(query: String): Flow<List<SongEntity>> = dao.search(query)
     fun favorites(): Flow<List<SongEntity>> = dao.observeFavorites()
@@ -38,29 +41,12 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
 
     suspend fun getSong(id: Long): SongEntity? = dao.findById(id)
 
-    suspend fun findArtworkCandidates(artist: String, album: String): List<ArtworkCandidate> = withContext(Dispatchers.IO) {
-        if (artist == "未知艺术家" || album == "未知专辑") return@withContext emptyList()
-        val term = URLEncoder.encode("${artist.trim()} ${album.trim()}", "UTF-8")
-        val json = HttpArtworkClient.getText("https://itunes.apple.com/search?term=$term&entity=album&limit=10&country=cn")
-            ?: HttpArtworkClient.getText("https://itunes.apple.com/search?term=$term&entity=album&limit=10&country=us")
-            ?: return@withContext emptyList()
-        val results = JSONObject(json).optJSONArray("results") ?: return@withContext emptyList()
-        val candidates = mutableListOf<ArtworkCandidate>()
-        for (i in 0 until results.length()) {
-            val result = results.optJSONObject(i) ?: continue
-            val image = result.optString("artworkUrl100").replace("100x100", "600x600")
-            if (image.isNotBlank() && candidates.none { it.url == image }) {
-                val title = result.optString("collectionName", album)
-                val resultArtist = result.optString("artistName", artist)
-                val label = "$resultArtist · $title"
-                candidates += ArtworkCandidate(image, label)
-            }
-        }
-        candidates
-    }
+    suspend fun findArtworkCandidates(artist: String, album: String): List<ArtworkCandidate> = artworkChain.search(artist, album)
+
+    suspend fun findFirstArtwork(artist: String, album: String): ArtworkCandidate? = artworkChain.first(artist, album)
 
     suspend fun saveArtworkForAlbum(artist: String, album: String, candidate: ArtworkCandidate) = withContext(Dispatchers.IO) {
-        val bytes = getBytes(candidate.url) ?: return@withContext false
+        val bytes = ArtworkHttp.getBytes(candidate.url, refererFor(candidate)) ?: return@withContext false
         val artwork = cacheDownloadedArtwork(artist, album, bytes) ?: return@withContext false
         dao.updateArtworkForAlbum(artist, album, artwork)
         true
@@ -163,7 +149,11 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
     }
 
     private fun cacheDownloadedArtwork(artist: String, album: String, bytes: ByteArray): String? {
-        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val options = BitmapFactory.Options().apply { inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, 1024) }
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: return null
         val directory = File(context.cacheDir, "album_art").apply { mkdirs() }
         val file = File(directory, "online_${stableId("$artist\u0000$album")}.jpg")
         if (!file.exists()) file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 88, it) }
@@ -171,23 +161,22 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
         return file.absolutePath
     }
 
-    private fun getText(address: String): String? = HttpArtworkClient.getText(address)
+    private fun sampleSize(width: Int, height: Int, max: Int): Int {
+        var sample = 1
+        while (width / (sample * 2) >= max && height / (sample * 2) >= max) sample *= 2
+        return sample
+    }
 
-    private fun getBytes(address: String): ByteArray? = runCatching {
-        val connection = (java.net.URL(address).openConnection() as java.net.HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 8_000
-            readTimeout = 12_000
-            setRequestProperty("User-Agent", "XSTAR/0.1.0 (local-player)")
-        }
-        try { if (connection.responseCode !in 200..299) null else connection.inputStream.use { it.readBytes() } }
-        finally { connection.disconnect() }
-    }.getOrNull()
+    private fun refererFor(candidate: ArtworkCandidate): Map<String, String> = when (candidate.source) {
+        "网易云音乐" -> mapOf("Referer" to "https://music.163.com/")
+        "QQ音乐" -> mapOf("Referer" to "https://y.qq.com/")
+        "Bing 图片" -> mapOf("Referer" to "https://cn.bing.com/")
+        else -> emptyMap()
+    }
 
     private fun stableId(value: String): Long = stableSongId(value)
     suspend fun findByIds(ids: List<Long>): List<SongEntity> { val songs = dao.findByMediaIds(ids).associateBy { it.mediaStoreId }; return ids.mapNotNull(songs::get) }
     private fun String?.orDefault(default: String) = if (isNullOrBlank() || this == "<unknown>") default else this
 }
 
-data class ArtworkCandidate(val url: String, val label: String)
 data class ScanProgress(val fileName: String, val discovered: Int)

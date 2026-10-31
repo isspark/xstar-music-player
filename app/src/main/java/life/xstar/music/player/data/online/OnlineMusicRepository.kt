@@ -49,6 +49,28 @@ class OnlineMusicRepository(
 
     suspend fun findByOnlineId(onlineId: String): SongEntity? = dao.findByOnlineId(onlineId)
 
+    /** Resolve a search result without adding it to the local library. */
+    suspend fun resolveForPlayback(track: OnlineTrack): SongEntity {
+        val resolved = provider().resolveAudio(track.id)
+            ?: throw IllegalStateException("暂无可用的在线播放地址，该歌曲可能需要会员或受版权保护")
+        val artwork = runCatching { provider().albumPic(track.id) }.getOrNull()
+        return SongEntity(
+            mediaStoreId = stableSongId("online_play:${track.onlineId}"),
+            title = track.title,
+            artist = track.artist,
+            album = track.album,
+            durationMs = 0L,
+            uri = resolved.url,
+            mimeType = resolved.mimeType,
+            bitrate = resolved.br.toLong().takeIf { it > 0 },
+            fileSize = resolved.size.takeIf { it > 0 },
+            albumArtUri = artwork,
+            sourceFolderUri = "online:${track.platform}",
+            dateAdded = System.currentTimeMillis(),
+            onlineId = track.onlineId
+        )
+    }
+
     suspend fun markDownloadedIfAny(tracks: List<OnlineTrack>) {
         if (tracks.isEmpty()) return
         val present = dao.findOnlineIds(tracks.map { it.onlineId })

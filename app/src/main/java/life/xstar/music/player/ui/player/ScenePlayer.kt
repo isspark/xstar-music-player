@@ -39,6 +39,7 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.*
@@ -60,18 +61,18 @@ import life.xstar.music.player.data.local.SongEntity
 import life.xstar.music.player.data.lyrics.LyricsState
 import life.xstar.music.player.data.lyrics.LyricLine
 import life.xstar.music.player.data.preferences.PlayerTheme
+import life.xstar.music.player.data.preferences.LyricsMode
+import life.xstar.music.player.data.preferences.isSpatial
 import life.xstar.music.player.player.PlaybackMode
 import kotlin.math.*
 import kotlin.random.Random
 
-private data class ScenePalette(val background: Color, val ink: Color, val accent: Color)
+internal data class ScenePalette(val background: Color, val ink: Color, val accent: Color)
 private fun PlayerTheme.palette() = when (this) {
     PlayerTheme.Orbital -> ScenePalette(Color(0xFF100D1C), Color(0xFFF1EAFF), Color(0xFFC4B4FF))
     PlayerTheme.Theatre -> ScenePalette(Color(0xFF171512), Color(0xFFF7EDDB), Color(0xFFEDCF95))
-    PlayerTheme.Momo -> ScenePalette(Color(0xFFE7EDDF), Color(0xFF304735), Color(0xFF728A53))
     PlayerTheme.Liquid -> ScenePalette(Color(0xFF161329), Color(0xFFF7EAF4), Color(0xFFE5BCD7))
     PlayerTheme.Tape -> ScenePalette(Color(0xFFEAE4D9), Color(0xFF3B4038), Color(0xFFA77533))
-    PlayerTheme.NightTrain -> ScenePalette(Color(0xFF0E1D23), Color(0xFFDCECE6), Color(0xFFB2D1C9))
     PlayerTheme.Classic -> ScenePalette(Color(0xFF090B10), Color.White, Color(0xFF78A9FF))
 }
 
@@ -85,7 +86,7 @@ fun PlayerThemePicker(selected: PlayerTheme, onSelect: (PlayerTheme) -> Unit, on
             items(PlayerTheme.entries, key = { it.name }) { theme ->
                 val palette = theme.palette()
                 ListItem(
-                    headlineContent = { Text(theme.title, color = if (selected == theme) palette.accent else Color.White) },
+                    headlineContent = { Text(theme.title, color = if (selected == theme) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface) },
                     supportingContent = { Text(theme.subtitle, color = Color(0xFF969FAE), fontSize = 12.sp) },
                     leadingContent = {
                         Canvas(Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(palette.background)) {
@@ -94,7 +95,7 @@ fun PlayerThemePicker(selected: PlayerTheme, onSelect: (PlayerTheme) -> Unit, on
                             if (theme == PlayerTheme.Liquid) drawCircle(palette.background, 3.dp.toPx())
                         }
                     },
-                    trailingContent = { if (selected == theme) Icon(Icons.Default.Check, "已选择", tint = palette.accent) },
+                    trailingContent = { if (selected == theme) Icon(Icons.Default.Check, "已选择", tint = MaterialTheme.colorScheme.primary) },
                     colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                     modifier = Modifier.clip(RoundedCornerShape(16.dp)).clickable { onSelect(theme); onDismiss() }
                 )
@@ -115,9 +116,11 @@ fun ScenePlayer(
     onMenu: () -> Unit, onTheme: (PlayerTheme) -> Unit, onToggle: () -> Unit,
     onPrevious: () -> Unit, onNext: () -> Unit, onSeek: (Long) -> Unit,
     onFavorite: () -> Unit, onQueue: () -> Unit, onMode: () -> Unit,
-    onDetails: () -> Unit, onFindLyrics: () -> Unit, onLyrics: () -> Unit
+    onDetails: () -> Unit, onFindLyrics: () -> Unit, onLyrics: () -> Unit,
+    lyricsMode: LyricsMode = LyricsMode.Normal,
+    backgroundContent: @Composable () -> Unit = {}
 ) {
-    val palette = theme.palette()
+    val palette = theme.palette().copy(accent = MaterialTheme.colorScheme.primary)
     val background by animateColorAsState(palette.background, tween(500), label = "sceneBackground")
     val motionEnabled = ValueAnimator.areAnimatorsEnabled()
     val effects = remember(theme) { mutableStateListOf<TouchEffect>() }
@@ -155,10 +158,12 @@ fun ScenePlayer(
     val timed = lines.any { it.timeMs != null }
     val currentLine = if (timed) lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= position }.coerceAtLeast(0) else 0
     var browseLine by remember(song?.mediaStoreId, lyrics) { mutableStateOf<Int?>(null) }
-    val focusedLine = browseLine ?: currentLine
+    val previewLine = if (theme == PlayerTheme.Theatre && localSeek != null && timed)
+        lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= (fraction * duration).toLong() }.coerceAtLeast(0) else null
+    val focusedLine = previewLine ?: browseLine ?: currentLine
     LaunchedEffect(browseLine) { if (browseLine != null) { delay(4500); browseLine = null } }
     LaunchedEffect(theme, focusedLine) {
-        if (theme == PlayerTheme.Theatre && lines.isNotEmpty() && motionEnabled) effects.add(TouchEffect("lyrics", Offset(.5f, .44f), nowMs(), focusedLine))
+        if (lyricsMode == LyricsMode.Normal && theme == PlayerTheme.Theatre && lines.isNotEmpty() && motionEnabled) effects.add(TouchEffect("lyrics", Offset(.5f, .44f), nowMs(), focusedLine))
     }
     LaunchedEffect(metadataPulse, song?.mediaStoreId) {
         if (motionEnabled) { titleBounce.snapTo(1f); titleBounce.animateTo(0f, tween(850)) }
@@ -181,10 +186,12 @@ fun ScenePlayer(
     val currentBrowse by rememberUpdatedState<(Int) -> Unit>(::browse)
     val currentDuration by rememberUpdatedState(duration)
     BoxWithConstraints(Modifier.fillMaxSize().background(background)) {
+        backgroundContent()
         val compact = maxHeight < 650.dp
         val pageHeight = maxHeight
         // Anchors stay independent of metadata length, missing lyrics and lyric changes.
-        val sceneHeight = maxHeight * .50f
+        val sceneHeight = maxHeight * if (theme == PlayerTheme.Theatre) .67f else .50f
+        val fullScreenLight = lyricsMode == LyricsMode.ForestLight && lines.isNotEmpty()
         Canvas(Modifier.fillMaxSize()) {
             if (theme == PlayerTheme.Orbital || theme == PlayerTheme.Liquid || theme == PlayerTheme.Theatre) {
                 drawRect(Brush.radialGradient(listOf(palette.accent.copy(alpha = if (theme == PlayerTheme.Theatre) .09f else .18f), Color.Transparent), Offset(size.width * .65f, size.height * .48f), size.width))
@@ -196,12 +203,15 @@ fun ScenePlayer(
             }
         }
             Box(
-                Modifier.offset(y = pageHeight * .23f).fillMaxWidth().height(sceneHeight).semantics {
+                Modifier.offset(y = if (fullScreenLight) 0.dp else pageHeight * .23f)
+                    .fillMaxWidth().height(if (fullScreenLight) pageHeight else sceneHeight).semantics {
                     contentDescription = "${theme.title}场景，轻触播放或暂停，左右滑动切歌，长按体验互动"
                     onClick(label = if (playing) "暂停" else "播放") { currentToggle(); true }
                     progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
                     setProgress { value -> if (currentDuration > 0) currentSeek((value.coerceIn(0f, 1f) * currentDuration).toLong()); true }
-                }.pointerInput(theme, song?.mediaStoreId) {
+                }.pointerInput(theme, song?.mediaStoreId, lyricsMode) {
+                    // Non-normal modes use the topmost unified playback surface below.
+                    if (lyricsMode != LyricsMode.Normal) return@pointerInput
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         val start = down.position
@@ -210,7 +220,7 @@ fun ScenePlayer(
                         var cancelled = false
                         val contour = sceneContour(theme, Size(size.width.toFloat(), size.height.toFloat()))
                         val nearest = nearestOnContour(contour, point)
-                        val seekGesture = nearest.second < 20.dp.toPx() && currentDuration > 0
+                        val seekGesture = theme != PlayerTheme.Theatre && nearest.second < 20.dp.toPx() && currentDuration > 0
                         var lastTrail = 0L
                         fun normalize(p: Offset) = Offset(p.x / size.width, p.y / size.height)
                         if (seekGesture) { down.consume(); localSeek = nearest.first }
@@ -218,7 +228,6 @@ fun ScenePlayer(
                             val event = withTimeoutOrNull(45L) { awaitPointerEvent() }
                             val change = event?.changes?.firstOrNull { it.id == down.id }
                             if (change != null) point = change.position
-                            if (change?.isConsumed == true && !seekGesture && !longPress) { cancelled = true; break }
                             if (seekGesture) {
                                 localSeek = nearestOnContour(contour, point).first
                                 change?.consume()
@@ -229,15 +238,12 @@ fun ScenePlayer(
                                 when (theme) {
                                     PlayerTheme.Orbital -> addEffect("meteor", normalize(point))
                                     PlayerTheme.Theatre -> addEffect("lyrics", normalize(point))
-                                    PlayerTheme.Momo -> addEffect("feed", Offset(.5f, .43f))
                                     PlayerTheme.Liquid -> addEffect("ink", normalize(point))
                                     PlayerTheme.Tape -> { sideB = !sideB; addEffect("flip", normalize(point)) }
-                                    PlayerTheme.NightTrain -> addEffect("fog", normalize(point))
                                     else -> Unit
                                 }
                             } else if (longPress && nowMs() - lastTrail > 40) {
                                 change?.consume()
-                                if (theme == PlayerTheme.NightTrain) addEffect("fog", normalize(point))
                                 if (theme == PlayerTheme.Liquid) addEffect("ink", normalize(point))
                                 lastTrail = nowMs()
                             }
@@ -259,48 +265,107 @@ fun ScenePlayer(
                     }
                 }, contentAlignment = Alignment.Center
             ) {
-                SceneArtwork(theme, song?.albumArtUri, palette, playing, motionTime, rotation.value, sideB, effects.any { it.kind == "feed" && clock - it.born < 850 }, effects.any { it.kind == "flip" && clock - it.born < 600 })
-                if (theme == PlayerTheme.Theatre) {
+                if (lyricsMode == LyricsMode.ForestLight && lines.isNotEmpty()) {
+                    SpatialLyrics(lines, currentLine, position, playing, lyricsMode, palette.accent, palette.ink,
+                        Modifier.fillMaxSize())
+                } else SceneArtwork(theme, song?.albumArtUri, palette, playing, motionTime, rotation.value, sideB, effects.any { it.kind == "feed" && clock - it.born < 850 }, effects.any { it.kind == "flip" && clock - it.born < 600 })
+                if (theme == PlayerTheme.Theatre && (lyricsMode != LyricsMode.ForestLight || lines.isEmpty())) {
                     if (lines.isNotEmpty()) {
-                        Box(Modifier.fillMaxSize().padding(horizontal = 30.dp, vertical = 55.dp).pointerInput(lines) {
-                            awaitPointerEventScope {
-                                while (true) {
-                                    val event = awaitPointerEvent()
-                                    if (event.type == PointerEventType.Scroll) {
-                                        val dy = event.changes.sumOf { it.scrollDelta.y.toDouble() }
-                                        if (dy != 0.0) { currentBrowse(if (dy > 0) 1 else -1); event.changes.forEach { it.consume() } }
+                        if (lyricsMode == LyricsMode.DensityMap) {
+                            WholeLyricsStage(lines, focusedLine, LyricsMode.DensityMap, playing, position, palette,
+                                Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 8.dp),
+                                onLine = { index -> browseLine = index; lines[index].timeMs?.let(onSeek) })
+                        } else if (lyricsMode.isSpatial) {
+                            SpatialLyrics(lines, focusedLine, position, playing, lyricsMode, palette.accent, palette.ink,
+                                Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 8.dp))
+                        } else if (lyricsMode == LyricsMode.Firework) {
+                            FireworkLyrics(lines, focusedLine, position, playing, palette.accent, palette.ink,
+                                Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 8.dp).pointerInput(Unit) {
+                                    awaitEachGesture {
+                                        val down = awaitFirstDown(pass = PointerEventPass.Initial)
+                                        down.consume()
+                                        val start = down.position
+                                        var dragged = false
+                                        while (true) {
+                                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                             val delta = change.position - start
+                                            if (delta.getDistance() > viewConfiguration.touchSlop) dragged = true
+                                            change.consume()
+                                            if (!change.pressed) {
+                                                when {
+                                                    dragged && abs(delta.x) > 55.dp.toPx() && abs(delta.x) > abs(delta.y) ->
+                                                        if (delta.x < 0) currentNext() else currentPrevious()
+                                                    !dragged -> currentToggle()
+                                                }
+                                                break
+                                            }
+                                        }
                                     }
-                                }
-                            }
-                        }) {
-                            ThreeLineLyrics(lines, focusedLine, palette, theatre = true, motionEnabled = motionEnabled, playing = playing, animationTime = motionTime,
-                                modifier = Modifier.align(Alignment.Center).fillMaxWidth(), onLine = { index -> browseLine = index; lines[index].timeMs?.let(onSeek) })
-                        }
+                                })
+                        } else if (lyricsMode == LyricsMode.RiftFall) {
+                            RiftTheatreLyrics(lines, focusedLine, position, playing, palette.accent, palette.ink,
+                                Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 8.dp),
+                                onLine = { index -> browseLine = index; lines[index].timeMs?.let(onSeek) },
+                                onToggle = onToggle, onPrevious = onPrevious, onNext = onNext)
+                        } else if (lyricsMode == LyricsMode.PopBounce) {
+                            PopBounceLyrics(lines, focusedLine, position, playing, palette.accent, palette.ink,
+                                Modifier.fillMaxSize().padding(horizontal = 30.dp, vertical = 8.dp),
+                                onLine = { index -> browseLine = index; lines[index].timeMs?.let(onSeek) })
+                        } else TheatreLyricsStage(lines, focusedLine, playing, lyricsMode, palette,
+                            Modifier.fillMaxSize().padding(horizontal = 30.dp, vertical = 8.dp),
+                            onLine = { index -> browseLine = index; lines[index].timeMs?.let(onSeek) },
+                            onToggle = onToggle, onPrevious = onPrevious, onNext = onNext)
                     } else Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(32.dp)) {
                         Text(when (lyrics) { LyricsState.Loading -> "正在寻找这首歌的文字…"; is LyricsState.Error -> lyrics.message; is LyricsState.Candidates -> "找到歌词，选择一个版本"; else -> "让每一句，都有光。" }, color = palette.accent, fontSize = 22.sp, textAlign = TextAlign.Center)
                         Text(if (lyrics == LyricsState.Loading) "" else "暂未找到歌词", color = palette.accent.copy(alpha = .4f), fontSize = 12.sp, modifier = Modifier.padding(top = 16.dp))
                     }
                 }
-                Canvas(Modifier.fillMaxSize()) { drawSceneProgress(theme, palette.accent, fraction) }
+                if (theme != PlayerTheme.Theatre && lyricsMode != LyricsMode.ForestLight) Canvas(Modifier.fillMaxSize()) { drawSceneProgress(theme, palette.accent, fraction) }
                 Canvas(Modifier.fillMaxSize()) { effects.forEach { drawTouchEffect(it, clock, palette.accent, motionEnabled) } }
-                androidx.compose.animation.AnimatedVisibility(visible = localSeek != null,
+                androidx.compose.animation.AnimatedVisibility(visible = localSeek != null && theme != PlayerTheme.Theatre,
                     modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 6.dp)) {
                     Text("${formatSceneTime((fraction * duration).toLong())}  /  ${formatSceneTime(duration)}", color = palette.ink.copy(alpha = .75f), fontSize = 10.sp, letterSpacing = 1.sp,
                         modifier = Modifier.semantics { contentDescription = "播放进度 ${formatSceneTime(position)}，总时长 ${formatSceneTime(duration)}" })
                 }
+                if (lyricsMode != LyricsMode.Normal) LyricsPlaybackTouchSurface(
+                    playing, onToggle, onPrevious, onNext, Modifier.matchParentSize())
             }
-            if (theme != PlayerTheme.Theatre) {
+            if (theme != PlayerTheme.Theatre && (lyricsMode != LyricsMode.ForestLight || lines.isEmpty())) {
               Box(Modifier.offset(y = pageHeight * .78f - 48.dp).fillMaxWidth().height(96.dp), contentAlignment = Alignment.Center) {
-                if (lines.isNotEmpty()) ThreeLineLyrics(lines, currentLine, palette, theatre = false, motionEnabled = motionEnabled,
+                   if (lines.isNotEmpty() && lyricsMode.isSpatial) SpatialLyrics(lines, currentLine, position, playing, lyricsMode, palette.accent, palette.ink,
+                       Modifier.fillMaxSize().padding(horizontal = 20.dp), compact = true,
+                       onToggle = onToggle, onPrevious = onPrevious, onNext = onNext)
+                   else if (lines.isNotEmpty() && lyricsMode == LyricsMode.Firework) FireworkLyrics(lines, currentLine, position, playing, palette.accent, palette.ink,
+                       Modifier.fillMaxSize().padding(horizontal = 20.dp), compact = true)
+                   else if (lines.isNotEmpty() && lyricsMode == LyricsMode.RiftFall) RiftFallLyrics(lines, currentLine, position, playing, palette.accent, palette.ink,
+                      Modifier.fillMaxSize().padding(horizontal = 20.dp), compact = true, onLine = { index -> lines[index].timeMs?.let(onSeek) })
+                  else if (lines.isNotEmpty() && lyricsMode == LyricsMode.PopBounce) PopBounceLyrics(lines, currentLine, position, playing, palette.accent, palette.ink,
+                     Modifier.fillMaxSize().padding(horizontal = 20.dp), compact = true, onLine = { index -> lines[index].timeMs?.let(onSeek) })
+                 else if (lines.isNotEmpty() && lyricsMode == LyricsMode.NeonStorm) NeonStormLyrics(lines, currentLine, playing, palette.accent, palette.ink,
+                    Modifier.fillMaxSize().padding(horizontal = 20.dp), compact = true, onLine = { index -> lines[index].timeMs?.let(onSeek) })
+                else if (lines.isNotEmpty()) ThreeLineLyrics(lines, currentLine, palette, theatre = false, motionEnabled = motionEnabled,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp), onLine = { index -> lines[index].timeMs?.let(onSeek) })
                 else Box(Modifier.fillMaxWidth().height(96.dp), contentAlignment = Alignment.Center) {
                     Text(when (lyrics) { LyricsState.Loading -> "正在加载歌词…"; is LyricsState.Candidates -> "点击选择歌词版本"; else -> "暂无歌词 · 点击查找" },
                         color = palette.ink.copy(alpha = .35f), fontSize = 12.sp,
                         modifier = Modifier.clickable { if (lyrics is LyricsState.Candidates) onLyrics() else onFindLyrics() }.padding(12.dp))
-                }
-              }
+                 }
+                 if (lyricsMode != LyricsMode.Normal && lines.isNotEmpty()) LyricsPlaybackTouchSurface(
+                     playing, onToggle, onPrevious, onNext, Modifier.matchParentSize())
+               }
             }
-            Column(Modifier.offset(y = pageHeight * .15f - 27.dp).fillMaxWidth().padding(horizontal = 32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            if (theme == PlayerTheme.Theatre) {
+                TheatreTitleProgress(
+                    title = song?.title ?: "选择一首歌曲",
+                    artist = song?.let { listOf(it.artist, it.album).filter(String::isNotBlank).joinToString(" · ") } ?: "从音乐库开始播放",
+                    fraction = fraction, position = (fraction * duration).toLong(), duration = duration,
+                    scrubbing = localSeek != null, palette = palette, compact = compact,
+                    motionEnabled = motionEnabled, onPreview = { localSeek = it },
+                    onSeek = { browseLine = null; onSeek(it) }, onDetails = onDetails,
+                    modifier = Modifier.offset(y = pageHeight * .15f - 27.dp).fillMaxWidth().padding(horizontal = 32.dp)
+                )
+            } else Column(Modifier.offset(y = pageHeight * .15f - 27.dp).fillMaxWidth().padding(horizontal = 32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(song?.title ?: "选择一首歌曲", color = palette.ink.copy(alpha = .9f), fontSize = if (compact) 21.sp else 23.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
                         modifier = Modifier.graphicsLayer { translationY = -sin(titleBounce.value * PI).toFloat() * 10f; rotationZ = sin(titleBounce.value * PI * 2).toFloat() * 2f }.clickable {
                             captionIndex++; captionVisible = true; metadataPulse++; addEffect("love", Offset(.5f, .8f))
@@ -325,20 +390,188 @@ fun ScenePlayer(
 }
 
 private fun formatSceneTime(value: Long): String { val seconds = value.coerceAtLeast(0) / 1000; return "%d:%02d".format(seconds / 60, seconds % 60) }
-/** A clipped three-row viewport: keyed lines keep their identity as focus advances. */
+
+@Composable
+private fun TheatreLyricsStage(
+    lines: List<LyricLine>, focused: Int, playing: Boolean, lyricsMode: LyricsMode,
+    palette: ScenePalette, modifier: Modifier = Modifier, onLine: (Int) -> Unit,
+    onToggle: () -> Unit, onPrevious: () -> Unit, onNext: () -> Unit
+) {
+    val latestFocused by rememberUpdatedState(focused)
+    val latestLine by rememberUpdatedState(onLine)
+    val latestToggle by rememberUpdatedState(onToggle)
+    val latestPrevious by rememberUpdatedState(onPrevious)
+    val latestNext by rememberUpdatedState(onNext)
+    val first = (focused - 4).coerceIn(0, (lines.size - 10).coerceAtLeast(0))
+    BoxWithConstraints(modifier.clip(RoundedCornerShape(8.dp)).pointerInput(lines) {
+        awaitEachGesture {
+            // Own the entire stage gesture before the scene and lyric effects see it.
+            val down = awaitFirstDown(pass = PointerEventPass.Initial)
+            down.consume()
+            val start = down.position
+            val initialLine = latestFocused
+            var lastLine = initialLine
+            var direction = 0
+            try {
+                while (true) {
+                    val event = awaitPointerEvent(PointerEventPass.Initial)
+                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                    val delta = change.position - start
+                    if (direction == 0 && delta.getDistance() > viewConfiguration.touchSlop) {
+                        direction = if (abs(delta.y) >= abs(delta.x)) 1 else 2
+                    }
+                    change.consume()
+                    if (direction == 1) {
+                        val rowHeight = minOf(size.height / 11f, 34.dp.toPx()).coerceAtLeast(1f)
+                        val target = (initialLine - (delta.y / rowHeight).roundToInt()).coerceIn(0, lines.lastIndex)
+                        if (target != lastLine) { lastLine = target; latestLine(target) }
+                    }
+                    if (!change.pressed) {
+                        if (direction == 0) latestToggle()
+                        else if (direction == 2 && abs(delta.x) > 55.dp.toPx()) {
+                            if (delta.x < 0) latestNext() else latestPrevious()
+                        }
+                        break
+                    }
+                }
+            } finally {
+                // Playback already follows each crossed lyric; cancellation needs no seek.
+            }
+        }
+    }) {
+        val rowHeight = minOf(maxHeight / 11, 34.dp)
+        Column(Modifier.fillMaxWidth().align(Alignment.Center)) {
+            (first until minOf(first + 10, lines.size)).forEach { index ->
+                key(index) {
+                    val distance = abs(index - focused)
+                    val opacity = when (distance) { 0 -> 1f; 1 -> .75f; 2 -> .60f; 3 -> .48f; else -> .36f }
+                    Box(Modifier.fillMaxWidth().height(if (index == focused) rowHeight * 2 else rowHeight).semantics {
+                        contentDescription = lines[index].text
+                        if (lines[index].timeMs != null) onClick("播放这一句") { latestLine(index); true }
+                    }, contentAlignment = Alignment.Center) {
+                        if (index == focused) {
+                            // Flip a second rendering vertically: the gradient fades away from the mirror edge.
+                            Text(lines[index].text.ifBlank { "♪" },
+                                fontSize = 29.sp, fontWeight = FontWeight.SemiBold,
+                                textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                style = TextStyle(brush = Brush.verticalGradient(listOf(Color.Transparent, palette.accent.copy(alpha = .25f)))),
+                                modifier = Modifier.fillMaxWidth().offset(y = 22.dp).graphicsLayer { scaleY = -1f })
+                        }
+                        if (index == focused && lyricsMode == LyricsMode.NeonStorm) {
+                             NeonStormLyrics(listOf(lines[index]), 0, playing, palette.accent, palette.ink,
+                                Modifier.fillMaxWidth().height(rowHeight * 1.4f).offset(y = (-8).dp), compact = false)
+                        } else Text(lines[index].text.ifBlank { "♪" },
+                            color = if (index == focused) palette.accent else palette.ink.copy(alpha = opacity),
+                            fontSize = if (index == focused) 29.sp else 15.sp,
+                            fontWeight = if (index == focused) FontWeight.SemiBold else FontWeight.Normal,
+                            textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().offset(y = if (index == focused) (-8).dp else 0.dp),
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** The song's name is the timeline: a warm spotlight reveals it as playback advances. */
+@Composable
+private fun TheatreTitleProgress(
+    title: String, artist: String, fraction: Float, position: Long, duration: Long,
+    scrubbing: Boolean, palette: ScenePalette, compact: Boolean, motionEnabled: Boolean,
+    onPreview: (Float?) -> Unit, onSeek: (Long) -> Unit, onDetails: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var titleWidth by remember(title) { mutableFloatStateOf(0f) }
+    var hint by remember(title) { mutableStateOf(false) }
+    val density = LocalDensity.current
+    val trackWidth = maxOf(with(density) { 180.dp.toPx() }, titleWidth)
+    val latestPreview by rememberUpdatedState(onPreview)
+    val latestSeek by rememberUpdatedState(onSeek)
+    val latestTrackWidth by rememberUpdatedState(trackWidth)
+    val emphasis by animateFloatAsState(if (scrubbing) 1f else 0f, tween(if (motionEnabled) 200 else 0), label = "titleScrub")
+    val gold = palette.accent
+    LaunchedEffect(hint) { if (hint) { delay(2800); hint = false } }
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(Modifier.fillMaxWidth().semantics(mergeDescendants = true) {
+            contentDescription = "$title，滑动歌名调整进度"
+            stateDescription = "${formatSceneTime(position)}，总时长 ${formatSceneTime(duration)}"
+            progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
+            if (duration > 0) setProgress { value -> latestSeek((value.coerceIn(0f, 1f) * duration).toLong()); true }
+            else disabled()
+        }.pointerInput(title, duration) {
+            if (duration <= 0) return@pointerInput
+            awaitEachGesture {
+                val down = awaitFirstDown()
+                down.consume()
+                var dragging = false
+                fun fractionAt(x: Float): Float {
+                    val width = latestTrackWidth.coerceAtMost(size.width.toFloat()).coerceAtLeast(1f)
+                    return ((x - (size.width - width) / 2) / width).coerceIn(0f, 1f)
+                }
+                try {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (abs(change.position.x - down.position.x) > viewConfiguration.touchSlop) dragging = true
+                        if (dragging) { hint = false; latestPreview(fractionAt(change.position.x)) }
+                        change.consume()
+                        if (!change.pressed) {
+                            if (dragging) latestSeek((fractionAt(change.position.x) * duration).toLong()) else hint = true
+                            break
+                        }
+                    }
+                } finally {
+                    latestPreview(null)
+                }
+            }
+        }, horizontalAlignment = Alignment.CenterHorizontally) {
+            val edge = fraction.coerceIn(0f, 1f)
+            Text(title, fontSize = if (compact) 23.sp else 26.sp, fontWeight = FontWeight.Medium,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
+                onTextLayout = { titleWidth = it.size.width.toFloat() },
+                style = TextStyle(brush = Brush.horizontalGradient(
+                    0f to gold, maxOf(0f, edge - .035f) to gold,
+                    edge to androidx.compose.ui.graphics.lerp(gold, Color.White, .65f),
+                    minOf(1f, edge + .035f) to palette.ink.copy(alpha = .48f),
+                    1f to palette.ink.copy(alpha = .48f), endX = titleWidth.coerceAtLeast(1f))),
+                 modifier = Modifier.padding(top = 8.dp).clickable(onClick = onDetails))
+            Canvas(Modifier.width(with(density) { trackWidth.toDp() }).height(22.dp)) {
+                val head = Offset(size.width * fraction, center.y)
+                drawLine(gold.copy(alpha = .10f), Offset(0f, center.y), Offset(size.width, center.y), .6.dp.toPx(), StrokeCap.Round)
+                if (fraction > 0f) drawLine(gold.copy(alpha = .45f + emphasis * .35f), Offset(0f, center.y), head,
+                    (.9f + emphasis).dp.toPx(), StrokeCap.Round)
+                val radius = (8f + emphasis * 6f).dp.toPx()
+                drawCircle(Brush.radialGradient(listOf(gold.copy(alpha = .22f + emphasis * .15f), Color.Transparent), head, radius), radius, head)
+                drawCircle(gold.copy(alpha = .6f + emphasis * .4f), (1.2f + emphasis * 1.8f).dp.toPx(), head)
+            }
+        }
+        Box(Modifier.fillMaxWidth().height(20.dp), contentAlignment = Alignment.Center) {
+            Text(if (scrubbing) "${formatSceneTime(position)}  /  ${formatSceneTime(duration)}" else artist,
+                color = if (scrubbing) gold else palette.ink.copy(alpha = .4f), fontSize = 11.sp,
+                 maxLines = 1, overflow = TextOverflow.Ellipsis, letterSpacing = if (scrubbing) 1.sp else 0.sp,
+                 modifier = Modifier.clickable(onClick = onDetails))
+        }
+        Box(Modifier.height(24.dp), contentAlignment = Alignment.Center) {
+            Text(if (hint) "左右滑动歌名，调整播放进度" else if (scrubbing) "松手，唱到这一句" else "${formatSceneTime(position)}  /  ${formatSceneTime(duration)}",
+                color = gold.copy(alpha = if (hint || scrubbing) .7f else .32f), fontSize = 9.sp, letterSpacing = .8.sp)
+        }
+    }
+}
+/** Keyed lines keep their identity as focus advances; the theatre opens a five-row stage. */
 @Composable private fun ThreeLineLyrics(lines: List<LyricLine>, focused: Int, palette: ScenePalette, theatre: Boolean,
     motionEnabled: Boolean, playing: Boolean = false, animationTime: Float = 0f,
     modifier: Modifier = Modifier, onLine: (Int) -> Unit) {
-    val rowHeight = if (theatre) 72.dp else 32.dp
+    val rowHeight = if (theatre) 56.dp else 32.dp
+    val visibleRadius = if (theatre) 2 else 1
     val density = LocalDensity.current
-    Box(modifier.height(rowHeight * 3).clip(RoundedCornerShape(8.dp))) {
+    Box(modifier.height(rowHeight * (visibleRadius * 2 + 1)).clip(RoundedCornerShape(8.dp))) {
         // One extra item on each side allows outgoing lines to animate beyond the clip.
-        (maxOf(0, focused - 2)..minOf(lines.lastIndex, focused + 2)).forEach { index ->
+        (maxOf(0, focused - visibleRadius - 1)..minOf(lines.lastIndex, focused + visibleRadius + 1)).forEach { index ->
             key(index) {
                 val distance = index - focused
                 val offset by animateFloatAsState(distance.toFloat(), tween(if (motionEnabled) 550 else 0), label = "threeLineOffset")
-                val opacity by animateFloatAsState(when (abs(distance)) { 0 -> 1f; 1 -> .36f; else -> 0f }, tween(if (motionEnabled) 450 else 0), label = "threeLineOpacity")
-                val scale by animateFloatAsState(if (distance == 0) 1f else if (theatre) .76f else .92f, tween(if (motionEnabled) 600 else 0), label = "threeLineScale")
+                val opacity by animateFloatAsState(when (abs(distance)) { 0 -> 1f; 1 -> if (theatre) .55f else .36f; 2 -> if (theatre) .34f else 0f; else -> 0f }, tween(if (motionEnabled) 450 else 0), label = "threeLineOpacity")
+                val scale by animateFloatAsState(if (distance == 0) 1f else if (theatre) { if (abs(distance) == 1) .78f else .66f } else .92f, tween(if (motionEnabled) 600 else 0), label = "threeLineScale")
                 val focus by animateFloatAsState(if (distance == 0) 1f else 0f, tween(if (motionEnabled) 600 else 0), label = "lyricFlameFocus")
                 var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
                 val burning = theatre && playing && motionEnabled
@@ -348,20 +581,18 @@ private fun formatSceneTime(value: Long): String { val seconds = value.coerceAtL
                     fontSize = if (theatre) 29.sp else 15.sp, fontWeight = if (theatre) FontWeight.SemiBold else if (distance == 0) FontWeight.Medium else FontWeight.Normal,
                     textAlign = if (theatre) TextAlign.Start else TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     style = if (theatre && distance == 0) TextStyle(
-                        brush = Brush.linearGradient(listOf(Color(0xFFFF9C42), Color(0xFFFFF4CD), Color(0xFFF2BC6C)),
+                        brush = Brush.linearGradient(listOf(palette.accent, androidx.compose.ui.graphics.lerp(palette.accent, Color.White, .65f), palette.accent),
                             start = Offset(-180f + (animationTime * 65f % 500f), 0f), end = Offset(240f + (animationTime * 65f % 500f), 65f)),
-                        shadow = Shadow(Color(0xFFFFA04B).copy(alpha = glow * focus), Offset.Zero, 16f + glow * 12f)
+                        shadow = Shadow(palette.accent.copy(alpha = glow * focus), Offset.Zero, 16f + glow * 12f)
                     ) else TextStyle.Default,
                     onTextLayout = { layout = it },
                     modifier = Modifier.align(Alignment.Center).fillMaxWidth().height(rowHeight).graphicsLayer {
                         translationY = with(density) { rowHeight.toPx() } * offset
                         alpha = opacity; scaleX = scale; scaleY = scale
                         transformOrigin = androidx.compose.ui.graphics.TransformOrigin(if (theatre) 0f else .5f, .5f)
-                        if (theatre && android.os.Build.VERSION.SDK_INT >= 31 && abs(offset) > .5f)
-                            renderEffect = androidx.compose.ui.graphics.BlurEffect(abs(offset) * 1.1f, abs(offset) * 1.1f)
-                    }.semantics { if (abs(distance) > 1) hideFromAccessibility() }
-                        .clickable(enabled = abs(distance) <= 1 && lines[index].timeMs != null) { onLine(index) }
-                        .padding(top = if (theatre) 23.dp else 5.dp, bottom = if (theatre) 8.dp else 5.dp)
+                    }.semantics { if (abs(distance) > visibleRadius) hideFromAccessibility() }
+                        .clickable(enabled = abs(distance) <= visibleRadius && lines[index].timeMs != null) { onLine(index) }
+                        .padding(top = if (theatre) 14.dp else 5.dp, bottom = 5.dp)
                         .drawBehind {
                             if (flameStrength > .01f) layout?.let { text ->
                                 val visibleEnd = text.getLineEnd(0, visibleEnd = true)
@@ -381,9 +612,9 @@ private fun formatSceneTime(value: Long): String { val seconds = value.coerceAtL
                                         cubicTo(x + sway + width * .2f, base - height * .55f, x + width * 1.8f, base - height * .3f, x + width, base)
                                         close()
                                     }
-                                    drawPath(flame, Brush.verticalGradient(listOf(Color.Transparent, Color(0xFFFF9B36).copy(alpha = .5f * flameStrength), Color(0xFFFFE5A1).copy(alpha = .7f * flameStrength)), base - height, base))
+                                    drawPath(flame, Brush.verticalGradient(listOf(Color.Transparent, palette.accent.copy(alpha = .5f * flameStrength), androidx.compose.ui.graphics.lerp(palette.accent, Color.White, .65f).copy(alpha = .7f * flameStrength)), base - height, base))
                                     val rise = (animationTime * .65f + char * .137f) % 1f
-                                    drawCircle(Color(0xFFFFCD77).copy(alpha = (1f - rise) * .7f * flameStrength), (1f - rise * .6f) * this.density,
+                                    drawCircle(palette.accent.copy(alpha = (1f - rise) * .7f * flameStrength), (1f - rise * .6f) * this.density,
                                         Offset(x + sin(phase) * 5.dp.toPx(), base - rise * 35.dp.toPx()))
                                 }
                             }
@@ -396,7 +627,6 @@ private fun mood(theme: PlayerTheme, index: Int): String {
     val values = when (theme) {
         PlayerTheme.Orbital -> listOf("正在逃离地心引力", "给今天留一颗星", "宇宙很大，这首刚好")
         PlayerTheme.Theatre -> listOf("这一句，替你说了", "把心情留在字里", "唱到这里，刚好想起你")
-        PlayerTheme.Momo -> listOf("MOMO 也喜欢这首", "今天的快乐浓度 +1", "有人陪你听完整首")
         PlayerTheme.Liquid -> listOf("这一圈，把时间放慢", "把声音刻进颜色", "旋转的是光，也是心情")
         PlayerTheme.Tape -> listOf("私人珍藏 · 请勿倒带青春", "这一面，留给好心情", "磁带会旧，喜欢不会")
         else -> listOf("下一站，暂时不用想", "窗外是城市，耳边是你", "陪你晚一点回家")
@@ -410,9 +640,13 @@ private fun mood(theme: PlayerTheme, index: Int): String {
         val phase = time * 2.7f
         when (theme) {
             PlayerTheme.Orbital -> Box(Modifier.size(diameter).clip(CircleShape).background(Brush.linearGradient(listOf(Color(0xFFC5A4C9), Color(0xFF86759F), Color(0xFF282440))))) {
-                AsyncImage(artwork, null, Modifier.fillMaxSize().graphicsLayer { alpha = .45f }, contentScale = ContentScale.Crop)
+                Box(Modifier.fillMaxSize().graphicsLayer { rotationZ = time * 2.5f; scaleX = 1.45f; scaleY = 1.45f }) {
+                    AsyncImage(artwork, null, Modifier.fillMaxSize().graphicsLayer { alpha = .45f }, contentScale = ContentScale.Crop)
+                    Canvas(Modifier.fillMaxSize()) {
+                        rotate(-25f) { repeat(13) { i -> drawOval(Color(0xFFEDC4DD).copy(alpha = if (i % 3 == 0) .17f else .06f), Offset(-size.width * .4f, size.height * (i / 13f) - size.height * .1f), Size(size.width * 1.8f, size.height * .18f)) } }
+                    }
+                }
                 Canvas(Modifier.fillMaxSize()) {
-                    rotate(-25f) { repeat(13) { i -> drawOval(Color(0xFFEDC4DD).copy(alpha = if (i % 3 == 0) .17f else .06f), Offset(-size.width * .4f, size.height * (i / 13f) - size.height * .1f), Size(size.width * 1.8f, size.height * .18f)) } }
                     drawCircle(Brush.radialGradient(listOf(Color.Transparent, Color(0xFF080615).copy(alpha = .86f)), Offset(size.width * .25f, size.height * .23f), size.width * .9f))
                 }
             }
@@ -430,26 +664,6 @@ private fun mood(theme: PlayerTheme, index: Int): String {
             else -> Canvas(Modifier.fillMaxSize()) {
                 val w = size.width; val h = size.height
                 when (theme) {
-                    PlayerTheme.Momo -> {
-                        val c = Offset(w * .5f, h * .50f)
-                        val r = min(w * .22f, h * .21f)
-                        drawCircle(Color(0xFFCCD9C0).copy(alpha = .4f), r * 1.6f, c)
-                        drawOval(Color(0xFF71855A).copy(alpha = .13f), Offset(c.x - r * .75f, c.y + r * .85f), Size(r * 1.5f, r * .18f))
-                        val bob = if (happy) -r * .2f else if (playing) sin(phase) * r * .06f else 0f
-                        rotate(if (happy) sin(phase * 4) * 12 else if (playing) sin(phase) * 4 else 0f, c) {
-                            val top = c.y - r + bob
-                            drawOval(Color(0xFFBCD695), Offset(c.x - r * .7f, top - r * .28f), Size(r * .5f, r * .75f))
-                            drawOval(Color(0xFFADC781), Offset(c.x + r * .2f, top - r * .2f), Size(r * .5f, r * .7f))
-                            drawRoundRect(Brush.linearGradient(listOf(Color(0xFFD5EBAE), Color(0xFF94B36E))), Offset(c.x - r, top), Size(r * 2, r * 2), CornerRadius(r * .8f))
-                            val eyeY = c.y - r * .1f + bob
-                            listOf(-.32f, .32f).forEach { x ->
-                                if (!playing || happy) drawLine(Color(0xFF30472E), Offset(c.x + r*x - r*.07f,eyeY),Offset(c.x+r*x+r*.07f,eyeY),3.dp.toPx(),StrokeCap.Round)
-                                else drawOval(Color(0xFF30472E), Offset(c.x+r*x-r*.05f,eyeY-r*.08f),Size(r*.1f,r*.18f))
-                            }
-                            drawArc(Color(0xFF30472E), 0f, 180f, false, Offset(c.x-r*.14f,c.y+r*.12f+bob),Size(r*.28f,r*.18f),style=Stroke(2.dp.toPx(),cap=StrokeCap.Round))
-                            listOf(-.58f,.58f).forEach { x -> drawOval(Color(0xFFE2B49A).copy(alpha=.5f),Offset(c.x+r*x-r*.13f,c.y+r*.12f+bob),Size(r*.26f,r*.12f)) }
-                        }
-                    }
                     PlayerTheme.Tape -> {
                         val tw = w * .79f; val th = min(h * .55f, tw * .69f); val origin=Offset((w-tw)/2,h*.50f-th/2)
                         rotate(if(flip) 6f else -5f,Offset(w/2,h*.50f)) {
@@ -461,17 +675,6 @@ private fun mood(theme: PlayerTheme, index: Int): String {
                             drawRoundRect(Color(0xFFAA7430),Offset(origin.x+tw*.25f,origin.y+th*.84f),Size(tw*.5f,th*.1f),CornerRadius(5.dp.toPx()))
                             listOf(.04f,.96f).forEach { x ->drawCircle(Color(0xFF8A612B),2.dp.toPx(),origin+Offset(tw*x,th*.06f)) }
                         }
-                    }
-                    PlayerTheme.NightTrain -> {
-                        val rect = androidx.compose.ui.geometry.Rect(w*.12f,h*.08f,w*.88f,h*.84f)
-                        val window = Path().apply { moveTo(rect.left,rect.bottom);lineTo(rect.left,rect.top+rect.width/2);cubicTo(rect.left,rect.top-rect.width*.15f,rect.right,rect.top-rect.width*.15f,rect.right,rect.top+rect.width/2);lineTo(rect.right,rect.bottom);close() }
-                        clipPath(window) {
-                            drawRect(Brush.verticalGradient(listOf(Color(0xFF17253A),Color(0xFF3A4D58),Color(0xFF223238))))
-                            drawCircle(Color(0xFFE3D8B9),w*.036f,Offset(w*.65f,h*.23f))
-                            repeat(22) { i -> val x=((i*w*.085f+time*9)%(w*1.4f))-w*.2f;val bh=h*(.08f+((i*17)%11)*.007f);drawRect(Color(0xFF101E29),Offset(x,rect.bottom-bh),Size(w*.07f,bh));if(i%3==0)drawRect(Color(0xFFCEAD7B).copy(alpha=.4f),Offset(x+w*.02f,rect.bottom-bh+10),Size(2.dp.toPx(),3.dp.toPx())) }
-                            repeat(30) { i -> val x=(i*57.3f)%w;val y=(i*93.8f+time*48)%h;drawLine(Color(0xFFCAE0E6).copy(alpha=.12f),Offset(x,y),Offset(x-5,y+22),1f) }
-                        }
-                        drawPath(window,Color(0xFF69858B).copy(alpha=.25f),style=Stroke(3.dp.toPx()))
                     }
                     else -> Unit
                 }
@@ -491,15 +694,9 @@ internal fun sceneContour(theme: PlayerTheme, size: Size): List<Offset> {
         val t=i/240f; val angle=-PI/2+t*2*PI
         when(theme) {
             PlayerTheme.Orbital -> { val a=t*2*PI;val x=cos(a).toFloat()*w*.40f;val y=sin(a).toFloat()*h*.21f;val tilt=-.42f;Offset(w*.5f+x*cos(tilt)-y*sin(tilt),h*.50f+x*sin(tilt)+y*cos(tilt)) }
-            PlayerTheme.Momo -> { val r=min(w*.34f,h*.31f);Offset(w*.5f+cos(angle).toFloat()*r,h*.50f+sin(angle).toFloat()*r) }
             PlayerTheme.Liquid -> { val r=min(w*.35f,h*.38f)+min(w,h)*.025f;Offset(w*.5f+cos(angle).toFloat()*r,h*.50f+sin(angle).toFloat()*r) }
             PlayerTheme.Theatre -> Offset(w*(.09f+.82f*t),h*.79f)
             PlayerTheme.Tape -> Offset(w*(.17f+.66f*t),h*(.63f-.035f*t))
-            PlayerTheme.NightTrain -> {
-                // Bottom-left up the jamb, over the arch, down to bottom-right.
-                val top=h*.08f;val bottom=h*.84f;val r=w*.38f;val archY=top+r
-                when { t<.25f -> Offset(w*.12f,bottom+(archY-bottom)*(t/.25f));t>.75f -> Offset(w*.88f,archY+(bottom-archY)*((t-.75f)/.25f));else -> {val a=PI+(t-.25f)/.5f*PI;Offset(w*.5f+cos(a).toFloat()*r,archY+sin(a).toFloat()*r)} }
-            }
             else -> Offset(w*t,h*.8f)
         }
     }

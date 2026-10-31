@@ -25,6 +25,8 @@ data class LyricsCandidate(
     val syncedLyrics: String?,
     val plainLyrics: String?
 ) {
+    var score: Int = 0
+    var provider: String = "LRCLIB"
     val isSynced: Boolean get() = !syncedLyrics.isNullOrBlank()
     val content: String get() = syncedLyrics ?: plainLyrics.orEmpty()
 }

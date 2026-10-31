@@ -9,8 +9,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -47,7 +48,7 @@ import kotlin.math.roundToInt
         val animatedY by animateFloatAsState(targetY, tween(if (dragging) 0 else 200), label = "handleHeight")
         Box(Modifier.offset { IntOffset(animatedX.roundToInt(), animatedY.roundToInt()) }.size(46.dp)
             .clip(if (docked) RoundedCornerShape(15.dp) else CircleShape)
-            .background(Color(0xFF474353).copy(alpha = if (docked) .55f else .7f))
+            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (docked) .45f else .58f))
             .semantics { contentDescription = if (docked) "展开导航悬浮按钮" else "打开右侧导航，可拖动" }
             .pointerInput(width, height) {
                 detectDragGestures(
@@ -79,9 +80,9 @@ import kotlin.math.roundToInt
                 }
                 else onOpen()
             }, contentAlignment = Alignment.Center) {
-            if (!docked) Icon(Icons.Default.Menu, null, tint = Color.White.copy(alpha = .85f), modifier = Modifier.size(20.dp))
+            if (!docked) Icon(Icons.Default.MusicNote, null, tint = MaterialTheme.colorScheme.primary.copy(alpha = .8f), modifier = Modifier.size(20.dp))
             else Box(Modifier.align(when(verticalEdge) { -1 -> Alignment.BottomCenter; 1 -> Alignment.TopCenter; else -> if (leftEdge) Alignment.CenterEnd else Alignment.CenterStart })
-                .padding(5.dp).size(if (verticalEdge == 0) 2.dp else 17.dp, if (verticalEdge == 0) 17.dp else 2.dp).background(Color.White.copy(alpha = .7f), CircleShape))
+                .padding(5.dp).size(if (verticalEdge == 0) 2.dp else 17.dp, if (verticalEdge == 0) 17.dp else 2.dp).background(MaterialTheme.colorScheme.primary.copy(alpha = .8f), CircleShape))
         }
     }
 }

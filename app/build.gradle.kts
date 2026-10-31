@@ -33,6 +33,7 @@ kotlin {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-compose:1.10.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.9.4")
@@ -56,4 +57,5 @@ dependencies {
     implementation("io.coil-kt:coil-compose:2.7.0")
     implementation("androidx.palette:palette-ktx:1.0.0")
     implementation("com.google.zxing:core:3.5.3")
+    implementation("net.jthink:jaudiotagger:3.0.1")
 }

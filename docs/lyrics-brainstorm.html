@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>歌词页 · 六套视觉脑暴</title>
+  <style>
+    :root { --bg:#080a10; --panel:#11151f; --text:#f5f7fb; --muted:#8e98aa; --line:#273040; --accent:#b8ff65; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; color:var(--text); background:radial-gradient(circle at 70% 0%,#26333b 0,#10141d 34%,#080a10 75%); font-family:Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif; }
+    .shell { width:min(1180px,calc(100% - 32px)); margin:auto; padding:34px 0 52px; }
+    header { display:flex; justify-content:space-between; gap:24px; align-items:end; margin-bottom:24px; }
+    h1 { font-size:clamp(28px,4vw,52px); line-height:1; letter-spacing:-.06em; margin:0 0 12px; }
+    header p { color:var(--muted); margin:0; max-width:650px; line-height:1.7; }
+    .badge { color:#111; background:var(--accent); border-radius:999px; padding:8px 13px; font-size:12px; font-weight:800; white-space:nowrap; }
+    .tabs { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:18px; }
+    .tab { border:1px solid var(--line); color:var(--muted); background:#10141c; border-radius:999px; padding:10px 14px; cursor:pointer; transition:.2s; }
+    .tab:hover,.tab.active { background:#eaf5df; color:#111; border-color:#eaf5df; }
+    .stage { min-height:620px; position:relative; overflow:hidden; border:1px solid #30394b; border-radius:30px; background:#141a24; box-shadow:0 24px 70px #0008; }
+    .concept { display:none; height:620px; position:relative; overflow:hidden; }
+    .concept.active { display:block; }
+    .copy { position:absolute; z-index:4; left:34px; top:30px; max-width:330px; }
+    .number { color:var(--accent); font:700 12px/1 monospace; letter-spacing:.12em; }
+    .copy h2 { font-size:34px; letter-spacing:-.05em; margin:12px 0 8px; }
+    .copy p { color:#aeb7c8; line-height:1.65; margin:0; }
+    .song { position:absolute; z-index:4; left:34px; bottom:31px; font-size:12px; color:#9aa5b6; letter-spacing:.08em; }
+    .song b { display:block; color:var(--text); font-size:15px; letter-spacing:0; margin-bottom:5px; }
+    .lyrics { position:absolute; z-index:3; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:15px; padding:150px 24px 100px; }
+    .line { transition:.35s; color:#738093; font-size:20px; max-width:760px; }
+    .line.active { color:#fff; font-size:clamp(28px,4vw,52px); font-weight:800; letter-spacing:-.055em; }
+    .progress { position:absolute; z-index:5; left:34px; right:34px; bottom:22px; height:3px; background:#ffffff22; border-radius:9px; }
+    .progress i { display:block; height:100%; width:42%; border-radius:inherit; background:var(--accent); box-shadow:0 0 16px var(--accent); }
+    button.play { position:absolute; z-index:6; right:30px; bottom:27px; width:42px; height:42px; border:0; border-radius:50%; background:var(--accent); color:#10140e; cursor:pointer; font-weight:bold; }
+
+    /* 01 Aurora */
+    .aurora { background:linear-gradient(125deg,#0b1524,#182b37 48%,#0d111b); }
+    .aurora:before,.aurora:after { content:""; position:absolute; width:80%; height:55%; filter:blur(35px); opacity:.7; background:linear-gradient(100deg,#74ffa4,#83a8ff,#d68cff); border-radius:50%; transform:rotate(-18deg); animation:drift 9s ease-in-out infinite alternate; }
+    .aurora:after { top:42%; left:32%; opacity:.4; animation-delay:-4s; }
+    @keyframes drift { to { transform:translate(80px,32px) rotate(15deg) scale(1.2); } }
+    /* 02 kinetic */
+    .kinetic { background:#f3e8d0; color:#1d1b18; }
+    .kinetic .copy p,.kinetic .song { color:#756e64; }.kinetic .number { color:#e4572e; }
+    .kinetic .lyrics { align-items:flex-start; text-align:left; padding-left:15%; }
+    .kinetic .line { color:#aa9d89; font-family:Georgia,serif; font-size:25px; }.kinetic .line.active { color:#1e1b17; font-size:clamp(40px,7vw,88px); line-height:.95; transform:rotate(-3deg); }
+    .kinetic .progress { background:#1e1b1722; }.kinetic .progress i { background:#e4572e; box-shadow:none; }
+    .kinetic button.play { background:#e4572e; color:white; }
+    /* 03 terminal */
+    .terminal { background:#07110d; font-family:monospace; }.terminal:before { content:""; position:absolute; inset:0; opacity:.14; background:repeating-linear-gradient(0deg,transparent 0 3px,#8affaa 4px); pointer-events:none; }
+    .terminal .lyrics { align-items:flex-start; text-align:left; padding-left:12%; }.terminal .line { color:#4f8c62; font-size:17px; }.terminal .line.active { color:#a7ffbd; font-size:clamp(24px,4vw,46px); text-shadow:0 0 20px #72ff9a; }.terminal .number { color:#72ff9a; }.terminal .progress i { background:#72ff9a; }
+    /* 04 bubbles */
+    .bubbles { background:linear-gradient(145deg,#261444,#572063 55%,#f26691); }.bubbles:before { content:"✦  ·  ○  ·  ✦  ·  ○  ·  ✦"; position:absolute; inset:17% 5%; color:#ffffff33; font-size:70px; letter-spacing:35px; transform:rotate(-12deg); animation:float 7s linear infinite; }.bubbles .line.active { color:#fff1fa; text-shadow:0 0 24px #ffacd5; }.bubbles .line { color:#d8a1bf; }.bubbles .progress i { background:#ffd36a; }.bubbles button.play { background:#ffd36a; }
+    @keyframes float { to { transform:translateY(-30px) rotate(-12deg); } }
+    /* 05 reel */
+    .reel { background:#d8d0ba; color:#283027; }.reel .copy p,.reel .song { color:#667064; }.reel .number { color:#aa4a2e; }.reel .lyrics { justify-content:flex-end; padding-bottom:145px; }.reel .line { color:#899083; font-family:Georgia,serif; }.reel .line.active { color:#283027; font-size:clamp(31px,5vw,64px); }.reel:before { content:""; position:absolute; width:310px; height:310px; border:30px dotted #9f8f6a; border-radius:50%; right:10%; top:22%; opacity:.55; animation:spin 18s linear infinite; }.reel:after { content:"SIDE A  /  02:14"; position:absolute; right:12%; top:46%; transform:rotate(90deg); color:#aa4a2e; font:12px monospace; letter-spacing:.15em; }.reel .progress i { background:#aa4a2e; }.reel button.play { background:#aa4a2e;color:#fff; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+    /* 06 spotlight */
+    .spotlight { background:#030303; }.spotlight:before { content:""; position:absolute; width:70%; height:170%; left:15%; top:-35%; background:linear-gradient(90deg,transparent,#fff2,transparent); transform:rotate(22deg); animation:sweep 6s ease-in-out infinite; }.spotlight .lyrics { justify-content:center; }.spotlight .line { color:#4f4f4f; }.spotlight .line.active { color:#fff; font-size:clamp(32px,5vw,66px); text-shadow:0 0 18px #fff; }.spotlight .number { color:#fff; }.spotlight .progress i { background:#fff; box-shadow:0 0 15px white; }.spotlight button.play { background:#fff; }
+    @keyframes sweep { 50% { transform:translateX(80px) rotate(22deg); } }
+    .hint { margin-top:14px; color:#788397; font-size:12px; text-align:center; }
+    /* Mobile player canvas: the presentation never stretches into a desktop player. */
+    .shell { width:min(900px,calc(100% - 32px)); padding:24px 0; }
+    header { margin-bottom:18px; } h1 { font-size:30px; } header p { font-size:13px; }
+    .tabs { justify-content:center; } .tab { min-height:44px; font-size:12px; }
+    .stage { width:min(390px,100%); height: min(844px,calc(100svh - 40px)); min-height:640px; margin:24px auto; border-radius:38px; border:7px solid #252a33; }
+    .concept { height:100%; --ink:#f5f7fb; --soft:#aab5c5; --control:#b8ff65; }
+    .copy { display:none; }
+    .status { position:absolute; z-index:8; top:14px; left:22px; right:22px; display:flex; justify-content:space-between; color:var(--ink); font-size:12px; font-weight:600; }
+    .player-head { position:absolute; z-index:8; top:44px; left:16px; right:16px; display:flex; align-items:center; justify-content:space-between; color:var(--ink); }
+    .player-head span { font-size:10px; letter-spacing:.18em; opacity:.65; }
+    .player-head button,.transport button,.utilities button { border:0; color:var(--ink); background:transparent; min-width:44px; min-height:44px; cursor:pointer; font-size:22px; }
+    .lyrics { inset:120px 0 275px; padding:10px 26px !important; justify-content:center; gap:26px; overflow:hidden; }
+    .line { width:100%; font-size:17px; line-height:1.6; flex-shrink:0; overflow-wrap:anywhere; }
+    .line.active { font-size:29px; letter-spacing:-.04em; line-height:1.55; }
+    .song { left:26px; right:26px; bottom:219px; font-size:11px; line-height:1.6; color:var(--soft); }
+    .song b { color:var(--ink); font-size:19px; margin-bottom:4px; }
+    .progress { left:26px; right:26px; bottom:184px; height:4px; cursor:pointer; }
+    .progress:before { content:""; position:absolute; inset:-12px 0; }
+    .progress i { background:var(--control); position:relative; pointer-events:none; }
+    .progress i:after { content:""; position:absolute; right:-4px; top:-2px; width:8px; height:8px; background:var(--control); border-radius:50%; }
+    .times { position:absolute; bottom:159px; left:26px; right:26px; display:flex; justify-content:space-between; font:10px monospace; color:var(--soft); }
+    .transport { position:absolute; bottom:79px; left:16px; right:16px; display:flex; align-items:center; justify-content:space-between; }
+    .transport button.play { position:static; width:60px; height:60px; background:var(--control); color:#111; font-size:24px; }
+    .transport button.small { font-size:19px; opacity:.65; }
+    .utilities { position:absolute; bottom:28px; left:26px; right:26px; display:flex; align-items:center; justify-content:space-between; color:var(--soft); font-size:10px; }
+    .utilities button { font-size:20px; }.utilities button.liked { color:#ff789f; }
+    .home-bar { position:absolute; bottom:8px; left:35%; width:30%; height:4px; border-radius:5px; background:var(--ink); opacity:.6; }
+    .description { max-width:440px; margin:0 auto; line-height:1.7; color:var(--muted); font-size:13px; }
+    .description h2 { color:var(--text); font-size:20px; margin:0 0 6px; }.description p { margin:0; }
+    .kinetic { --ink:#1e1b17; --soft:#756e64; --control:#e4572e; }
+    .kinetic .line { font-size:18px; }.kinetic .line.active { font-size:38px; line-height:1.25; }
+    .terminal { --ink:#a7ffbd; --soft:#659f76; --control:#72ff9a; }.terminal .line { font-size:14px; }.terminal .line.active { font-size:24px; }
+    .bubbles { --control:#ffd36a; }.bubbles .line { width:fit-content; max-width:100%; padding:9px 15px; border:1px solid #ffffff19; border-radius:24px; background:#ffffff09; align-self:flex-start; }.bubbles .line:nth-child(even) { align-self:flex-end; }.bubbles .line.active { font-size:25px; background:#ffffff1e; }
+    .reel { --ink:#283027; --soft:#667064; --control:#aa4a2e; }.reel .lyrics { justify-content:center; }.reel .line { font-size:16px; }.reel .line.active { font-size:29px; }.reel:before { width:250px; height:250px; right:-125px; top:100px; opacity:.2; }.reel:after { top:110px; right:26px; transform:none; font-size:10px; }
+    .spotlight { --control:#fff; }.spotlight .line { font-size:17px; }.spotlight .line.active { font-size:31px; }
+    .concept.paused:before,.concept.paused:after { animation-play-state:paused; }
+    @media(max-width:480px) { .shell { width:100%; padding:16px 0 0; } header { padding:0 18px; } h1 { font-size:25px; } .badge { display:none; } .tabs { flex-wrap:nowrap; justify-content:flex-start; overflow-x:auto; padding:0 14px 8px; margin:0; } .tab { flex-shrink:0; } .stage { width:100%; height:calc(100svh - 155px); min-height:640px; border:0; border-radius:0; margin:0 auto 16px; box-shadow:none; } .description { padding:0 20px; }.hint { padding:0 20px 20px; } }
+    @media(prefers-reduced-motion:reduce) { *,*:before,*:after { animation:none !important; transition:none !important; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div><h1>歌词，不只是歌词。</h1><p>六个完全不同的方向：把歌词做成光、海报、终端、气泡、磁带和一束舞台灯。点击标签切换，点击播放按钮观察动效。</p></div>
+      <span class="badge">BRAINSTORM / 06</span>
+    </header>
+    <nav class="tabs" aria-label="歌词方案">
+      <button class="tab active" data-target="aurora">01 极光呼吸</button><button class="tab" data-target="kinetic">02 失控排版</button><button class="tab" data-target="terminal">03 深夜终端</button><button class="tab" data-target="bubbles">04 情绪气泡</button><button class="tab" data-target="reel">05 私人磁带</button><button class="tab" data-target="spotlight">06 黑盒剧场</button>
+    </nav>
+    <section class="stage">
+      <article class="concept aurora active" id="aurora"><div class="copy"><div class="number">01 / AURORA BREATH</div><h2>极光呼吸</h2><p>歌词像一片会呼吸的极光。每句出现时，背景颜色和字面一起流动，适合氛围、独立、夜晚类音乐。</p></div><Lyrics/><div class="song"><b>midnight drive</b>slowly, slowly · 02:14</div><Controls/></article>
+      <article class="concept kinetic" id="kinetic"><div class="copy"><div class="number">02 / KINETIC TYPE</div><h2>失控排版</h2><p>不再把歌词规规矩矩居中。字会偏移、倾斜、放大，像一张随手写下的演出海报，适合摇滚、说唱、情绪爆发。</p></div><Lyrics/><div class="song"><b>paper satellites</b>live room session · 03:08</div><Controls/></article>
+      <article class="concept terminal" id="terminal"><div class="copy"><div class="number">03 / NIGHT TERMINAL</div><h2>深夜终端</h2><p>把播放页变成一个午夜控制台。歌词像系统日志一样持续刷新，适合电子、Lo-fi、赛博和器乐歌单。</p></div><Lyrics/><div class="song"><b>NO SIGNAL / 03</b>connection stable · 01:48</div><Controls/></article>
+      <article class="concept bubbles" id="bubbles"><div class="copy"><div class="number">04 / EMOTION BUBBLES</div><h2>情绪气泡</h2><p>每句歌词都是漂浮出来的情绪气泡。点击当前句可以留下一个表情或一句回应，适合轻快、流行、社交型产品。</p></div><Lyrics/><div class="song"><b>good mood club</b>someone sent you this song · 02:36</div><Controls/></article>
+      <article class="concept reel" id="reel"><div class="copy"><div class="number">05 / PRIVATE REEL</div><h2>私人磁带</h2><p>把歌词做成一盘只属于你的混音带。当前句像印在纸标签上，播放时磁盘缓慢旋转，适合复古、民谣、怀旧路线。</p></div><Lyrics/><div class="song"><b>side a / summer 2012</b>recorded for you · 04:02</div><Controls/></article>
+      <article class="concept spotlight" id="spotlight"><div class="copy"><div class="number">06 / BLACK BOX</div><h2>黑盒剧场</h2><p>屏幕是一座黑盒剧场，只有正在唱的那句被一束灯照亮。上下句隐入黑暗，适合情绪浓度高、歌词驱动的作品。</p></div><Lyrics/><div class="song"><b>the last scene</b>one line at a time · 03:41</div><Controls/></article>
+    </section>
+    <div class="hint">原型说明：这是视觉方向草图，不代表最终交互。按空格也可以播放 / 暂停。</div>
+  </main>
+  <script>
+    // Remove the old JSX-like placeholders; the prototype uses native HTML only.
+    document.querySelectorAll('lyrics,controls').forEach(el=>el.replaceWith(...el.childNodes));
+    document.querySelectorAll('.concept').forEach((el, index) => {
+      const box = document.createElement('div'); box.className = 'lyrics';
+      const lines = index === 1 ? ['别把心事写得太整齐','我偏要让它撞出回声','今晚不需要正确答案','让所有沉默突然起舞'] : index === 2 ? ['> booting / memories','> the city is still awake','> packet received: your voice','> saving this moment...'] : index === 3 ? ['你发来的那句晚安','在房间里飘了起来','快乐有一点不讲道理','今晚适合分享一首歌'] : index === 4 ? ['把夏天录进一盘磁带','风从耳机的左边经过','那些没说完的话','留在 B 面继续播放'] : index === 5 ? ['灯光只照亮这一句','其余的交给黑暗保管','你听见了吗','这是我们最后的场景'] : ['我们在凌晨交换沉默','让城市慢慢退到窗外','这一句刚好替你说了','如果天亮以前还醒着'];
+      lines.forEach((text, i) => { const p=document.createElement('div'); p.className='line'+(i===1?' active':''); p.textContent=text; box.appendChild(p); }); el.appendChild(box);
+    });
+    const description=document.createElement('section'); description.className='description'; description.setAttribute('aria-live','polite'); document.querySelector('.stage').after(description);
+    document.querySelectorAll('.concept').forEach(el => {
+      el.insertAdjacentHTML('beforeend', `<div class="status"><span>9:41</span><span>▴▴  Wi-Fi  ▰</span></div><div class="player-head"><button aria-label="上一套方案" class="back">⌄</button><span>正在播放 · 歌词</span><button class="like" aria-label="喜欢这首歌">♡</button></div><div class="progress" role="slider" tabindex="0" aria-label="播放进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="42"><i></i></div><div class="times"><span class="elapsed">1:34</span><span>3:44</span></div><div class="transport"><button class="small shuffle" aria-label="随机播放" aria-pressed="false">⤨</button><button class="previous" aria-label="上一句">❮</button><button class="play" aria-label="暂停">Ⅱ</button><button class="next" aria-label="下一句">❯</button><button class="small repeat" aria-label="单句循环" aria-pressed="false">↻</button></div><div class="utilities"><button class="like" aria-label="喜欢这首歌">♡</button><span>原创占位歌词 · 交互演示</span><button class="queue" aria-label="切换方案">☰</button></div><div class="home-bar"></div>`);
+    });
+    let playing=true;
+    let lyricIndex=1, progress=42;
+    const active=()=>document.querySelector('.concept.active');
+    function render(){
+      const el=active(); el.classList.toggle('paused',!playing);
+      el.querySelector('.play').textContent=playing?'Ⅱ':'▶'; el.querySelector('.play').setAttribute('aria-label',playing?'暂停':'播放');
+      el.querySelectorAll('.line').forEach((line,i)=>line.classList.toggle('active',i===lyricIndex));
+      el.querySelector('.progress i').style.width=progress+'%'; el.querySelector('.progress').setAttribute('aria-valuenow',Math.round(progress));
+      const seconds=Math.floor(progress/100*224); el.querySelector('.elapsed').textContent=Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0');
+    }
+    function move(direction){ lyricIndex=active().querySelector('.shuffle').getAttribute('aria-pressed')==='true' ? (lyricIndex+1+Math.floor(Math.random()*3))%4 : (lyricIndex+direction+4)%4; render(); }
+    setInterval(()=>{ if(playing && document.visibilityState==='visible') { progress=(progress+100/2240)%100; render(); } },100);
+    setInterval(()=>{ if(playing && document.visibilityState==='visible' && active().querySelector('.repeat').getAttribute('aria-pressed')!=='true') move(1); },3000);
+    document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>{ document.querySelectorAll('.tab,.concept').forEach(x=>x.classList.remove('active')); tab.classList.add('active'); document.getElementById(tab.dataset.target).classList.add('active'); description.innerHTML=active().querySelector('.copy').innerHTML; render(); }));
+    document.querySelectorAll('.play').forEach(btn=>btn.addEventListener('click',()=>{ playing=!playing; render(); }));
+    document.querySelectorAll('.next').forEach(btn=>btn.addEventListener('click',()=>move(1)));
+    document.querySelectorAll('.previous').forEach(btn=>btn.addEventListener('click',()=>move(-1)));
+    document.querySelectorAll('.line').forEach(line=>line.addEventListener('click',()=>{ lyricIndex=[...line.parentElement.children].indexOf(line); render(); }));
+    document.querySelectorAll('.like').forEach(btn=>btn.addEventListener('click',()=>{ const liked=btn.textContent==='♡'; active().querySelectorAll('.like').forEach(b=>{ b.textContent=liked?'♥':'♡'; b.classList.toggle('liked',liked); b.setAttribute('aria-pressed',liked); }); }));
+    document.querySelectorAll('.shuffle,.repeat').forEach(btn=>btn.addEventListener('click',()=>{ const enabled=btn.getAttribute('aria-pressed')!=='true'; btn.setAttribute('aria-pressed',enabled); btn.style.opacity=enabled?'1':'.65'; }));
+    document.querySelectorAll('.back,.queue').forEach(btn=>btn.addEventListener('click',()=>{ const tabs=[...document.querySelectorAll('.tab')]; tabs[(tabs.indexOf(document.querySelector('.tab.active'))+1)%tabs.length].click(); }));
+    document.querySelectorAll('.progress').forEach(bar=>{
+      bar.addEventListener('click',e=>{ const r=bar.getBoundingClientRect(); progress=Math.max(0,Math.min(100,(e.clientX-r.left)/r.width*100)); render(); });
+      bar.addEventListener('keydown',e=>{ if(['ArrowLeft','ArrowRight'].includes(e.key)){ e.preventDefault(); progress=Math.max(0,Math.min(100,progress+(e.key==='ArrowRight'?5:-5))); render(); } });
+    });
+    window.addEventListener('keydown', e=>{ if(e.code==='Space' && !['BUTTON','INPUT'].includes(e.target.tagName) && e.target.getAttribute('role')!=='slider'){ e.preventDefault(); active().querySelector('.play').click(); }});
+    description.innerHTML=active().querySelector('.copy').innerHTML; render();
+  </script>
+</body>
+</html>
