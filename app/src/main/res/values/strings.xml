@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="notification_channel_playback">音乐播放</string>
+    <string name="notification_channel_playback_description">显示当前歌曲和播放控制</string>
+    <string name="notification_playback_unknown_title">XSTAR 音乐</string>
+    <string name="notification_playback_unknown_artist">准备播放</string>
+</resources>

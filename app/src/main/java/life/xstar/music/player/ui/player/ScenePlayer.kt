@@ -271,12 +271,23 @@ fun ScenePlayer(
                 } else SceneArtwork(theme, song?.albumArtUri, palette, playing, motionTime, rotation.value, sideB, effects.any { it.kind == "feed" && clock - it.born < 850 }, effects.any { it.kind == "flip" && clock - it.born < 600 })
                 if (theme == PlayerTheme.Theatre && (lyricsMode != LyricsMode.ForestLight || lines.isEmpty())) {
                     if (lines.isNotEmpty()) {
-                        if (lyricsMode == LyricsMode.DensityMap) {
+                        if (lyricsMode == LyricsMode.LyricRain || lyricsMode == LyricsMode.BambooScroll) {
+                            VerticalLyrics(lines, focusedLine, position, playing, lyricsMode, palette.accent, palette.ink,
+                                Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 8.dp))
+                        } else if (lyricsMode == LyricsMode.Terminal) {
+                            TerminalLyrics(lines, focusedLine, position, playing, Modifier.fillMaxSize())
+                        } else if (lyricsMode == LyricsMode.DensityMap) {
                             WholeLyricsStage(lines, focusedLine, LyricsMode.DensityMap, playing, position, palette,
                                 Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 8.dp),
                                 onLine = { index -> browseLine = index; lines[index].timeMs?.let(onSeek) })
                         } else if (lyricsMode.isSpatial) {
                             SpatialLyrics(lines, focusedLine, position, playing, lyricsMode, palette.accent, palette.ink,
+                                Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 8.dp))
+                        } else if (lyricsMode == LyricsMode.LightTrail) {
+                            LightTrailLyrics(lines, focusedLine, position, playing, palette.accent, palette.ink,
+                                Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 8.dp))
+                        } else if (lyricsMode == LyricsMode.Sakura) {
+                            SakuraLyrics(lines, focusedLine, position, playing, palette.accent, palette.ink,
                                 Modifier.fillMaxSize().padding(horizontal = 22.dp, vertical = 8.dp))
                         } else if (lyricsMode == LyricsMode.Firework) {
                             FireworkLyrics(lines, focusedLine, position, playing, palette.accent, palette.ink,
@@ -333,10 +344,19 @@ fun ScenePlayer(
             }
             if (theme != PlayerTheme.Theatre && (lyricsMode != LyricsMode.ForestLight || lines.isEmpty())) {
               Box(Modifier.offset(y = pageHeight * .78f - 48.dp).fillMaxWidth().height(96.dp), contentAlignment = Alignment.Center) {
-                   if (lines.isNotEmpty() && lyricsMode.isSpatial) SpatialLyrics(lines, currentLine, position, playing, lyricsMode, palette.accent, palette.ink,
+                    if (lines.isNotEmpty() && (lyricsMode == LyricsMode.LyricRain || lyricsMode == LyricsMode.BambooScroll)) VerticalLyrics(
+                        lines, currentLine, position, playing, lyricsMode, palette.accent, palette.ink,
+                        Modifier.fillMaxSize().padding(horizontal = 20.dp), compact = true)
+                    else if (lines.isNotEmpty() && lyricsMode == LyricsMode.Terminal) TerminalLyrics(lines, currentLine, position, playing,
+                        Modifier.fillMaxSize().padding(horizontal = 20.dp), compact = true)
+                    else if (lines.isNotEmpty() && lyricsMode.isSpatial) SpatialLyrics(lines, currentLine, position, playing, lyricsMode, palette.accent, palette.ink,
                        Modifier.fillMaxSize().padding(horizontal = 20.dp), compact = true,
                        onToggle = onToggle, onPrevious = onPrevious, onNext = onNext)
-                   else if (lines.isNotEmpty() && lyricsMode == LyricsMode.Firework) FireworkLyrics(lines, currentLine, position, playing, palette.accent, palette.ink,
+                     else if (lines.isNotEmpty() && lyricsMode == LyricsMode.LightTrail) LightTrailLyrics(lines, currentLine, position, playing, palette.accent, palette.ink,
+                         Modifier.fillMaxSize().padding(horizontal = 20.dp), compact = true)
+                     else if (lines.isNotEmpty() && lyricsMode == LyricsMode.Sakura) SakuraLyrics(lines, currentLine, position, playing, palette.accent, palette.ink,
+                        Modifier.fillMaxSize().padding(horizontal = 20.dp), compact = true)
+                    else if (lines.isNotEmpty() && lyricsMode == LyricsMode.Firework) FireworkLyrics(lines, currentLine, position, playing, palette.accent, palette.ink,
                        Modifier.fillMaxSize().padding(horizontal = 20.dp), compact = true)
                    else if (lines.isNotEmpty() && lyricsMode == LyricsMode.RiftFall) RiftFallLyrics(lines, currentLine, position, playing, palette.accent, palette.ink,
                       Modifier.fillMaxSize().padding(horizontal = 20.dp), compact = true, onLine = { index -> lines[index].timeMs?.let(onSeek) })

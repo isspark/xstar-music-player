@@ -12,6 +12,12 @@ import org.json.JSONObject
 import java.io.File
 import java.net.URLEncoder
 import kotlin.math.abs
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.CancellationException
+import life.xstar.music.player.data.preferences.PlaybackPreferences
+import life.xstar.music.player.data.online.GdstudioProvider
 
 class LyricsRepository(private val context: Context) {
     suspend fun loadLocalOrEmbedded(song: SongEntity): LyricsDocument? = withContext(Dispatchers.IO) {
@@ -27,6 +33,27 @@ class LyricsRepository(private val context: Context) {
     }
 
     suspend fun findOnline(song: SongEntity): List<LyricsCandidate> = withContext(Dispatchers.IO) {
+        val base = PlaybackPreferences(context).currentOnlineApiBase().ifBlank { GdstudioProvider.DEFAULT_BASE_URL }
+        supervisorScope {
+            val lookups: List<suspend () -> List<LyricsCandidate>> = listOf(
+                { findPublicLyrics(song) },
+                { PlatformLyricsProvider(base, "netease").search(song) },
+                { PlatformLyricsProvider(base, "tencent").search(song) },
+                { PlatformLyricsProvider(base, "kugou").search(song) }
+            )
+            lookups.map { lookup -> async {
+                try { lookup() }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (failure: Exception) {
+                    android.util.Log.w("LyricsRepository", "歌词来源查询失败", failure)
+                    emptyList()
+                }
+            } }.awaitAll().flatten().distinctBy { it.id }.onEach { it.score = score(song, it) }
+                .sortedWith(compareByDescending<LyricsCandidate> { it.score }.thenByDescending { it.isSynced }).take(20)
+        }
+    }
+
+    private suspend fun findPublicLyrics(song: SongEntity): List<LyricsCandidate> = withContext(Dispatchers.IO) {
         val candidates = mutableListOf<LyricsCandidate>()
         val exactParams = "artist_name=${enc(song.artist)}&track_name=${enc(clean(song.title))}&album_name=${enc(song.album)}&duration=${song.durationMs / 1000}"
         val exact = HttpArtworkClient.getTextRetry("https://lrclib.net/api/get?$exactParams")
@@ -71,68 +98,12 @@ class LyricsRepository(private val context: Context) {
         }.getOrDefault(false)
     }
 
-    suspend fun embed(song: SongEntity, document: LyricsDocument): Result<Unit> = withContext(Dispatchers.IO) {
-        var edited: File? = null
-        var backup: File? = null
-        var retainBackup = false
-        try {
-            runCatching {
-                val extension = audioExtension(song)
-                require(extension in setOf("mp3", "flac", "m4a", "mp4", "ogg", "opus")) {
-                    "暂不支持向 .$extension 文件写入歌词，请导出 LRC"
-                }
-                val content = toLrc(document)
-                require(content.isNotBlank()) { "当前没有可写入的歌词" }
-                val uri = Uri.parse(song.uri)
-                if (uri.scheme == "content" && DocumentFile.fromSingleUri(context, uri)?.canWrite() == false) {
-                    throw SecurityException("音乐目录只有读取权限，请在设置中重新选择目录并授权读写")
-                }
-                val original = File.createTempFile("lyrics-original-", ".$extension", context.filesDir).also { backup = it }
-                requireNotNull(context.contentResolver.openInputStream(uri)) { "无法读取原音频文件" }.use { input ->
-                    original.outputStream().use { input.copyTo(it) }
-                }
-                val source = File.createTempFile("lyrics-edit-", ".$extension", context.cacheDir).also { edited = it }
-                original.copyTo(source, overwrite = true)
-                val audio = org.jaudiotagger.audio.AudioFileIO.read(source)
-                audio.tagOrCreateAndSetDefault.setField(org.jaudiotagger.tag.FieldKey.LYRICS, content)
-                audio.commit()
-                check(org.jaudiotagger.audio.AudioFileIO.read(source).tag?.getFirst(org.jaudiotagger.tag.FieldKey.LYRICS) == content) {
-                    "音频标签校验失败，原文件未修改"
-                }
-                // Open before entering recovery: permission failures must not trigger another write.
-                val output = requireNotNull(context.contentResolver.openOutputStream(uri, "rwt")) { "无法打开音频文件进行写入" }
-                try {
-                    output.use { stream -> source.inputStream().use { it.copyTo(stream) } }
-                    val digest = java.security.MessageDigest.getInstance("SHA-256")
-                    fun hash(input: java.io.InputStream): ByteArray = input.use {
-                        digest.reset()
-                        val buffer = ByteArray(64 * 1024)
-                        var count = it.read(buffer)
-                        while (count >= 0) {
-                            if (count > 0) digest.update(buffer, 0, count)
-                            count = it.read(buffer)
-                        }
-                        digest.digest()
-                    }
-                    check(hash(source.inputStream()).contentEquals(hash(requireNotNull(context.contentResolver.openInputStream(uri))))) {
-                        "音频写回校验失败"
-                    }
-                } catch (failure: Exception) {
-                    try {
-                        requireNotNull(context.contentResolver.openOutputStream(uri, "rwt")).use { stream ->
-                            original.inputStream().use { it.copyTo(stream) }
-                        }
-                    } catch (restore: Exception) {
-                        retainBackup = true
-                        throw java.io.IOException("写回及恢复失败，原音频备份保存在 ${original.absolutePath}", restore)
-                    }
-                    throw java.io.IOException("写回失败，已恢复原音频：${failure.message}", failure)
-                }
-            }.onFailure { android.util.Log.e("LyricsRepository", "嵌入歌词失败", it) }
-        } finally {
-            edited?.delete()
-            if (!retainBackup) backup?.delete()
-        }
+    suspend fun embed(song: SongEntity, document: LyricsDocument): Result<Unit> {
+        val content = toLrc(document)
+        if (content.isBlank()) return Result.failure(IllegalArgumentException("当前没有可写入的歌词"))
+        return life.xstar.music.player.data.audio.AudioMetadataWriter.edit(context, song,
+            update = { it.setField(org.jaudiotagger.tag.FieldKey.LYRICS, content) },
+            verify = { it.getFirst(org.jaudiotagger.tag.FieldKey.LYRICS) == content })
     }
 
     private fun parseCandidate(json: JSONObject?, fallbackId: String): LyricsCandidate? {
@@ -140,7 +111,7 @@ class LyricsRepository(private val context: Context) {
         val synced = json.optString("syncedLyrics").takeIf { it.isNotBlank() && it != "null" }
         val plain = json.optString("plainLyrics").takeIf { it.isNotBlank() && it != "null" }
         if (synced == null && plain == null) return null
-        return LyricsCandidate(json.optString("id", fallbackId), json.optString("trackName"), json.optString("artistName"), json.optString("albumName"), synced, plain)
+        return LyricsCandidate("lrclib:${json.optString("id", fallbackId)}", json.optString("trackName"), json.optString("artistName"), json.optString("albumName"), synced, plain)
     }
 
     private fun findSiblingLrc(uri: String): DocumentFile? {
@@ -156,6 +127,7 @@ class LyricsRepository(private val context: Context) {
     private fun clean(value: String) = value.replace(Regex("\\s*[\\[(](official|audio|video|lyric video|remastered|高清|高音质)[\\])]", RegexOption.IGNORE_CASE), "").trim()
     private fun norm(value: String) = clean(value).lowercase().replace(Regex("[^\\p{L}\\p{N}]"), "")
     private fun similarity(a: String, b: String): Int = when {
+        norm(a).isBlank() || norm(b).isBlank() -> 0
         norm(a) == norm(b) -> 100
         norm(a).contains(norm(b)) || norm(b).contains(norm(a)) -> 75
         else -> 0

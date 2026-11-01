@@ -46,12 +46,12 @@ import kotlin.math.roundToInt
         val targetY = if (docked && verticalEdge != 0) { if (verticalEdge == -1) -diameter * .68f else height - diameter * .32f }
             else (yFraction * limitY).coerceIn(margin.coerceAtMost(limitY), (limitY - margin).coerceAtLeast(margin.coerceAtMost(limitY)))
         val animatedY by animateFloatAsState(targetY, tween(if (dragging) 0 else 200), label = "handleHeight")
-        Box(Modifier.offset { IntOffset(animatedX.roundToInt(), animatedY.roundToInt()) }.size(46.dp)
-            .clip(if (docked) RoundedCornerShape(15.dp) else CircleShape)
-            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (docked) .45f else .58f))
-            .semantics { contentDescription = if (docked) "展开导航悬浮按钮" else "打开右侧导航，可拖动" }
-            .pointerInput(width, height) {
-                detectDragGestures(
+            Box(Modifier.offset { IntOffset(animatedX.roundToInt(), animatedY.roundToInt()) }.size(46.dp)
+                .clip(if (docked) RoundedCornerShape(15.dp) else CircleShape)
+                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (docked) .45f else .58f))
+                .semantics { contentDescription = if (docked) "展开导航悬浮按钮" else "打开右侧导航，可拖动" }
+                .pointerInput(width, height) {
+                    detectDragGestures(
                     onDragStart = { dragging = true; if (docked) { if (verticalEdge == 0) xFraction = if (leftEdge) 0f else 1f; else yFraction = if (verticalEdge == -1) 0f else 1f; docked = false } },
                     onDragEnd = {
                         dragging = false
@@ -71,18 +71,17 @@ import kotlin.math.roundToInt
                         xFraction = if (limitX > 0) ((xFraction * limitX + delta.x) / limitX).coerceIn(0f, 1f) else 0f
                         yFraction = if (limitY > 0) ((yFraction * limitY + delta.y) / limitY).coerceIn(0f, 1f) else 0f
                     }
-                )
-            }.clickable {
-                if (docked) {
-                    docked = false
-                    if (verticalEdge == 0) xFraction = if (leftEdge) margin / limitX.coerceAtLeast(1f) else 1f - margin / limitX.coerceAtLeast(1f)
-                    else yFraction = if (verticalEdge == -1) margin / limitY.coerceAtLeast(1f) else 1f - margin / limitY.coerceAtLeast(1f)
-                }
-                else onOpen()
-            }, contentAlignment = Alignment.Center) {
-            if (!docked) Icon(Icons.Default.MusicNote, null, tint = MaterialTheme.colorScheme.primary.copy(alpha = .8f), modifier = Modifier.size(20.dp))
-            else Box(Modifier.align(when(verticalEdge) { -1 -> Alignment.BottomCenter; 1 -> Alignment.TopCenter; else -> if (leftEdge) Alignment.CenterEnd else Alignment.CenterStart })
-                .padding(5.dp).size(if (verticalEdge == 0) 2.dp else 17.dp, if (verticalEdge == 0) 17.dp else 2.dp).background(MaterialTheme.colorScheme.primary.copy(alpha = .8f), CircleShape))
-        }
+                    )
+                }.clickable {
+                    if (docked) {
+                        docked = false
+                        if (verticalEdge == 0) xFraction = if (leftEdge) margin / limitX.coerceAtLeast(1f) else 1f - margin / limitX.coerceAtLeast(1f)
+                        else yFraction = if (verticalEdge == -1) margin / limitY.coerceAtLeast(1f) else 1f - margin / limitY.coerceAtLeast(1f)
+                    } else onOpen()
+                }, contentAlignment = Alignment.Center) {
+                if (!docked) Icon(Icons.Default.MusicNote, null, tint = MaterialTheme.colorScheme.primary.copy(alpha = .8f), modifier = Modifier.size(20.dp))
+                else Box(Modifier.align(when(verticalEdge) { -1 -> Alignment.BottomCenter; 1 -> Alignment.TopCenter; else -> if (leftEdge) Alignment.CenterEnd else Alignment.CenterStart })
+                    .padding(5.dp).size(if (verticalEdge == 0) 2.dp else 17.dp, if (verticalEdge == 0) 17.dp else 2.dp).background(MaterialTheme.colorScheme.primary.copy(alpha = .8f), CircleShape))
+            }
     }
 }

@@ -1,6 +1,8 @@
 package life.xstar.music.player.player
 
 import android.app.PendingIntent
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
@@ -27,6 +29,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import life.xstar.music.player.MainActivity
+import life.xstar.music.player.R
 import life.xstar.music.player.XstarApplication
 
 @OptIn(UnstableApi::class)
@@ -42,6 +45,8 @@ class PlaybackService : MediaSessionService() {
 
     override fun onCreate() {
         super.onCreate()
+        createPlaybackChannel()
+        setMediaNotificationProvider(PlaybackNotificationProvider(this))
         spectrum = SpectrumAudioProcessor()
         karaoke = KaraokeDspController(::broadcastKaraokeState)
         val renderersFactory = object : DefaultRenderersFactory(this) {
@@ -213,6 +218,26 @@ class PlaybackService : MediaSessionService() {
         karaokePersistenceJob = scope.launch {
             delay(300)
             (application as XstarApplication).playbackPreferences.saveKaraoke(settings)
+        }
+    }
+
+    companion object {
+        const val NOTIFICATION_CHANNEL_ID = "xstar_playback_v2"
+        const val NOTIFICATION_ID = 1001
+    }
+
+    private fun createPlaybackChannel() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            getSystemService(NotificationManager::class.java)?.createNotificationChannel(
+                NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    getString(R.string.notification_channel_playback),
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = getString(R.string.notification_channel_playback_description)
+                    setShowBadge(false)
+                }
+            )
         }
     }
 }

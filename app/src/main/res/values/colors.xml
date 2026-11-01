@@ -1,3 +1,4 @@
 <resources>
     <color name="launcher_background">#111722</color>
+    <color name="notification_accent">#FF4FD8</color>
 </resources>

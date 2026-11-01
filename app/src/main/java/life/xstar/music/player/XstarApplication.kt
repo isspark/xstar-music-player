@@ -6,6 +6,7 @@ import life.xstar.music.player.data.local.MusicDatabase
 import life.xstar.music.player.data.online.OnlineMusicRepository
 import life.xstar.music.player.data.repository.MusicRepository
 import life.xstar.music.player.data.preferences.PlaybackPreferences
+import life.xstar.music.player.data.font.FontCatalog
 import life.xstar.music.player.together.TogetherSessionController
 
 class XstarApplication : Application() {
@@ -15,4 +16,5 @@ class XstarApplication : Application() {
     val castController by lazy { CastSessionController(this) }
     val togetherController by lazy { TogetherSessionController(this, repository) }
     val onlineMusicRepository by lazy { OnlineMusicRepository(this, database.songDao(), playbackPreferences) }
+    val fontCatalog by lazy { FontCatalog(this) }
 }

@@ -103,7 +103,7 @@ class TogetherService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_notification_music)
             .setContentTitle(title)
             .setContentText(text)
             .setOngoing(true)
@@ -111,6 +111,7 @@ class TogetherService : Service() {
             .addAction(0, "结束一起听", stopIntent)
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setColor(getColor(R.color.notification_accent))
             .build()
     }
 

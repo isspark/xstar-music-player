@@ -45,11 +45,37 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
 
     suspend fun findFirstArtwork(artist: String, album: String): ArtworkCandidate? = artworkChain.first(artist, album)
 
-    suspend fun saveArtworkForAlbum(artist: String, album: String, candidate: ArtworkCandidate) = withContext(Dispatchers.IO) {
-        val bytes = ArtworkHttp.getBytes(candidate.url, refererFor(candidate)) ?: return@withContext false
-        val artwork = cacheDownloadedArtwork(artist, album, bytes) ?: return@withContext false
+    suspend fun saveArtworkForAlbum(artist: String, album: String, candidate: ArtworkCandidate, skipSongId: Long? = null): ArtworkSaveResult = withContext(Dispatchers.IO) {
+        val bytes = ArtworkHttp.getBytes(candidate.url, refererFor(candidate)) ?: return@withContext ArtworkSaveResult(false)
+        val artwork = cacheDownloadedArtwork(artist, album, bytes) ?: return@withContext ArtworkSaveResult(false)
         dao.updateArtworkForAlbum(artist, album, artwork)
-        true
+        val failures = dao.findByAlbum(artist, album)
+            .filter { it.mediaStoreId != skipSongId }
+            .mapNotNull { song -> embedArtwork(song, artwork).exceptionOrNull()?.message }
+        ArtworkSaveResult(true, failures)
+    }
+
+    suspend fun saveArtworkForSong(song: SongEntity, candidate: ArtworkCandidate, embed: Boolean = true): ArtworkSaveResult = withContext(Dispatchers.IO) {
+        val bytes = ArtworkHttp.getBytes(candidate.url, refererFor(candidate)) ?: return@withContext ArtworkSaveResult(false)
+        val artwork = cacheDownloadedArtwork(song.artist, "${song.album}:${song.mediaStoreId}", bytes)
+            ?: return@withContext ArtworkSaveResult(false)
+        dao.updateArtwork(song.mediaStoreId, artwork)
+        ArtworkSaveResult(true, if (embed) listOfNotNull(embedArtwork(song, artwork).exceptionOrNull()?.message) else emptyList())
+    }
+
+    private suspend fun embedArtwork(song: SongEntity, path: String): Result<Unit> {
+        val image = File(path)
+        val bytes = image.readBytes()
+        return life.xstar.music.player.data.audio.AudioMetadataWriter.edit(context, song,
+            update = { tag ->
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                val artwork = life.xstar.music.player.data.audio.AndroidTagArtwork(
+                    bytes, bounds.outWidth, bounds.outHeight, bounds.outMimeType ?: "image/jpeg")
+                tag.deleteArtworkField()
+                tag.setField(artwork)
+            },
+            verify = { tag -> tag.artworkList.any { it.binaryData.contentEquals(bytes) } })
     }
 
     suspend fun scan(folderUris: Set<String>, onProgress: (ScanProgress) -> Unit = {}): Int = withContext(Dispatchers.IO) {
@@ -143,7 +169,7 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
         val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
         val directory = File(context.cacheDir, "album_art").apply { mkdirs() }
         val artwork = File(directory, "${id.toULong()}.jpg")
-        if (!artwork.exists() || artwork.length() == 0L) artwork.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+        artwork.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 92, it) }
         bitmap.recycle()
         return artwork.absolutePath
     }
@@ -155,7 +181,8 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
         val options = BitmapFactory.Options().apply { inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, 1024) }
         val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: return null
         val directory = File(context.cacheDir, "album_art").apply { mkdirs() }
-        val file = File(directory, "online_${stableId("$artist\u0000$album")}.jpg")
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(bytes).take(8).joinToString("") { "%02x".format(it) }
+        val file = File(directory, "online_${stableId("$artist\u0000$album")}_$digest.jpg")
         if (!file.exists()) file.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 88, it) }
         bitmap.recycle()
         return file.absolutePath
@@ -180,3 +207,4 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
 }
 
 data class ScanProgress(val fileName: String, val discovered: Int)
+data class ArtworkSaveResult(val saved: Boolean, val writeFailures: List<String> = emptyList())

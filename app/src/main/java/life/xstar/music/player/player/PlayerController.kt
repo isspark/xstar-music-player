@@ -2,6 +2,7 @@ package life.xstar.music.player.player
 
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import java.io.File
@@ -29,10 +30,13 @@ import kotlinx.coroutines.launch
 import life.xstar.music.player.data.local.SongEntity
 
 class PlayerController(context: Context) {
+    private val appContext = context.applicationContext
+    private val widgetState = appContext.getSharedPreferences("lyrics_widget_state", Context.MODE_PRIVATE)
     private val executor = ContextCompat.getMainExecutor(context)
     private val scope = CoroutineScope(Dispatchers.Main.immediate)
     private var progressJob: Job? = null
     private var listenerAttached = false
+    private val knownSongs = mutableMapOf<Long, SongEntity>()
     private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state.asStateFlow()
     private val _equalizerState = MutableStateFlow(EqualizerState())
@@ -42,14 +46,22 @@ class PlayerController(context: Context) {
     private val _spectrum = MutableStateFlow(FloatArray(0))
     val spectrum: StateFlow<FloatArray> = _spectrum.asStateFlow()
     private val listener = object : Player.Listener {
-        override fun onIsPlayingChanged(isPlaying: Boolean) { _state.value = _state.value.copy(playing = isPlaying) }
+        override fun onEvents(player: Player, events: Player.Events) {
+            syncSessionState(controllerFuture.get())
+        }
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            _state.value = _state.value.copy(playing = isPlaying)
+            controllerFuture.addListener({ runCatching { controllerFuture.get() }.getOrNull()?.let(::saveWidgetState) }, executor)
+        }
         override fun onMediaItemTransition(item: MediaItem?, reason: Int) {
             val index = controllerFuture.get().currentMediaItemIndex
             _state.value = _state.value.copy(song = _state.value.queue.getOrNull(index), index = index)
+            saveWidgetState(controllerFuture.get())
         }
         override fun onPlaybackStateChanged(playbackState: Int) {
             val controller = controllerFuture.get()
             _state.value = _state.value.copy(position = controller.currentPosition, duration = controller.duration.coerceAtLeast(0))
+            saveWidgetState(controller)
         }
         override fun onPlayerError(error: PlaybackException) {
             val controller = controllerFuture.get()
@@ -76,6 +88,8 @@ class PlayerController(context: Context) {
         controllerFuture.addListener({
             val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
             attachListener(controller)
+            syncSessionState(controller)
+            startProgressUpdates(controller)
             refreshEqualizer()
             refreshKaraoke()
         }, executor)
@@ -89,11 +103,19 @@ class PlayerController(context: Context) {
         position: Long,
         mode: PlaybackMode = PlaybackMode.Sequential,
         playing: Boolean = false,
-        fmMode: Boolean = false
+        fmMode: Boolean = false,
+        onlyIfSessionEmpty: Boolean = false,
+        availableSongs: List<SongEntity> = songs
     ) {
         if (songs.isNotEmpty()) {
             controllerFuture.addListener({
                 val controller = controllerFuture.get()
+                knownSongs.putAll(availableSongs.associateBy { it.mediaStoreId })
+                if (onlyIfSessionEmpty && controller.mediaItemCount > 0) {
+                    syncSessionState(controller)
+                    startProgressUpdates(controller)
+                    return@addListener
+                }
                 val restoredIndex = index.coerceIn(0, songs.lastIndex)
                 attachListener(controller)
                 controller.setMediaItems(songs.map { it.toMediaItem() }, restoredIndex, position)
@@ -111,6 +133,7 @@ class PlayerController(context: Context) {
         controllerFuture.addListener({
             val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
             val safeIndex = startIndex.coerceIn(0, songs.lastIndex)
+            knownSongs.putAll(songs.associateBy { it.mediaStoreId })
             attachListener(controller)
             controller.setMediaItems(songs.map { it.toMediaItem() }, safeIndex, 0)
             applyPlaybackMode(controller, mode, fmMode = false)
@@ -121,8 +144,10 @@ class PlayerController(context: Context) {
         }, executor)
     }
 
-    fun playFmQueue(songs: List<SongEntity>, startIndex: Int = 0, position: Long = 0, playing: Boolean = true) =
-        restoreQueue(songs, startIndex, position, PlaybackMode.Sequential, playing, fmMode = true)
+    fun playFmQueue(songs: List<SongEntity>, startIndex: Int = 0, position: Long = 0, playing: Boolean = true,
+                    onlyIfSessionEmpty: Boolean = false, availableSongs: List<SongEntity> = songs) =
+        restoreQueue(songs, startIndex, position, PlaybackMode.Sequential, playing, fmMode = true,
+            onlyIfSessionEmpty = onlyIfSessionEmpty, availableSongs = availableSongs)
 
     fun ensureProgressUpdates() = controllerFuture.addListener({
         val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
@@ -144,6 +169,7 @@ class PlayerController(context: Context) {
             val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
             if (controller.isPlaying) controller.pause() else controller.play()
             _state.value = _state.value.copy(playing = controller.isPlaying)
+            saveWidgetState(controller)
         }, executor)
     }
 
@@ -153,8 +179,8 @@ class PlayerController(context: Context) {
         _state.value = _state.value.copy(playing = false)
     }, executor)
 
-    fun next() = controllerFuture.addListener({ controllerFuture.get().seekToNextMediaItem() }, executor)
-    fun previous() = controllerFuture.addListener({ controllerFuture.get().seekToPreviousMediaItem() }, executor)
+    fun next() = controllerFuture.addListener({ controllerFuture.get().apply { seekToNextMediaItem(); saveWidgetState(this) } }, executor)
+    fun previous() = controllerFuture.addListener({ controllerFuture.get().apply { seekToPreviousMediaItem(); saveWidgetState(this) } }, executor)
     fun jumpTo(index: Int) = controllerFuture.addListener({
         val controller = controllerFuture.get()
         if (index in 0 until controller.mediaItemCount) {
@@ -162,8 +188,9 @@ class PlayerController(context: Context) {
             controller.play()
         }
     }, executor)
-    fun seek(position: Long) = controllerFuture.addListener({ controllerFuture.get().seekTo(position) }, executor)
+    fun seek(position: Long) = controllerFuture.addListener({ controllerFuture.get().apply { seekTo(position); saveWidgetState(this) } }, executor)
     fun updateSong(song: SongEntity) {
+        knownSongs[song.mediaStoreId] = song
         if (_state.value.song?.mediaStoreId != song.mediaStoreId) return
         _state.value = _state.value.copy(song = song, queue = _state.value.queue.map { if (it.mediaStoreId == song.mediaStoreId) song else it })
     }
@@ -201,7 +228,14 @@ class PlayerController(context: Context) {
     fun setKaraokeVocal(value: Float) = sendKaraokeCommand(KaraokeCommands.SET_VOCAL, bundleOf(KaraokeCommands.KEY_VOCAL to value))
     fun setKaraokePitch(semi: Int) = sendKaraokeCommand(KaraokeCommands.SET_PITCH, bundleOf(KaraokeCommands.KEY_PITCH to semi))
 
-    fun release() { progressJob?.cancel(); scope.cancel(); if (controllerFuture.isDone) controllerFuture.get().removeListener(listener); MediaController.releaseFuture(controllerFuture) }
+    fun release() {
+        executor.execute {
+            progressJob?.cancel()
+            scope.cancel()
+            if (controllerFuture.isDone) controllerFuture.get().removeListener(listener)
+            MediaController.releaseFuture(controllerFuture)
+        }
+    }
 
     private fun attachListener(controller: MediaController) {
         if (!listenerAttached) {
@@ -225,9 +259,47 @@ class PlayerController(context: Context) {
         progressJob = scope.launch {
             while (isActive) {
                 _state.value = _state.value.copy(playing = controller.isPlaying, position = controller.currentPosition, duration = controller.duration.coerceAtLeast(0))
+                saveWidgetState(controller)
+                appContext.sendBroadcast(Intent(appContext, life.xstar.music.player.widget.LyricsWidgetProvider::class.java).setAction("life.xstar.music.player.widget.REFRESH"))
                 delay(500)
             }
         }
+    }
+
+    /** The running service is authoritative, including after the activity/controller is recreated. */
+    private fun syncSessionState(controller: MediaController) {
+        val queue = List(controller.mediaItemCount) { index ->
+            val item = controller.getMediaItemAt(index)
+            val id = item.mediaId.toLongOrNull() ?: -1L
+            knownSongs[id] ?: _state.value.queue.firstOrNull { it.mediaStoreId == id } ?: SongEntity(
+                mediaStoreId = id, title = item.mediaMetadata.title?.toString().orEmpty(),
+                artist = item.mediaMetadata.artist?.toString().orEmpty(),
+                album = item.mediaMetadata.albumTitle?.toString().orEmpty(), durationMs = 0,
+                uri = item.localConfiguration?.uri?.toString().orEmpty(), mimeType = null,
+                albumArtUri = item.mediaMetadata.artworkUri?.toString(), sourceFolderUri = "", dateAdded = 0
+            )
+        }
+        val index = controller.currentMediaItemIndex
+        _state.value = _state.value.copy(
+            queue = queue, index = index, song = queue.getOrNull(index),
+            playing = controller.isPlaying, position = controller.currentPosition,
+            duration = controller.duration.coerceAtLeast(0),
+            mode = when {
+                controller.shuffleModeEnabled -> PlaybackMode.Shuffle
+                controller.repeatMode == Player.REPEAT_MODE_ONE -> PlaybackMode.RepeatOne
+                else -> PlaybackMode.Sequential
+            }
+        )
+    }
+
+    private fun saveWidgetState(controller: MediaController) {
+        widgetState.edit()
+            .putString("media_id", controller.currentMediaItem?.mediaId)
+            .putInt("media_index", controller.currentMediaItemIndex)
+            .putLong("position", controller.currentPosition.coerceAtLeast(0))
+            .putLong("duration", controller.duration.coerceAtLeast(0))
+            .putBoolean("playing", controller.isPlaying)
+            .apply()
     }
 
     private fun sendKaraokeCommand(action: String, args: Bundle = Bundle.EMPTY) {

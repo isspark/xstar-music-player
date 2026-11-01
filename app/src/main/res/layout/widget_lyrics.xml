@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/transparent"
+    android:gravity="center_vertical"
+    android:orientation="vertical"
+    android:padding="10dp">
+
+    <TextView
+        android:id="@+id/widget_song_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:text="XSTAR 音乐"
+        android:textColor="#FFFFFFFF"
+        android:textSize="14sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/widget_lyrics_previous"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:alpha="0.52"
+        android:textColor="#FFFFFFFF"
+        android:textSize="13sp" />
+
+    <TextView
+        android:id="@+id/widget_lyrics_current"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:maxLines="2"
+        android:text="播放歌曲后显示歌词"
+        android:textColor="#FFFFFFFF"
+        android:textSize="18sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/widget_lyrics_next"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:alpha="0.52"
+        android:textColor="#FFFFFFFF"
+        android:textSize="13sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="30dp"
+        android:layout_marginTop="4dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+        <ProgressBar
+            android:id="@+id/widget_progress"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="0dp"
+            android:layout_height="3dp"
+            android:layout_weight="1"
+            android:max="1000"
+            android:progress="0"
+            android:progressTint="#FFFFFFFF"
+            android:progressBackgroundTint="#55FFFFFF" />
+        <TextView
+            android:id="@+id/widget_time"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="0:00 / 0:00"
+            android:textColor="#BFFFFFFF"
+            android:textSize="10sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="38dp"
+        android:gravity="center"
+        android:orientation="horizontal">
+        <ImageButton android:id="@+id/widget_previous" android:layout_width="42dp" android:layout_height="38dp" android:background="@android:color/transparent" android:contentDescription="上一首" android:src="@drawable/ic_notification_previous" />
+        <ImageButton android:id="@+id/widget_play_pause" android:layout_width="48dp" android:layout_height="38dp" android:background="@android:color/transparent" android:contentDescription="播放或暂停" android:src="@drawable/ic_notification_play" />
+        <ImageButton android:id="@+id/widget_next" android:layout_width="42dp" android:layout_height="38dp" android:background="@android:color/transparent" android:contentDescription="下一首" android:src="@drawable/ic_notification_next" />
+    </LinearLayout>
+</LinearLayout>

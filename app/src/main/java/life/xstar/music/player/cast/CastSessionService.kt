@@ -93,7 +93,7 @@ class CastSessionService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_notification_music)
             .setContentTitle(title)
             .setContentText(text)
             .setOngoing(true)
@@ -101,6 +101,7 @@ class CastSessionService : Service() {
             .addAction(0, "断开投屏", stopIntent)
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setColor(getColor(R.color.notification_accent))
             .build()
     }
 

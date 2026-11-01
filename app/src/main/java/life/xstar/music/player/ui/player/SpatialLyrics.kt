@@ -242,43 +242,6 @@ fun SpatialLyrics(
                     }
                     history(.18f)
                 }
-                LyricsMode.GravityBox -> {
-                    val margin = 10.dp.toPx()
-                    val bottom = size.height - 18.dp.toPx()
-                    val back = 18.dp.toPx()
-                    val box = Path().apply {
-                        moveTo(margin, margin + back); lineTo(margin + back, margin)
-                        lineTo(size.width - margin, margin); lineTo(size.width - margin, bottom - back)
-                        lineTo(size.width - margin - back, bottom); lineTo(margin, bottom); close()
-                        moveTo(margin, margin + back); lineTo(size.width - margin - back, margin + back)
-                        lineTo(size.width - margin - back, bottom)
-                        moveTo(size.width - margin - back, margin + back); lineTo(size.width - margin, margin)
-                    }
-                    drawPath(box, ink.copy(alpha = .13f), style = Stroke(.8.dp.toPx()))
-                    drawRect(Brush.verticalGradient(listOf(Color.Transparent, accent.copy(alpha = .07f))), Offset(margin, margin), Size(size.width - margin * 2, bottom - margin))
-                    for (n in max(0, index - 3) until index) {
-                        val old = layouts.getValue(n)
-                        glyphs.getValue(n).forEachIndexed { g, rect ->
-                            val age = index - n
-                            val t = if (age > 1) 1f else (p * 1.5f - hash(g + n) * .2f).coerceIn(0f, 1f)
-                            val targetX = margin + 12.dp.toPx() + hash(g + n * 71) * (size.width - margin * 2 - 24.dp.toPx())
-                            val targetY = bottom - 14.dp.toPx() - (3 - age) * 12.dp.toPx() - (g / 9).coerceAtMost(3) * 6.dp.toPx()
-                            val start = Offset((size.width - old.size.width) / 2 + rect.center.x, center.y - old.size.height / 2 + rect.center.y)
-                            val bounce = if (t > .68f) abs(sin((t - .68f) / .32f * PI * 2)).toFloat() * (1 - t) * 30.dp.toPx() else 0f
-                            val point = Offset(start.x + (targetX - start.x) * t, start.y + (targetY - start.y) * min(1f, t / .68f).pow(2) - bounce)
-                            withTransform({ rotate((hash(g + 11) - .5f) * 90f * t, point); translate(point.x - rect.center.x, point.y - rect.center.y) }) {
-                                clipRect(rect.left, rect.top, rect.right, rect.bottom) {
-                                    drawText(old, color = accent.copy(alpha = when (age) { 1 -> .65f; 2 -> .38f; else -> .18f * (1 - p) }))
-                                }
-                            }
-                        }
-                    }
-                    withTransform({ scale(.6f + eased * .4f, .6f + eased * .4f, center); translate(0f, (1 - eased) * -size.height * .25f) }) {
-                        drawText(layout, color = Color.Black.copy(alpha = .3f), topLeft = origin + Offset(2.dp.toPx(), 3.dp.toPx()))
-                        drawText(layout, color = ink, topLeft = origin)
-                    }
-                    drawLine(ink.copy(alpha = .24f), Offset(margin, bottom), Offset(size.width - margin - back, bottom), 1.dp.toPx())
-                }
                 else -> drawText(layout, color = ink, topLeft = origin)
             }
         }

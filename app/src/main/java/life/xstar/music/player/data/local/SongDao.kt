@@ -37,6 +37,9 @@ interface SongDao {
     @Query("UPDATE songs SET albumArtUri = :artworkUri WHERE artist = :artist AND album = :album")
     suspend fun updateArtworkForAlbum(artist: String, album: String, artworkUri: String)
 
+    @Query("SELECT * FROM songs WHERE artist = :artist AND album = :album")
+    suspend fun findByAlbum(artist: String, album: String): List<SongEntity>
+
     @Query("UPDATE songs SET isFavorite = NOT isFavorite WHERE mediaStoreId = :id")
     suspend fun toggleFavorite(id: Long)
 

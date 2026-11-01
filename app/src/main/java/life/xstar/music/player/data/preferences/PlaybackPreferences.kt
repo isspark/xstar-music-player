@@ -24,6 +24,8 @@ class PlaybackPreferences(private val context: Context) {
     private val themeKey = stringPreferencesKey("theme_accent")
     private val customThemeColorKey = longPreferencesKey("custom_theme_color")
     private val playerThemeKey = stringPreferencesKey("player_scene_theme")
+    private val fontKey = stringPreferencesKey("app_font")
+    private val downloadedFontKey = stringPreferencesKey("downloaded_font")
     private val lyricsModeKey = stringPreferencesKey("lyrics_display_mode")
     private val playerBackgroundKey = stringPreferencesKey("player_background_uri")
     private val albumArtworkBackgroundKey = booleanPreferencesKey("album_artwork_background")
@@ -64,6 +66,8 @@ class PlaybackPreferences(private val context: Context) {
     val playerTheme: Flow<PlayerTheme> = context.playbackDataStore.data.map { values ->
         PlayerTheme.fromStored(values[playerThemeKey])
     }
+    val font: Flow<AppFont> = context.playbackDataStore.data.map { values -> AppFont.fromStored(values[fontKey]) }
+    val downloadedFont: Flow<String> = context.playbackDataStore.data.map { it[downloadedFontKey].orEmpty() }
     val lyricsMode: Flow<LyricsMode> = context.playbackDataStore.data.map { LyricsMode.fromStored(it[lyricsModeKey]) }
     val playerDiscOpacity: Flow<Float> = context.playbackDataStore.data.map { it[playerDiscOpacityKey]?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0.42f }
     val playerDiscVisible: Flow<Boolean> = context.playbackDataStore.data.map { it[playerDiscVisibleKey] ?: true }
@@ -155,11 +159,19 @@ class PlaybackPreferences(private val context: Context) {
         it[themeKey] = "Custom"
     }
     suspend fun setPlayerTheme(theme: PlayerTheme) = context.playbackDataStore.edit { it[playerThemeKey] = theme.name }
+    suspend fun setFont(font: AppFont) = context.playbackDataStore.edit { it[fontKey] = font.name }
+    suspend fun setDownloadedFont(id: String?) = context.playbackDataStore.edit { values ->
+        if (id.isNullOrBlank()) values.remove(downloadedFontKey) else values[downloadedFontKey] = id
+    }
     suspend fun setLyricsMode(mode: LyricsMode) = context.playbackDataStore.edit { it[lyricsModeKey] = mode.name }
     suspend fun setPlayerBackground(uri: String?) = context.playbackDataStore.edit { values ->
         if (uri.isNullOrBlank()) values.remove(playerBackgroundKey) else values[playerBackgroundKey] = uri
     }
     suspend fun setAlbumArtworkBackground(enabled: Boolean) = context.playbackDataStore.edit { it[albumArtworkBackgroundKey] = enabled }
+    suspend fun setAppearanceBackground(albumArtwork: Boolean, image: String?) = context.playbackDataStore.edit { values ->
+        values[albumArtworkBackgroundKey] = albumArtwork
+        if (image.isNullOrBlank()) values.remove(playerBackgroundKey) else values[playerBackgroundKey] = image
+    }
     suspend fun setPlayerDiscOpacity(opacity: Float) = context.playbackDataStore.edit { values ->
         values[playerDiscOpacityKey] = opacity.coerceIn(0f, 1f).toString()
     }
@@ -229,25 +241,30 @@ data class ThemeAccent private constructor(val name: String, val argb: Long) {
 }
 
 enum class LyricsMode(val title: String, val subtitle: String) {
+    Random("随机", "每次切换歌曲随机应用一种歌词模式，连续两首不重复"),
     Normal("普通", "保留各播放外观原有的歌词效果"),
+    Terminal("终端心跳", "主题色余辉 · 歌词逐字输入 · 光标跟随 · 历史日志向上提交"),
     NeonStorm("霓虹磁暴", "字符律动 · 游走电弧 · 拖动牵引，跟随主题配色"),
     DensityMap("密度地图", "整首歌词构图 · 连续轨道 · 当前句聚焦"),
+    LyricRain("文字瀑布", "错落竖排字流 · 多句缓缓下落 · 中央逐字点亮"),
+    BambooScroll("千字竹简", "从右向左竖排 · 竹简横向展开 · 主题色逐字染墨"),
     PopBounce("逐字弹跳", "当前歌词逐字弹入 · 弹出时高亮 · 完成后恢复"),
+    LightTrail("流光逐字", "舒展弧线书写 · 正向短句轻弹 · 双句交替柔和淡出"),
+    Sakura("落花", "枫叶缓缓飘落 · 四方汇聚成微倾歌词 · 保留三句向下滑动"),
     RiftFall("裂隙坠落", "歌词向右穿过中央裂缝 · 逐字失重旋转坠落"),
     Firework("烟花", "底部升空 · 字符绽放成句 · 唱过的歌词下移"),
     TypeMachine("活字机关", "文字逐字翻转 · 末字主题色 · 下一句镜面倒影"),
     DeepSea("深海气泡", "单字圆泡漂浮 · 原地破碎展开 · 唱完淡出归泡"),
     Stardust("星尘铸字", "空间粒子升空 · 汇聚成句 · 星尘下沉"),
-    GravityBox("重力沙盒", "玻璃展盒 · 字块坠落回弹 · 底部堆积"),
     ForestLight("林间漏光", "透明扫光 · 散字慢聚 · 直线行列 · 主题色逐字点亮 · 双句浮动");
 
     companion object {
-        fun fromStored(value: String?): LyricsMode = entries.firstOrNull { it.name == value } ?: Normal
+        fun fromStored(value: String?): LyricsMode = if (value == "Snake") Sakura else entries.firstOrNull { it.name == value } ?: Normal
     }
 }
 
 val LyricsMode.isSpatial: Boolean get() = this in setOf(LyricsMode.TypeMachine,
-    LyricsMode.DeepSea, LyricsMode.Stardust, LyricsMode.GravityBox, LyricsMode.ForestLight)
+    LyricsMode.DeepSea, LyricsMode.Stardust, LyricsMode.ForestLight)
 
 enum class PlayerTheme(val title: String, val subtitle: String) {
     Classic("经典播放器", "专辑光碟 · 原有界面"),
@@ -258,5 +275,18 @@ enum class PlayerTheme(val title: String, val subtitle: String) {
 
     companion object {
         fun fromStored(value: String?): PlayerTheme = entries.firstOrNull { it.name == value } ?: Classic
+    }
+}
+
+enum class AppFont(val title: String, val subtitle: String) {
+    Default("系统无衬线", "清晰耐看，适合长时间听歌"),
+    Serif("优雅衬线", "更有杂志感的音乐文字"),
+    Monospace("复古等宽", "节拍感与终端风格"),
+    Cursive("轻盈手写", "柔和、随性的氛围字体"),
+    Rounded("幼圆圆体", "内置圆体字形，圆润亲和"),
+    Lishu("隶书书法", "内置书法字形，古朴舒展");
+
+    companion object {
+        fun fromStored(value: String?): AppFont = entries.firstOrNull { it.name == value } ?: Default
     }
 }

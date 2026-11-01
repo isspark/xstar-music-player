@@ -7,9 +7,13 @@ import android.content.pm.PackageManager
 import android.media.MediaPlayer
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.view.PixelCopy
+import android.os.Handler
+import android.os.Looper
 import android.net.Uri
 import android.os.SystemClock
 import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicInteger
 import android.os.Bundle
 import androidx.core.view.WindowCompat
@@ -59,6 +63,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -84,6 +89,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.ImeAction
@@ -111,9 +117,15 @@ import life.xstar.music.player.data.audio.AudioQuality
 import life.xstar.music.player.data.preferences.PlaybackPreferences
 import life.xstar.music.player.data.preferences.ThemeAccent
 import life.xstar.music.player.data.preferences.PlayerTheme
+import life.xstar.music.player.data.preferences.AppFont
+import life.xstar.music.player.data.font.*
 import life.xstar.music.player.data.preferences.LyricsMode
 import life.xstar.music.player.ui.player.NeonStormLyrics
 import life.xstar.music.player.ui.player.PopBounceLyrics
+import life.xstar.music.player.ui.player.LightTrailLyrics
+import life.xstar.music.player.ui.player.VerticalLyrics
+import life.xstar.music.player.ui.player.TerminalLyrics
+import life.xstar.music.player.ui.player.SakuraLyrics
 import life.xstar.music.player.ui.player.RiftFallLyrics
 import life.xstar.music.player.ui.player.FireworkLyrics
 import life.xstar.music.player.ui.player.SpatialLyrics
@@ -138,26 +150,42 @@ import life.xstar.music.player.data.online.OnlineDownloadState
 import life.xstar.music.player.data.online.supportedOnlinePlatforms
 import life.xstar.music.player.data.online.platformLabel
 import life.xstar.music.player.navigation.*
+import life.xstar.music.player.ui.LocalXstarFontFamily
+import life.xstar.music.player.ui.toFontFamily
+import life.xstar.music.player.ui.downloadedFontFamily
 import life.xstar.music.player.player.*
 
 private fun persistMusicFolderPermission(context: Context, uri: Uri) {
     try {
         context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        android.widget.Toast.makeText(context, "已保存音乐目录读写授权", android.widget.Toast.LENGTH_SHORT).show()
     } catch (_: SecurityException) {
         context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        android.widget.Toast.makeText(context, "此目录仅授予读取权限，无法写入封面或歌词，请选择可写的音乐目录", android.widget.Toast.LENGTH_LONG).show()
     }
 }
 
 class MainActivity : ComponentActivity() {
     private lateinit var musicViewModel: MusicViewModel
+    private var sharingScreenshot = false
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         enableEdgeToEdge()
         val app = application as XstarApplication
-        val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, PlayerController(this), app.playbackPreferences, LyricsRepository(this), app.castController, app.onlineMusicRepository, app.togetherController, app.applicationContext))[MusicViewModel::class.java]
+        val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, PlayerController(this), app.playbackPreferences, LyricsRepository(this), app.castController, app.onlineMusicRepository, app.togetherController, app.applicationContext, app.fontCatalog))[MusicViewModel::class.java]
         musicViewModel = vm
-        setContent { val theme by vm.theme.collectAsStateWithLifecycle(); XstarTheme(theme) { XstarApp(vm) } }
+        setContent {
+            val theme by vm.theme.collectAsStateWithLifecycle()
+            val font by vm.font.collectAsStateWithLifecycle()
+            val downloadedFont by vm.downloadedFont.collectAsStateWithLifecycle()
+            XstarTheme(theme, font, downloadedFont, app.fontCatalog) { XstarApp(vm) }
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST)
+        }
         handleIntent(intent)
     }
 
@@ -165,6 +193,57 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleIntent(intent)
+    }
+
+    fun shareCurrentPlayerScreenshot() {
+        if (sharingScreenshot || isFinishing || isDestroyed) return
+        sharingScreenshot = true
+        window.decorView.post {
+            val root = window.decorView
+            var capturedBitmap: Bitmap? = null
+            try {
+                check(root.width > 0 && root.height > 0 && !isDestroyed)
+                val bitmap = Bitmap.createBitmap(root.width, root.height, Bitmap.Config.ARGB_8888)
+                capturedBitmap = bitmap
+                // Copy the rendered window: software Canvas cannot draw Coil hardware bitmaps.
+                PixelCopy.request(window, bitmap, { result ->
+                    if (result != PixelCopy.SUCCESS) {
+                        bitmap.recycle()
+                        sharingScreenshot = false
+                        android.widget.Toast.makeText(this, "截图失败，请重试", android.widget.Toast.LENGTH_SHORT).show()
+                    } else lifecycleScope.launch {
+                        try {
+                            val uri = withContext(Dispatchers.IO) {
+                                val directory = File(cacheDir, "share").apply { check(isDirectory || mkdirs()) }
+                                val image = File(directory, "xstar-player-${System.currentTimeMillis()}.png")
+                                FileOutputStream(image).use { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
+                                androidx.core.content.FileProvider.getUriForFile(this@MainActivity, "$packageName.files", image)
+                            }
+                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                type = "image/png"
+                                putExtra(Intent.EXTRA_STREAM, uri)
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                clipData = android.content.ClipData.newRawUri("XSTAR 播放页截图", uri)
+                            }
+                            startActivity(Intent.createChooser(shareIntent, "分享播放页截图"))
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (error: Exception) {
+                            android.util.Log.e("PlayerShare", "Screenshot sharing failed", error)
+                            android.widget.Toast.makeText(this@MainActivity, "截图分享失败，请重试", android.widget.Toast.LENGTH_SHORT).show()
+                        } finally {
+                            bitmap.recycle()
+                            sharingScreenshot = false
+                        }
+                    }
+                }, Handler(Looper.getMainLooper()))
+            } catch (error: Exception) {
+                capturedBitmap?.recycle()
+                sharingScreenshot = false
+                android.util.Log.e("PlayerShare", "Screenshot capture failed", error)
+                android.widget.Toast.makeText(this, "截图分享失败", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     private fun handleIntent(intent: Intent?) {
@@ -176,11 +255,12 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val ACTION_OPEN_PLAYER = "life.xstar.music.player.action.OPEN_PLAYER"
+        private const val NOTIFICATION_PERMISSION_REQUEST = 1002
     }
 }
 
 @OptIn(kotlinx.coroutines.FlowPreview::class)
-class MusicViewModel(private val repo: MusicRepository, val player: PlayerController, private val preferences: PlaybackPreferences, private val lyricsRepository: LyricsRepository, val castController: CastSessionController, private val onlineRepository: OnlineMusicRepository, val togetherController: TogetherSessionController, private val appContext: Context) : ViewModel() {
+class MusicViewModel(private val repo: MusicRepository, val player: PlayerController, private val preferences: PlaybackPreferences, private val lyricsRepository: LyricsRepository, val castController: CastSessionController, private val onlineRepository: OnlineMusicRepository, val togetherController: TogetherSessionController, private val appContext: Context, val fontCatalog: FontCatalog) : ViewModel() {
     val songs = repo.songs().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val favorites = repo.favorites().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val playlists = repo.playlists().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -201,7 +281,13 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val folders = preferences.folders.stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
     val theme = preferences.theme.stateIn(viewModelScope, SharingStarted.Eagerly, ThemeAccent.Blue)
     val playerTheme = preferences.playerTheme.stateIn(viewModelScope, SharingStarted.Eagerly, PlayerTheme.Classic)
-    val lyricsMode = preferences.lyricsMode.stateIn(viewModelScope, SharingStarted.Eagerly, LyricsMode.Normal)
+    val font = preferences.font.stateIn(viewModelScope, SharingStarted.Eagerly, AppFont.Default)
+    val downloadedFont = preferences.downloadedFont.stateIn(viewModelScope, SharingStarted.Eagerly, "")
+    val fontCatalogVersion = fontCatalog.version
+    val fontDownloadProgress = fontCatalog.progress
+    val selectedLyricsMode = preferences.lyricsMode.stateIn(viewModelScope, SharingStarted.Eagerly, LyricsMode.Normal)
+    private val _lyricsMode = MutableStateFlow(LyricsMode.Normal)
+    val lyricsMode = _lyricsMode.asStateFlow()
     val playerBackground = preferences.playerBackground.stateIn(viewModelScope, SharingStarted.Eagerly, "")
     val albumArtworkBackground = preferences.albumArtworkBackground.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val playerDiscOpacity = preferences.playerDiscOpacity.stateIn(viewModelScope, SharingStarted.Eagerly, .42f)
@@ -232,7 +318,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
 
     init {
         viewModelScope.launch {
-            playback.debounce(1_000).collect { state ->
+            playback.sample(1_000).collect { state ->
                 if (suppressPlaybackPersistence || state.queue.isEmpty()) return@collect
                 if (togetherState.value.inSession) return@collect
                 if (preferences.isFmModeEnabled()) preferences.saveFm(state.queue.map { it.mediaStoreId }, state.index, state.position, state.playing)
@@ -252,12 +338,14 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
                 if (queue.isEmpty()) preferences.setFmModeEnabled(false)
                 else {
                     val index = if (restored.songs.isNotEmpty()) restored.index else 0
-                    player.playFmQueue(queue, index, if (restored.songs.isNotEmpty()) saved.position else 0, saved.playing)
+                    player.playFmQueue(queue, index, if (restored.songs.isNotEmpty()) saved.position else 0, saved.playing,
+                        onlyIfSessionEmpty = true, availableSongs = repo.songs().first())
                 }
             } else {
                 val saved = preferences.read()
                 val restored = restoreSongs(saved)
-                if (restored.songs.isNotEmpty()) player.restoreQueue(restored.songs, restored.index, saved.position, saved.mode.toPlaybackMode(), playing = false)
+                if (restored.songs.isNotEmpty()) player.restoreQueue(restored.songs, restored.index, saved.position, saved.mode.toPlaybackMode(), playing = false,
+                    onlyIfSessionEmpty = true, availableSongs = repo.songs().first())
             }
         }
         viewModelScope.launch {
@@ -273,6 +361,14 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
             }
         }.distinctUntilChangedBy { it?.mediaStoreId }
         val activeTrackId = activeSong.map { it?.mediaStoreId }.distinctUntilChanged()
+        viewModelScope.launch {
+            combine(selectedLyricsMode, activeTrackId) { mode, id -> mode to id }
+                .distinctUntilChanged().collect { (mode, _) ->
+                    _lyricsMode.value = if (mode == LyricsMode.Random) {
+                        LyricsMode.entries.filter { it != LyricsMode.Random && it != _lyricsMode.value }.random()
+                    } else mode
+                }
+        }
         viewModelScope.launch {
             combine(activeSong, onlineLyricsEnabled) { song, online -> song to online }
                 .distinctUntilChanged().collectLatest { (song, online) ->
@@ -299,12 +395,25 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
             }
         }
         viewModelScope.launch {
-            combine(activeTrackId, fmModeEnabled, onlineArtworkEnabled) { id, fm, online -> Triple(id, fm, online) }
-                .distinctUntilChanged().collect { (id, fm, online) ->
+            combine(activeTrackId, onlineArtworkEnabled) { id, online -> id to online }
+                .distinctUntilChanged().collect { (id, online) ->
                 val song = id?.let { repo.getSong(it) } ?: return@collect
-                if (fm && online && song.albumArtUri.isNullOrBlank()) {
-                    runCatching { repo.findFirstArtwork(song.artist, song.album) }
-                        .getOrNull()?.let { repo.saveArtworkForAlbum(song.artist, song.album, it) }
+                if (online && (song.albumArtUri.isNullOrBlank() || song.albumArtUri.endsWith(".img") ||
+                    (!song.albumArtUri.contains("://") && !File(song.albumArtUri).isFile))) {
+                    try {
+                        val query = song.album.takeUnless { it.isBlank() || it == "未知专辑" || it == "<unknown>" } ?: song.title
+                        repo.findFirstArtwork(song.artist, query)?.let {
+                            // Do not rewrite the file that ExoPlayer is currently reading. The
+                            // metadata writer uses rwt, which truncates the document before
+                            // copying the edited file back and can make the active stream hit EOF.
+                            // The cached artwork is enough for the player UI and notification.
+                            reportArtworkResult(repo.saveArtworkForSong(song, it, embed = false), automatic = true)
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (failure: Exception) {
+                        android.util.Log.w("Artwork", "自动获取封面失败", failure)
+                    }
                 }
             }
         }
@@ -346,8 +455,22 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     fun setTheme(theme: ThemeAccent) = viewModelScope.launch { preferences.setTheme(theme) }
     fun setCustomThemeColor(argb: Long) = viewModelScope.launch { preferences.setCustomThemeColor(argb) }
     fun setPlayerTheme(theme: PlayerTheme) = viewModelScope.launch { preferences.setPlayerTheme(theme) }
+    fun setFont(font: AppFont) = viewModelScope.launch { preferences.setFont(font); preferences.setDownloadedFont(null) }
+    fun enableDownloadedFont(font: DownloadableFont) = viewModelScope.launch {
+        if (!fontCatalog.isDownloaded(font)) {
+            runCatching { fontCatalog.download(font) }.onFailure { fontCatalog.reportError(font.id, it.message ?: "下载失败") }
+        }
+        if (fontCatalog.isDownloaded(font)) preferences.setDownloadedFont(font.id)
+    }
+    fun removeDownloadedFont(font: DownloadableFont) = viewModelScope.launch {
+        if (downloadedFont.value == font.id) preferences.setDownloadedFont(null)
+        fontCatalog.delete(font)
+    }
     fun setLyricsMode(mode: LyricsMode) = viewModelScope.launch { preferences.setLyricsMode(mode) }
     fun setPlayerBackground(uri: String?) = viewModelScope.launch { preferences.setPlayerBackground(uri) }
+    fun setAppearanceBackground(albumArtwork: Boolean, image: String?) = viewModelScope.launch {
+        preferences.setAppearanceBackground(albumArtwork, image)
+    }
     fun setAlbumArtworkBackground(enabled: Boolean) = viewModelScope.launch { preferences.setAlbumArtworkBackground(enabled) }
     fun setPlayerDiscOpacity(opacity: Float) = viewModelScope.launch { preferences.setPlayerDiscOpacity(opacity) }
     fun setPlayerDiscVisible(visible: Boolean) = viewModelScope.launch { preferences.setPlayerDiscVisible(visible) }
@@ -356,7 +479,25 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     fun setOnlineArtworkEnabled(enabled: Boolean) = viewModelScope.launch { preferences.setOnlineArtworkEnabled(enabled) }
     fun setOnlineLyricsEnabled(enabled: Boolean) = viewModelScope.launch { preferences.setOnlineLyricsEnabled(enabled) }
     fun artworkCandidates(artist: String, album: String) = viewModelScope.async { repo.findArtworkCandidates(artist, album) }
-    fun saveArtwork(artist: String, album: String, candidate: ArtworkCandidate) = viewModelScope.launch { repo.saveArtworkForAlbum(artist, album, candidate) }
+    fun saveArtwork(artist: String, album: String, candidate: ArtworkCandidate) = viewModelScope.launch {
+        try {
+            val playingId = playback.value.song?.mediaStoreId
+            reportArtworkResult(repo.saveArtworkForAlbum(artist, album, candidate, skipSongId = playingId))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            android.widget.Toast.makeText(appContext, "封面保存失败：${failure.message}", android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+    private fun reportArtworkResult(result: life.xstar.music.player.data.repository.ArtworkSaveResult, automatic: Boolean = false) {
+        val message = when {
+            !result.saved -> if (automatic) return else "封面下载失败，请重试"
+            result.writeFailures.isNotEmpty() -> "封面已应用，但${result.writeFailures.size}个文件未能写入：${result.writeFailures.first()}"
+            automatic -> return
+            else -> "封面已应用并写入歌曲文件"
+        }
+        android.widget.Toast.makeText(appContext, message, android.widget.Toast.LENGTH_LONG).show()
+    }
     fun findLyrics(songOverride: SongEntity? = null) = viewModelScope.launch {
         val song = songOverride ?: when {
             castState.value.connection == CastSessionController.Connection.Connected -> castState.value.song
@@ -747,8 +888,8 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         player.release()
     }
 
-    companion object { fun factory(repo: MusicRepository, player: PlayerController, preferences: PlaybackPreferences, lyrics: LyricsRepository, cast: CastSessionController, online: OnlineMusicRepository, together: TogetherSessionController, appContext: Context) = object : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player, preferences, lyrics, cast, online, together, appContext) as T
+    companion object { fun factory(repo: MusicRepository, player: PlayerController, preferences: PlaybackPreferences, lyrics: LyricsRepository, cast: CastSessionController, online: OnlineMusicRepository, together: TogetherSessionController, appContext: Context, fontCatalog: FontCatalog) = object : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player, preferences, lyrics, cast, online, together, appContext, fontCatalog) as T
     } }
 }
 
@@ -796,6 +937,7 @@ sealed class OnlineSearchUiState {
     }
     var showCastSheet by remember { mutableStateOf(false) }
     var showTogetherSheet by remember { mutableStateOf(false) }
+    var showSleepTimerDialog by remember { mutableStateOf(false) }
     val accent = theme.color()
     LaunchedEffect(vm) { vm.openPlayer.collect { navigator.navigate(PlayerRoute); drawerState.close() } }
     val openMenu: () -> Unit = { scope.launch { drawerState.open() } }
@@ -812,116 +954,143 @@ sealed class OnlineSearchUiState {
     }
     val primaryDrawerRoutes = listOf(
         PlayerRoute to (Icons.Default.Headphones to "正在播放"),
+        OnlineRoute to (Icons.Default.CloudDownload to "在线搜歌"),
         LibraryRoute to (Icons.Default.LibraryMusic to "音乐库"),
         FavoritesRoute to (Icons.Default.Favorite to "我的收藏"),
-        PlaylistsRoute to (Icons.Default.QueueMusic to "播放列表"),
-        SingingHistoryRoute to (Icons.Default.Mic to "我的演唱"),
-        OnlineRoute to (Icons.Default.CloudDownload to "在线搜歌")
+        PlaylistsRoute to (Icons.Default.QueueMusic to "播放列表")
     )
-    val toolDrawerRoutes = listOf(
-        EqualizerRoute to (Icons.Default.Equalizer to "均衡器"),
-        life.xstar.music.player.navigation.AppearanceRoute to (Icons.Default.Palette to "外观设置"),
-        SettingsRoute to (Icons.Default.Settings to "设置")
-    )
-    var expandedDrawerSection by rememberSaveable { mutableStateOf<String?>("浏览") }
-    val toggleDrawerSection: (String) -> Unit = { title ->
-        expandedDrawerSection = if (expandedDrawerSection == title) null else title
-    }
+    var moreExpanded by rememberSaveable { mutableStateOf(false) }
     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
     ModalNavigationDrawer(drawerState = drawerState, gesturesEnabled = drawerState.isOpen, drawerContent = {
       CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
-        ModalDrawerSheet(drawerContainerColor = Color(0xFF10131A)) {
-            Column(Modifier.fillMaxHeight().width(300.dp).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
+         ModalDrawerSheet(drawerContainerColor = Color(0xFF10131A).copy(alpha = .94f).let { base -> Color(
+             red = base.red * (1f - accent.alpha * .16f) + accent.red * accent.alpha * .16f,
+             green = base.green * (1f - accent.alpha * .16f) + accent.green * accent.alpha * .16f,
+             blue = base.blue * (1f - accent.alpha * .16f) + accent.blue * accent.alpha * .16f,
+             alpha = 1f
+         ) }) {
+             Column(Modifier.fillMaxHeight().width(300.dp)) {
+               Column(Modifier.weight(1f).padding(horizontal = 16.dp).verticalScroll(rememberScrollState())) {
                 Spacer(Modifier.height(24.dp))
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text("XSTAR", fontSize = 30.sp, fontWeight = FontWeight.Black, color = Color.White, modifier = Modifier.weight(1f))
                     IconButton(onClick = { scope.launch { drawerState.close() } }) {
                         Icon(Icons.Default.Close, "关闭菜单", tint = Color(0xFFADB6C5))
                     }
-                }
-                Text("YOUR MUSIC. YOUR SPACE.", color = Color(0xFF7E8A9A), fontSize = 11.sp)
-                Spacer(Modifier.height(34.dp))
-                DrawerSection("浏览", expandedDrawerSection == "浏览", { toggleDrawerSection("浏览") }) {
+                 }
+                 Text("YOUR MUSIC. YOUR SPACE.", color = Color(0xFF7E8A9A), fontSize = 11.sp)
+                 Spacer(Modifier.height(34.dp))
                     primaryDrawerRoutes.forEach { (route, item) ->
-                        NavigationDrawerItem(label = { Text(item.second) }, icon = { Icon(item.first, null) }, selected = route == navigationState.topLevelRoute, onClick = { navigator.navigate(route); scope.launch { drawerState.close() } }, modifier = Modifier.padding(vertical = 3.dp))
+                        NavigationDrawerItem(label = { Text(item.second) }, icon = { Icon(item.first, null) }, selected = route == navigationState.topLevelRoute, onClick = { navigator.navigate(route); scope.launch { drawerState.close() } }, modifier = Modifier.padding(vertical = 2.dp))
                     }
-                }
-                DrawerSection("工具", expandedDrawerSection == "工具", { toggleDrawerSection("工具") }) {
-                    toolDrawerRoutes.forEach { (route, item) ->
-                        NavigationDrawerItem(label = { Text(item.second) }, icon = { Icon(item.first, null) }, selected = route == navigationState.topLevelRoute, onClick = { navigator.navigate(route); scope.launch { drawerState.close() } }, modifier = Modifier.padding(vertical = 3.dp))
-                    }
-                }
-                val castActive = castState.connection != CastSessionController.Connection.Disconnected
-                val togetherBusy = togetherState.connection != TogetherConnection.Idle
-                DrawerSection("设备与共享", expandedDrawerSection == "设备与共享", { toggleDrawerSection("设备与共享") }) {
-                val castCardEnabled = !fmMode && !karaokeMode && !togetherBusy
-                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = if (castCardEnabled) .06f else .03f)) {
-                    Row(
-                        Modifier.padding(horizontal = 14.dp, vertical = 10.dp).clickable(enabled = castCardEnabled) {
-                            showCastSheet = true
-                            scope.launch { drawerState.close() }
-                        },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Default.Cast, null, Modifier.size(21.dp), tint = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.width(10.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text("投屏", color = if (castCardEnabled) Color.White else Color.White.copy(alpha = .5f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                when {
-                                    !castCardEnabled -> if (togetherBusy) "一起听中不可用" else if (fmMode) "FM 模式不可用" else "卡拉OK 模式不可用"
-                                    castActive -> "正在投到 ${castState.device?.friendlyName ?: "设备"}"
-                                    else -> "搜索同一 Wi-Fi 的投影设备"
-                                },
-                                color = Color(0xFF818C9C),
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        Icon(
-                            Icons.Default.ArrowForwardIos, null, Modifier.size(14.dp),
-                            tint = if (castActive) MaterialTheme.colorScheme.primary else Color(0xFF5B6577)
-                        )
-                    }
-                }
-                Spacer(Modifier.height(12.dp))
-                val togetherEnabled = !fmMode && !karaokeMode && !castActive
-                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = if (togetherEnabled) .06f else .03f)) {
-                    Row(
-                        Modifier.padding(horizontal = 14.dp, vertical = 10.dp).clickable(enabled = togetherEnabled) {
-                            showTogetherSheet = true
-                            scope.launch { drawerState.close() }
-                        },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Default.People, null, Modifier.size(21.dp), tint = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.width(10.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text("一起听", color = if (togetherEnabled) Color.White else Color.White.copy(alpha = .5f), fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                when {
-                                    !togetherEnabled -> if (fmMode) "FM 模式不可用" else if (karaokeMode) "卡拉OK 模式不可用" else "投屏中不可用"
-                                    togetherState.connection == TogetherConnection.Connected && togetherState.isHost -> "一起听中 · 与 ${togetherState.peer?.nickname ?: "好友"}"
-                                    togetherState.connection == TogetherConnection.Connected && togetherState.isMember -> "一起听中 · 房主 ${togetherState.peer?.nickname ?: ""}"
-                                    togetherState.connection == TogetherConnection.Listening -> "等待好友加入 · 邀请码 ${togetherState.code ?: ""}"
-                                    else -> "邀请好友一起听同一首歌"
-                                },
-                                color = Color(0xFF818C9C),
-                                fontSize = 11.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        Icon(
-                            Icons.Default.ArrowForwardIos, null, Modifier.size(14.dp),
-                            tint = if (togetherState.connection != TogetherConnection.Idle) MaterialTheme.colorScheme.primary else Color(0xFF5B6577)
-                        )
-                    }
-                }
-                }
-                DrawerSection("播放模式", expandedDrawerSection == "播放模式", { toggleDrawerSection("播放模式") }) {
-                Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                   NavigationDrawerItem(
+                       label = { Text("分享") },
+                       icon = { Icon(Icons.Default.Share, null) },
+                       selected = false,
+                       onClick = {
+                           scope.launch {
+                               navigator.navigate(PlayerRoute)
+                               drawerState.close()
+                               // Allow navigation and the drawer's closing frame to finish before capture.
+                               delay(350)
+                               (activity as? MainActivity)?.shareCurrentPlayerScreenshot()
+                           }
+                       },
+                       modifier = Modifier.padding(vertical = 2.dp)
+                   )
+                  NavigationDrawerItem(
+                      label = { Text("更多") },
+                      icon = { Icon(Icons.Default.MoreHoriz, null) },
+                      selected = moreExpanded,
+                      onClick = { moreExpanded = !moreExpanded },
+                      modifier = Modifier.padding(vertical = 2.dp)
+                  )
+                  val castActive = castState.connection != CastSessionController.Connection.Disconnected
+                  val togetherBusy = togetherState.connection != TogetherConnection.Idle
+                  val castEnabled = !fmMode && !karaokeMode && !togetherBusy
+                  if (moreExpanded) {
+                    NavigationDrawerItem(label = { Text("我的演唱") }, icon = { Icon(Icons.Default.Mic, null) }, selected = navigationState.topLevelRoute == SingingHistoryRoute, onClick = { navigator.navigate(SingingHistoryRoute); scope.launch { drawerState.close() } }, modifier = Modifier.padding(start = 20.dp, top = 2.dp, bottom = 2.dp))
+                  NavigationDrawerItem(
+                     label = { Text("投屏") },
+                     icon = { Icon(Icons.Default.Cast, null) },
+                     selected = castActive,
+                     onClick = { if (castEnabled) { showCastSheet = true; scope.launch { drawerState.close() } } },
+                     badge = { if (castActive) Text("已连接", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp) },
+                      modifier = Modifier.padding(start = 20.dp, top = 2.dp, bottom = 2.dp)
+                  )
+                 val togetherEnabled = !fmMode && !karaokeMode && !castActive
+                 NavigationDrawerItem(
+                     label = { Text("一起听") },
+                     icon = { Icon(Icons.Default.People, null) },
+                     selected = togetherState.connection != TogetherConnection.Idle,
+                     onClick = { if (togetherEnabled) { showTogetherSheet = true; scope.launch { drawerState.close() } } },
+                     badge = { if (togetherState.connection != TogetherConnection.Idle) Text("已连接", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp) },
+                      modifier = Modifier.padding(start = 20.dp, top = 2.dp, bottom = 2.dp)
+                  )
+                    NavigationDrawerItem(
+                        label = { Text("FM") },
+                        icon = { Icon(Icons.Default.Radio, null) },
+                        selected = fmMode,
+                        onClick = { if (fmMode) vm.setFmMode(false) else vm.setFmMode(true) },
+                        badge = { if (fmMode) Text("退出", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp) },
+                        modifier = Modifier.padding(start = 20.dp, top = 2.dp, bottom = 2.dp)
+                    )
+                    NavigationDrawerItem(
+                        label = { Text("卡拉 OK") },
+                        icon = { Icon(Icons.Default.Mic, null) },
+                        selected = karaokeMode,
+                        onClick = { if (karaokeMode) vm.setKaraokeMode(false) else vm.setKaraokeMode(true) },
+                        badge = { if (karaokeMode) Text("退出", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp) },
+                        modifier = Modifier.padding(start = 20.dp, top = 2.dp, bottom = 2.dp)
+                    )
+                  }
+                  Spacer(Modifier.height(20.dp))
+              }
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(accent.copy(alpha = .055f))
+                        .padding(vertical = 10.dp)
+                        .navigationBarsPadding()
+                ) {
+                  HorizontalDivider(color = Color.White.copy(alpha = .10f), modifier = Modifier.padding(bottom = 8.dp))
+                  Row(
+                     modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                     horizontalArrangement = Arrangement.SpaceEvenly,
+                     verticalAlignment = Alignment.CenterVertically
+                 ) {
+                       listOf(
+                           SettingsRoute to (Icons.Default.Settings to "设置"),
+                           EqualizerRoute to (Icons.Default.Equalizer to "均衡器"),
+                           life.xstar.music.player.navigation.AppearanceRoute to (Icons.Default.Palette to "外观")
+                       ).forEach { (route, item) ->
+                          Column(
+                              modifier = Modifier
+                                  .clickable { navigator.navigate(route); scope.launch { drawerState.close() } }
+                                   .padding(horizontal = 10.dp, vertical = 5.dp),
+                              horizontalAlignment = Alignment.CenterHorizontally
+                          ) {
+                              Icon(item.first, item.second, tint = if (navigationState.topLevelRoute == route) accent else Color(0xFFADB6C5))
+                              Spacer(Modifier.height(3.dp))
+                              Text(item.second, color = if (navigationState.topLevelRoute == route) accent else Color(0xFFADB6C5), fontSize = 11.sp)
+                           }
+                      }
+                      Column(
+                          modifier = Modifier
+                              .clickable { showSleepTimerDialog = true; scope.launch { drawerState.close() } }
+                              .padding(horizontal = 10.dp, vertical = 5.dp),
+                          horizontalAlignment = Alignment.CenterHorizontally
+                      ) {
+                          Icon(Icons.Default.Alarm, "定时", tint = if (sleepTimerRemaining != null) accent else Color(0xFFADB6C5))
+                          Spacer(Modifier.height(3.dp))
+                          Text(
+                              sleepTimerRemaining?.let { sleepTimerText(it) } ?: "定时",
+                              color = if (sleepTimerRemaining != null) accent else Color(0xFFADB6C5),
+                              fontSize = 11.sp
+                          )
+                      }
+                  }
+                  Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     listOf(
                         PlaybackMode.Sequential to "顺序",
                         PlaybackMode.Shuffle to "随机",
@@ -935,101 +1104,22 @@ sealed class OnlineSearchUiState {
                             },
                             label = { Text(label, fontSize = 12.sp) },
                             leadingIcon = {
-                                Icon(
-                                    when (mode) {
-                                        PlaybackMode.Shuffle -> Icons.Default.Shuffle
-                                        PlaybackMode.RepeatOne -> Icons.Default.RepeatOne
-                                        PlaybackMode.Sequential -> Icons.Default.FormatListNumbered
-                                    },
-                                    null,
-                                    modifier = Modifier.size(16.dp)
-                                )
+                                Icon(when (mode) {
+                                    PlaybackMode.Shuffle -> Icons.Default.Shuffle
+                                    PlaybackMode.RepeatOne -> Icons.Default.RepeatOne
+                                    PlaybackMode.Sequential -> Icons.Default.FormatListNumbered
+                                }, null, modifier = Modifier.size(16.dp))
                             },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-                Spacer(Modifier.height(12.dp))
-                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = if (fmMode || !castActive || togetherBusy) .06f else .03f)) {
-                    Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Radio, null, Modifier.size(21.dp), tint = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.width(10.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text("FM 模式", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                when {
-                                    songs.isEmpty() -> "请先扫描音乐"
-                                    togetherBusy -> "一起听中不可用"
-                                    castActive -> "投屏中不可用"
-                                    else -> "随机电台 · 极简手势"
-                                },
-                                color = Color(0xFF818C9C),
-                                fontSize = 11.sp
+                            modifier = Modifier.weight(1f),
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = accent.copy(alpha = .28f),
+                                selectedLabelColor = Color.White,
+                                selectedLeadingIconColor = accent
                             )
-                        }
-                        Switch(
-                            checked = fmMode,
-                            enabled = (songs.isNotEmpty() || fmMode) && !castActive && !togetherBusy,
-                            onCheckedChange = {
-                                vm.setFmMode(it)
-                                if (it) scope.launch { drawerState.close() }
-                            }
                         )
                     }
                 }
-                Spacer(Modifier.height(12.dp))
-                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = if (karaokeMode || !castActive || togetherBusy) .06f else .03f)) {
-                    Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Default.Mic, null, Modifier.size(21.dp), tint = MaterialTheme.colorScheme.primary)
-                        Spacer(Modifier.width(10.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text("卡拉OK 模式", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                            Text(
-                                when {
-                                    songs.isEmpty() -> "请先扫描音乐"
-                                    togetherBusy -> "一起听中不可用"
-                                    castActive -> "投屏中不可用"
-                                    else -> "伴奏跟唱 · 原唱/伴奏 · 变调"
-                                },
-                                color = Color(0xFF818C9C),
-                                fontSize = 11.sp
-                            )
-                        }
-                        Switch(
-                            checked = karaokeMode,
-                            enabled = (songs.isNotEmpty() || karaokeMode) && !castActive && !togetherBusy,
-                            onCheckedChange = {
-                                vm.setKaraokeMode(it)
-                                if (it) scope.launch { drawerState.close() }
-                            }
-                        )
-                    }
                 }
-                Spacer(Modifier.height(12.dp))
-                }
-                DrawerSection("定时关闭", expandedDrawerSection == "定时关闭", { toggleDrawerSection("定时关闭") }) {
-                Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = Color.White.copy(alpha = .06f)) {
-                    Column(Modifier.padding(12.dp)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Bedtime, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.primary)
-                            Spacer(Modifier.width(8.dp))
-                            Text(sleepTimerRemaining?.let { "剩余 ${sleepTimerText(it)}" } ?: "播放一段时间后暂停", color = Color.White, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                            if (sleepTimerRemaining != null) TextButton(vm::cancelSleepTimer, contentPadding = PaddingValues(horizontal = 6.dp)) { Text("取消", fontSize = 12.sp) }
-                        }
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                            listOf(10 to "10分", 20 to "20分", 30 to "30分", 60 to "1小时").forEach { (minutes, label) ->
-                                AssistChip(
-                                    onClick = { vm.setSleepTimer(minutes) },
-                                    label = { Text(label, fontSize = 11.sp) },
-                                    modifier = Modifier.weight(1f),
-                                    border = null
-                                )
-                            }
-                        }
-                    }
-                }
-                }
-                Spacer(Modifier.height(20.dp))
             }
         }
       }
@@ -1044,9 +1134,31 @@ sealed class OnlineSearchUiState {
             BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
             if (immersivePlayer) FloatingNavigationHandle(onOpen = openMenu)
             TogetherBarrageOverlay(vm, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 84.dp).widthIn(max = 340.dp))
-            if (showCastSheet) CastControlSheet(vm) { showCastSheet = false }
-            if (showTogetherSheet) TogetherSheet(vm, togetherState) { showTogetherSheet = false }
-        }
+             if (showCastSheet) CastControlSheet(vm) { showCastSheet = false }
+             if (showTogetherSheet) TogetherSheet(vm, togetherState) { showTogetherSheet = false }
+             if (showSleepTimerDialog) {
+                 AlertDialog(
+                     onDismissRequest = { showSleepTimerDialog = false },
+                     title = { Text("定时") },
+                     text = {
+                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                             listOf(10 to "10 分钟", 20 to "20 分钟", 30 to "30 分钟", 60 to "1 小时").forEach { (minutes, label) ->
+                                 TextButton(
+                                     onClick = { vm.setSleepTimer(minutes); showSleepTimerDialog = false },
+                                     modifier = Modifier.fillMaxWidth()
+                                 ) { Text(label) }
+                             }
+                         }
+                     },
+                     confirmButton = {
+                         Row {
+                             if (sleepTimerRemaining != null) TextButton(onClick = { vm.cancelSleepTimer(); showSleepTimerDialog = false }) { Text("取消定时") }
+                             TextButton(onClick = { showSleepTimerDialog = false }) { Text("关闭") }
+                         }
+                     }
+                 )
+             }
+         }
       }
     }
     }
@@ -2030,9 +2142,21 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
                 Text("可切到原唱继续演唱", color = Color(0xFF5B6577), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
             }
         }
+        lyricsMode == LyricsMode.LyricRain || lyricsMode == LyricsMode.BambooScroll -> VerticalLyrics(lines,
+            lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= playback.position }.coerceAtLeast(0),
+            playback.position, playback.playing, lyricsMode, MaterialTheme.colorScheme.primary, Color.White, modifier)
+        lyricsMode == LyricsMode.Terminal -> TerminalLyrics(lines,
+            lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= playback.position }.coerceAtLeast(0),
+            playback.position, playback.playing, modifier)
         lyricsMode.isSpatial -> SpatialLyrics(lines,
             lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= playback.position }.coerceAtLeast(0),
             playback.position, playback.playing, lyricsMode, MaterialTheme.colorScheme.primary, Color.White, modifier)
+        lyricsMode == LyricsMode.LightTrail -> LightTrailLyrics(lines,
+            lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= playback.position }.coerceAtLeast(0),
+            playback.position, playback.playing, MaterialTheme.colorScheme.primary, Color.White, modifier)
+        lyricsMode == LyricsMode.Sakura -> SakuraLyrics(lines,
+            lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= playback.position }.coerceAtLeast(0),
+            playback.position, playback.playing, MaterialTheme.colorScheme.primary, Color.White, modifier)
         lyricsMode == LyricsMode.Firework -> FireworkLyrics(lines,
             lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= playback.position }.coerceAtLeast(0),
             playback.position, playback.playing, MaterialTheme.colorScheme.primary, Color.White, modifier)
@@ -2579,7 +2703,15 @@ private data class PendingTake(val takeId: Int, val startMs: Long, val notes: Li
     when {
         lyrics == LyricsState.Loading -> Box(modifier, contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary) }
         lines.isEmpty() -> Box(modifier, contentAlignment = Alignment.Center) { Text("纯音乐 / 暂无歌词", color = Color.White.copy(alpha = .32f), fontSize = 14.sp) }
+        lyricsMode == LyricsMode.LyricRain || lyricsMode == LyricsMode.BambooScroll -> VerticalLyrics(lines,
+            current, playback.position, playback.playing, lyricsMode, MaterialTheme.colorScheme.primary, Color.White,
+            modifier, compact = true)
+        lyricsMode == LyricsMode.Terminal -> TerminalLyrics(lines, current, playback.position, playback.playing, modifier, compact = true)
         lyricsMode.isSpatial -> SpatialLyrics(lines, current, playback.position, playback.playing, lyricsMode,
+            MaterialTheme.colorScheme.primary, Color.White, modifier, compact = true)
+        lyricsMode == LyricsMode.LightTrail -> LightTrailLyrics(lines, current, playback.position, playback.playing,
+            MaterialTheme.colorScheme.primary, Color.White, modifier, compact = true)
+        lyricsMode == LyricsMode.Sakura -> SakuraLyrics(lines, current, playback.position, playback.playing,
             MaterialTheme.colorScheme.primary, Color.White, modifier, compact = true)
         lyricsMode == LyricsMode.Firework -> FireworkLyrics(lines, current, playback.position, playback.playing,
             MaterialTheme.colorScheme.primary, Color.White, modifier, compact = true)
@@ -2675,9 +2807,21 @@ private data class PendingTake(val takeId: Int, val startMs: Long, val notes: Li
                         TextButton(onClick = { vm.embedLyrics(document) }) { Text("写入音频") }
                     }
                 Box(Modifier.fillMaxSize()) {
-                if (lyricsMode.isSpatial && lines.isNotEmpty()) SpatialLyrics(lines,
+                if ((lyricsMode == LyricsMode.LyricRain || lyricsMode == LyricsMode.BambooScroll) && lines.isNotEmpty()) VerticalLyrics(lines,
                     lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= position }.coerceAtLeast(0),
                     position, playing, lyricsMode, MaterialTheme.colorScheme.primary, Color.White, Modifier.fillMaxSize())
+                else if (lyricsMode == LyricsMode.Terminal && lines.isNotEmpty()) TerminalLyrics(lines,
+                    lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= position }.coerceAtLeast(0),
+                    position, playing, Modifier.fillMaxSize())
+                else if (lyricsMode.isSpatial && lines.isNotEmpty()) SpatialLyrics(lines,
+                    lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= position }.coerceAtLeast(0),
+                    position, playing, lyricsMode, MaterialTheme.colorScheme.primary, Color.White, Modifier.fillMaxSize())
+                else if (lyricsMode == LyricsMode.LightTrail && lines.isNotEmpty()) LightTrailLyrics(lines,
+                    lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= position }.coerceAtLeast(0),
+                    position, playing, MaterialTheme.colorScheme.primary, Color.White, Modifier.fillMaxSize())
+                else if (lyricsMode == LyricsMode.Sakura && lines.isNotEmpty()) SakuraLyrics(lines,
+                    lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= position }.coerceAtLeast(0),
+                    position, playing, MaterialTheme.colorScheme.primary, Color.White, Modifier.fillMaxSize())
                 else if (lyricsMode == LyricsMode.Firework && lines.isNotEmpty()) FireworkLyrics(lines,
                     lines.indexOfLast { (it.timeMs ?: Long.MAX_VALUE) <= position }.coerceAtLeast(0),
                     position, playing, MaterialTheme.colorScheme.primary, Color.White, Modifier.fillMaxSize())
@@ -2749,7 +2893,7 @@ private data class PendingTake(val takeId: Int, val startMs: Long, val notes: Li
     LazyColumn(Modifier.fillMaxSize()) {
         item { Text("选择歌词", color = Color.White, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(16.dp)) }
         items(items, key = { it.id }) { candidate ->
-            ListItem(headlineContent = { Text(candidate.trackName.ifBlank { "未知歌曲" }) }, supportingContent = { Text("${candidate.artistName} · ${if (candidate.isSynced) "同步歌词" else "纯文本"} · 匹配度 ${candidate.score}") }, modifier = Modifier.clickable { vm.saveLyrics(candidate) })
+            ListItem(headlineContent = { Text(candidate.trackName.ifBlank { "未知歌曲" }) }, supportingContent = { Text("${candidate.artistName} · ${if (candidate.isSynced) "同步歌词" else "纯文本"} · ${candidate.provider} · 匹配度 ${candidate.score}") }, modifier = Modifier.clickable { vm.saveLyrics(candidate) })
         }
     }
 }
@@ -2978,7 +3122,7 @@ private fun dateTimeText(ms: Long): String {
 
 @Composable private fun PageHeader(openMenu: () -> Unit, actions: @Composable RowScope.() -> Unit = {}) { Row(Modifier.fillMaxWidth().height(56.dp), verticalAlignment = Alignment.CenterVertically) { IconButton(openMenu) { Icon(Icons.Default.Menu, "菜单", tint = Color.White) }; Spacer(Modifier.weight(1f)); actions() } }
 
-@Composable private fun ThemeSwatch(accent: ThemeAccent, selected: Boolean, onClick: () -> Unit) {
+@Composable internal fun ThemeSwatch(accent: ThemeAccent, selected: Boolean, onClick: () -> Unit) {
     Box(
         Modifier.size(48.dp).clip(CircleShape).clickable(onClick = onClick).padding(5.dp)
             .border(if (selected) 2.dp else 0.dp, if (selected) MaterialTheme.colorScheme.onSurface else Color.Transparent, CircleShape)
@@ -3426,7 +3570,16 @@ private fun dateTimeText(ms: Long): String {
 }
 
 @Composable private fun SettingsScreen(vm: MusicViewModel, openMenu: () -> Unit, appearanceOnly: Boolean = false) {
-    val lyricsMode by vm.lyricsMode.collectAsStateWithLifecycle()
+    if (appearanceOnly) {
+        AppearanceSettingsScreen(vm, openMenu)
+        return
+    }
+    val lyricsMode by vm.selectedLyricsMode.collectAsStateWithLifecycle()
+    val appFont by vm.font.collectAsStateWithLifecycle()
+    val downloadedFontId by vm.downloadedFont.collectAsStateWithLifecycle()
+    val fontDownloadProgress by vm.fontDownloadProgress.collectAsStateWithLifecycle()
+    val selectedFontFamily = appFont.toFontFamily()
+    val defaultFontFamily = AppFont.Default.toFontFamily()
     val context = LocalContext.current
     val theme by vm.theme.collectAsStateWithLifecycle()
     var showCustomThemeColor by remember { mutableStateOf(false) }
@@ -3491,6 +3644,97 @@ private fun dateTimeText(ms: Long): String {
                     trailingContent = { Icon(if (theme.name == "Custom") Icons.Default.Check else Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.primary) },
                     modifier = Modifier.clip(RoundedCornerShape(12.dp)).clickable { showCustomThemeColor = true }
                 )
+            }
+            SettingsDivider()
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+                Text("全局字体", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                Text("应用于整个音乐播放器，选择后即时生效并自动保存", color = Color(0xFF808B9B), fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+                Spacer(Modifier.height(6.dp))
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .42f)
+                ) {
+                    Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                        Text("字体预览", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "当前：${appFont.title}  ·  音乐让生活更有节奏",
+                            fontFamily = selectedFontFamily,
+                            fontSize = 19.sp,
+                            color = Color.White,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            "默认：系统无衬线  ·  音乐让生活更有节奏",
+                            fontFamily = defaultFontFamily,
+                            fontSize = 14.sp,
+                            color = Color(0xFF8F99A9),
+                            modifier = Modifier.padding(top = 6.dp)
+                        )
+                        Text(
+                            "Aa  123  XSTAR  /  春风十里不如听歌",
+                            fontFamily = selectedFontFamily,
+                            fontSize = 15.sp,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                AppFont.entries.forEach { font ->
+                    Row(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { vm.setFont(font) }
+                            .padding(horizontal = 4.dp, vertical = 11.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(font.title, color = if (font == appFont) MaterialTheme.colorScheme.primary else Color.White, fontSize = 16.sp, fontFamily = font.toFontFamily())
+                            Text(font.subtitle, color = Color(0xFF808B9B), fontSize = 11.sp)
+                            Text(
+                                "音乐播放器 · 春风十里 · Aa 123",
+                                color = if (font == appFont) MaterialTheme.colorScheme.primary.copy(alpha = .82f) else Color(0xFFB8C0CD),
+                                fontSize = 15.sp,
+                                fontFamily = font.toFontFamily(),
+                                modifier = Modifier.padding(top = 5.dp)
+                            )
+                        }
+                        if (font == appFont) Icon(Icons.Default.Check, "已选择", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                Text("在线字体库 · GitHub / jsDelivr", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                Text("按需下载到本机，下载后可离线使用", color = Color(0xFF808B9B), fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp, bottom = 6.dp))
+                downloadableFonts.forEach { font ->
+                    val downloaded = vm.fontCatalog.isDownloaded(font)
+                    Row(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).padding(horizontal = 4.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(font.name, color = if (downloadedFontId == font.id) MaterialTheme.colorScheme.primary else Color.White, fontSize = 16.sp)
+                            Text(font.description, color = Color(0xFF808B9B), fontSize = 11.sp)
+                            fontDownloadProgress.error?.let { error ->
+                                if (fontDownloadProgress.id == font.id) Text(error, color = Color(0xFFFF8A96), fontSize = 11.sp, modifier = Modifier.padding(top = 3.dp))
+                            }
+                            Text("音乐播放器 · 春风十里 · Aa 123", fontSize = 15.sp, color = Color(0xFFB8C0CD), modifier = Modifier.padding(top = 5.dp))
+                        }
+                        when {
+                            fontDownloadProgress.id == font.id && fontDownloadProgress.error == null -> {
+                                Column(horizontalAlignment = Alignment.End) {
+                                    if (fontDownloadProgress.total > 0) Text("${(fontDownloadProgress.fraction * 100).roundToInt()}%", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp)
+                                    else Text("下载中", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp)
+                                    LinearProgressIndicator(progress = { fontDownloadProgress.fraction }, modifier = Modifier.width(70.dp).padding(top = 3.dp))
+                                }
+                            }
+                            fontDownloadProgress.id == font.id && fontDownloadProgress.error != null -> TextButton({ vm.enableDownloadedFont(font) }) { Text("失败，重试") }
+                            downloadedFontId == font.id -> Text("使用中", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                            downloaded -> TextButton({ vm.enableDownloadedFont(font) }) { Text("启用") }
+                            else -> TextButton({ vm.enableDownloadedFont(font) }) { Text("下载") }
+                        }
+                        if (downloaded) IconButton({ vm.removeDownloadedFont(font) }) { Icon(Icons.Default.DeleteOutline, "删除") }
+                    }
+                }
             }
             SettingsDivider()
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
@@ -3571,7 +3815,12 @@ private fun dateTimeText(ms: Long): String {
                     headlineContent = { Text(folderName(uri), maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     supportingContent = { Text(uri, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                     leadingContent = { Icon(Icons.Default.Folder, null, tint = MaterialTheme.colorScheme.primary) },
-                    trailingContent = { IconButton({ vm.removeFolder(uri) }, enabled = !scanState.running) { Icon(Icons.Default.Close, "移除文件夹") } }
+                    trailingContent = {
+                        Row {
+                            TextButton(onClick = { picker.launch(Uri.parse(uri)) }, enabled = !scanState.running) { Text("重新授权读写") }
+                            IconButton({ vm.removeFolder(uri) }, enabled = !scanState.running) { Icon(Icons.Default.Close, "移除文件夹") }
+                        }
+                    }
                 )
             }
             OutlinedButton({ picker.launch(null) }, Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), enabled = !scanState.running) {
@@ -3872,12 +4121,34 @@ private suspend fun loadArtworkColors(context: android.content.Context, artworkU
 private fun ThemeAccent.color() = Color(argb)
 private fun contrastingContentColor(color: Color): Color =
     if (androidx.core.graphics.ColorUtils.calculateLuminance(color.toArgb()) > .179) Color.Black else Color.White
-@Composable private fun XstarTheme(accent: ThemeAccent, content: @Composable () -> Unit) {
+@Composable private fun XstarTheme(accent: ThemeAccent, appFont: AppFont, downloadedFontId: String, fontCatalog: FontCatalog, content: @Composable () -> Unit) {
     val primary = accent.color()
+    val builtInFontFamily = appFont.toFontFamily()
+    val downloaded = downloadableFonts.firstOrNull { it.id == downloadedFontId }
+    val fontFamily = downloadedFontFamily(LocalContext.current, downloaded?.let { fontCatalog.file(it).absolutePath }.orEmpty(), builtInFontFamily)
     val base = Color(0xFF090B10)
     val container = lerp(base, primary, .24f)
     val onAccent = contrastingContentColor(primary)
-    MaterialTheme(colorScheme = darkColorScheme(
+    CompositionLocalProvider(LocalXstarFontFamily provides fontFamily) {
+    MaterialTheme(typography = Typography().let { typography ->
+        Typography(
+            displayLarge = typography.displayLarge.copy(fontFamily = fontFamily),
+            displayMedium = typography.displayMedium.copy(fontFamily = fontFamily),
+            displaySmall = typography.displaySmall.copy(fontFamily = fontFamily),
+            headlineLarge = typography.headlineLarge.copy(fontFamily = fontFamily),
+            headlineMedium = typography.headlineMedium.copy(fontFamily = fontFamily),
+            headlineSmall = typography.headlineSmall.copy(fontFamily = fontFamily),
+            titleLarge = typography.titleLarge.copy(fontFamily = fontFamily),
+            titleMedium = typography.titleMedium.copy(fontFamily = fontFamily),
+            titleSmall = typography.titleSmall.copy(fontFamily = fontFamily),
+            bodyLarge = typography.bodyLarge.copy(fontFamily = fontFamily),
+            bodyMedium = typography.bodyMedium.copy(fontFamily = fontFamily),
+            bodySmall = typography.bodySmall.copy(fontFamily = fontFamily),
+            labelLarge = typography.labelLarge.copy(fontFamily = fontFamily),
+            labelMedium = typography.labelMedium.copy(fontFamily = fontFamily),
+            labelSmall = typography.labelSmall.copy(fontFamily = fontFamily)
+        )
+    }, colorScheme = darkColorScheme(
         primary = primary, onPrimary = onAccent,
         primaryContainer = container, onPrimaryContainer = lerp(primary, Color.White, .65f),
         inversePrimary = primary,
@@ -3890,7 +4161,13 @@ private fun contrastingContentColor(color: Color): Color =
         surfaceVariant = lerp(Color(0xFF252A34), primary, .08f), onSurfaceVariant = Color(0xFFADB6C5),
         surfaceTint = primary,
         outline = lerp(Color(0xFF727985), primary, .16f), outlineVariant = lerp(base, primary, .18f)
-    ), content = content)
+    ), content = {
+        // Material typography affects Material components, but plain Compose Text
+        // reads LocalTextStyle. Provide the selected family there as well so the
+        // app-wide setting also reaches the many custom Text composables.
+        CompositionLocalProvider(LocalTextStyle provides MaterialTheme.typography.bodyLarge, content = content)
+    })
+    }
 }
 
 private val BOTTOM_STAGE_HEIGHT = 132.dp
