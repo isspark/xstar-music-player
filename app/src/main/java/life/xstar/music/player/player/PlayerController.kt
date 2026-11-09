@@ -32,10 +32,11 @@ import life.xstar.music.player.data.local.SongEntity
 class PlayerController(context: Context) {
     private val appContext = context.applicationContext
     private val widgetState = appContext.getSharedPreferences("lyrics_widget_state", Context.MODE_PRIVATE)
-    private val executor = ContextCompat.getMainExecutor(context)
+    private val executor = ContextCompat.getMainExecutor(appContext)
     private val scope = CoroutineScope(Dispatchers.Main.immediate)
     private var progressJob: Job? = null
     private var listenerAttached = false
+    private var released = false
     private val knownSongs = mutableMapOf<Long, SongEntity>()
     private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state.asStateFlow()
@@ -80,12 +81,13 @@ class PlayerController(context: Context) {
         }
     }
     private val controllerFuture: ListenableFuture<MediaController> =
-        MediaController.Builder(context, SessionToken(context, ComponentName(context, PlaybackService::class.java)))
+        MediaController.Builder(appContext, SessionToken(appContext, ComponentName(appContext, PlaybackService::class.java)))
             .setListener(controllerListener)
             .buildAsync()
 
     init {
         controllerFuture.addListener({
+            if (released) return@addListener
             val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
             attachListener(controller)
             syncSessionState(controller)
@@ -230,9 +232,11 @@ class PlayerController(context: Context) {
 
     fun release() {
         executor.execute {
+            if (released) return@execute
+            released = true
             progressJob?.cancel()
             scope.cancel()
-            if (controllerFuture.isDone) controllerFuture.get().removeListener(listener)
+            if (controllerFuture.isDone) runCatching { controllerFuture.get() }.getOrNull()?.removeListener(listener)
             MediaController.releaseFuture(controllerFuture)
         }
     }

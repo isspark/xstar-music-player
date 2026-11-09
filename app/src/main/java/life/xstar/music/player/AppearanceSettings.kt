@@ -33,6 +33,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -60,6 +61,7 @@ private enum class AppearancePage(val title: String, val icon: ImageVector) {
     Fonts("字体", Icons.Default.TextFields),
     Player("播放界面", Icons.Default.Album),
     Lyrics("歌词显示", Icons.AutoMirrored.Filled.Notes),
+    FloatingButton("悬浮按钮", Icons.Default.TouchApp),
     Effects("动态效果", Icons.Default.GraphicEq)
 }
 
@@ -73,6 +75,7 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
     val fontId by vm.downloadedFont.collectAsStateWithLifecycle()
     val scene by vm.playerTheme.collectAsStateWithLifecycle()
     val lyrics by vm.selectedLyricsMode.collectAsStateWithLifecycle()
+    val floatingButton by vm.floatingButtonStyle.collectAsStateWithLifecycle()
     val image by vm.playerBackground.collectAsStateWithLifecycle()
     val album by vm.albumArtworkBackground.collectAsStateWithLifecycle()
     val disc by vm.playerDiscVisible.collectAsStateWithLifecycle()
@@ -111,6 +114,7 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
                         AppearancePage.Fonts -> fontName
                         AppearancePage.Player -> "${scene.title} · $backgroundName"
                         AppearancePage.Lyrics -> lyrics.title
+                        AppearancePage.FloatingButton -> floatingButton.title
                         AppearancePage.Effects -> "节拍${if (beat) "已开启" else "已关闭"} · 频谱${if (spectrum) "已开启" else "已关闭"}"
                     }
                     Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface) {
@@ -126,6 +130,7 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
             when (page) {
                 AppearancePage.Fonts -> AppearanceFonts(vm)
                 AppearancePage.Lyrics -> AppearanceLyrics(lyrics, vm::setLyricsMode)
+                AppearancePage.FloatingButton -> AppearanceFloatingButton(floatingButton, vm::setFloatingButtonStyle)
                 else -> Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     when (page) {
                         AppearancePage.Colors -> AppearanceColors(theme, vm)
@@ -167,11 +172,68 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
                     vm.setPlayerDiscOpacity(.42f)
                 }
                 AppearancePage.Lyrics -> vm.setLyricsMode(LyricsMode.Normal)
+                AppearancePage.FloatingButton -> vm.setFloatingButtonStyle(FloatingButtonStyle.Breathing)
                 AppearancePage.Effects -> { vm.setBeatEffect(true); vm.setBottomEffect(true) }
                 null -> Unit
             }
             reset = false
         }) { Text("恢复默认") } }, dismissButton = { TextButton({ reset = false }) { Text("取消") } })
+}
+
+@Composable
+private fun AppearanceFloatingButton(style: FloatingButtonStyle, select: (FloatingButtonStyle) -> Unit) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).selectableGroup()
+    ) {
+        AppearanceCard {
+            Text("悬浮按钮样式", style = MaterialTheme.typography.titleMedium)
+            Text("所有样式共享拖动、边缘吸附和导航行为，选择后立即生效。", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+            FloatingButtonStyle.entries.forEach { candidate ->
+                Surface(
+                    Modifier.fillMaxWidth().selectable(style == candidate, role = Role.RadioButton, onClick = { select(candidate) }),
+                    shape = RoundedCornerShape(16.dp),
+                    color = if (style == candidate) MaterialTheme.colorScheme.primary.copy(alpha = .12f) else Color.Transparent,
+                    border = androidx.compose.foundation.BorderStroke(if (style == candidate) 1.5.dp else 1.dp,
+                        if (style == candidate) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant)
+                ) {
+                    Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        FloatingButtonStylePreview(candidate, Modifier.size(52.dp))
+                        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                            Text(candidate.title, fontWeight = FontWeight.Medium)
+                            Text(candidate.subtitle, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (style == candidate) Icon(Icons.Default.CheckCircle, "使用中", tint = MaterialTheme.colorScheme.primary)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FloatingButtonStylePreview(style: FloatingButtonStyle, modifier: Modifier = Modifier) {
+    if (style.isSculptedFloatingStyle) {
+        SculptedFloatingButton(style, playing = true, modifier = modifier)
+        return
+    }
+    val accent = MaterialTheme.colorScheme.primary
+    Box(modifier, contentAlignment = Alignment.Center) {
+        Canvas(Modifier.fillMaxSize()) {
+            val center = center
+            when (style) {
+                FloatingButtonStyle.Spectrum -> repeat(12) { i ->
+                    val angle = i * 30f
+                    rotate(angle, center) { drawLine(accent.copy(alpha = .7f), Offset(center.x, 3.dp.toPx()), Offset(center.x, 8.dp.toPx()), 2.dp.toPx()) }
+                }
+                FloatingButtonStyle.Breathing -> drawCircle(accent.copy(alpha = .25f), size.minDimension * .42f, style = Stroke(2.dp.toPx()))
+                FloatingButtonStyle.Liquid -> drawCircle(Brush.sweepGradient(listOf(accent, Color.White, accent)), size.minDimension * .38f, style = Stroke(3.dp.toPx()))
+                FloatingButtonStyle.Magnetic -> drawRoundRect(accent.copy(alpha = .7f), style = Stroke(2.dp.toPx()), cornerRadius = androidx.compose.ui.geometry.CornerRadius(10.dp.toPx()))
+                else -> Unit
+            }
+        }
+        Icon(if (style == FloatingButtonStyle.Playback) Icons.Default.Pause else Icons.Default.MusicNote, null, tint = accent, modifier = Modifier.size(22.dp))
+    }
 }
 
 @Composable

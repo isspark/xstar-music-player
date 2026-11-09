@@ -22,6 +22,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.platform.LocalLayoutDirection
 import life.xstar.music.player.ui.player.FloatingNavigationHandle
+import life.xstar.music.player.ui.player.DrawerPlaybackModeSelector
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.activity.enableEdgeToEdge
@@ -118,6 +119,7 @@ import life.xstar.music.player.data.preferences.PlaybackPreferences
 import life.xstar.music.player.data.preferences.ThemeAccent
 import life.xstar.music.player.data.preferences.PlayerTheme
 import life.xstar.music.player.data.preferences.AppFont
+import life.xstar.music.player.data.preferences.FloatingButtonStyle
 import life.xstar.music.player.data.font.*
 import life.xstar.music.player.data.preferences.LyricsMode
 import life.xstar.music.player.ui.player.NeonStormLyrics
@@ -168,18 +170,81 @@ private fun persistMusicFolderPermission(context: Context, uri: Uri) {
 class MainActivity : ComponentActivity() {
     private lateinit var musicViewModel: MusicViewModel
     private var sharingScreenshot = false
+    private var showingLockScreen by mutableStateOf(false)
+    private val unlockReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == Intent.ACTION_USER_PRESENT) setLockScreenMode(false)
+        }
+    }
+
+    private fun setLockScreenMode(enabled: Boolean) {
+        showingLockScreen = enabled
+        if (android.os.Build.VERSION.SDK_INT >= 27) setShowWhenLocked(enabled)
+        else if (enabled) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED)
+        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED)
+    }
+
+    private fun closeLockScreenPlayer() {
+        setLockScreenMode(false)
+        moveTaskToBack(true)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val locked = getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked
+        val interactive = getSystemService(android.os.PowerManager::class.java).isInteractive
+        if (showingLockScreen && interactive && !locked) setLockScreenMode(false)
+    }
+
+    override fun onDestroy() {
+        unregisterReceiver(unlockReceiver)
+        super.onDestroy()
+    }
 
     override fun onCreate(state: Bundle?) {
         super.onCreate(state)
         enableEdgeToEdge()
+        if (state?.getBoolean("lock_screen_player_visible") == true) setLockScreenMode(true)
         val app = application as XstarApplication
-        val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, PlayerController(this), app.playbackPreferences, LyricsRepository(this), app.castController, app.onlineMusicRepository, app.togetherController, app.applicationContext, app.fontCatalog))[MusicViewModel::class.java]
+        val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, { PlayerController(app) }, app.playbackPreferences, LyricsRepository(app), app.castController, app.onlineMusicRepository, app.togetherController, app.applicationContext, app.fontCatalog))[MusicViewModel::class.java]
         musicViewModel = vm
+        androidx.core.content.ContextCompat.registerReceiver(
+            this, unlockReceiver, android.content.IntentFilter(Intent.ACTION_USER_PRESENT),
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
+        )
         setContent {
             val theme by vm.theme.collectAsStateWithLifecycle()
             val font by vm.font.collectAsStateWithLifecycle()
             val downloadedFont by vm.downloadedFont.collectAsStateWithLifecycle()
-            XstarTheme(theme, font, downloadedFont, app.fontCatalog) { XstarApp(vm) }
+            val lockScreenEnabled by vm.lockScreenPlayer.collectAsStateWithLifecycle()
+            LaunchedEffect(lockScreenEnabled) {
+                if (!lockScreenEnabled && showingLockScreen && !app.playbackPreferences.lockScreenPlayer.first()) setLockScreenMode(false)
+            }
+            XstarTheme(theme, font, downloadedFont, app.fontCatalog) {
+                if (showingLockScreen) {
+                    var keepScreenOn by rememberSaveable { mutableStateOf(false) }
+                    DisposableEffect(keepScreenOn) {
+                        if (keepScreenOn) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                        onDispose { window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+                    }
+                    androidx.activity.compose.BackHandler { closeLockScreenPlayer() }
+                    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+                        PlayerScreen(vm, ::closeLockScreenPlayer, ::closeLockScreenPlayer, ::closeLockScreenPlayer)
+                        TextButton(
+                            onClick = { keepScreenOn = !keepScreenOn },
+                            modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding(),
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = if (keepScreenOn) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = .65f)
+                            )
+                        ) {
+                            Icon(Icons.Default.LightMode, null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(if (keepScreenOn) "常亮已开启" else "屏幕常亮", fontSize = 12.sp)
+                        }
+                    }
+                } else XstarApp(vm)
+            }
         }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -193,6 +258,11 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleIntent(intent)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean("lock_screen_player_visible", showingLockScreen)
+        super.onSaveInstanceState(outState)
     }
 
     fun shareCurrentPlayerScreenshot() {
@@ -247,6 +317,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleIntent(intent: Intent?) {
+        if (intent?.action == ACTION_LOCK_SCREEN_PLAYER) {
+            // Check the persisted preference rather than trusting an exported activity intent.
+            lifecycleScope.launch {
+                val enabled = (application as XstarApplication).playbackPreferences.lockScreenPlayer.first()
+                val locked = getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked
+                val interactive = getSystemService(android.os.PowerManager::class.java).isInteractive
+                if (enabled && (locked || !interactive)) setLockScreenMode(true)
+            }
+            intent.action = null
+        }
         if (intent?.action == ACTION_OPEN_PLAYER) {
             window.decorView.post { musicViewModel.openPlayer.tryEmit(Unit) }
             intent.action = null
@@ -255,6 +335,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val ACTION_OPEN_PLAYER = "life.xstar.music.player.action.OPEN_PLAYER"
+        const val ACTION_LOCK_SCREEN_PLAYER = "life.xstar.music.player.action.LOCK_SCREEN_PLAYER"
         private const val NOTIFICATION_PERMISSION_REQUEST = 1002
     }
 }
@@ -286,6 +367,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val fontCatalogVersion = fontCatalog.version
     val fontDownloadProgress = fontCatalog.progress
     val selectedLyricsMode = preferences.lyricsMode.stateIn(viewModelScope, SharingStarted.Eagerly, LyricsMode.Normal)
+    val floatingButtonStyle = preferences.floatingButtonStyle.stateIn(viewModelScope, SharingStarted.Eagerly, FloatingButtonStyle.Breathing)
     private val _lyricsMode = MutableStateFlow(LyricsMode.Normal)
     val lyricsMode = _lyricsMode.asStateFlow()
     val playerBackground = preferences.playerBackground.stateIn(viewModelScope, SharingStarted.Eagerly, "")
@@ -294,6 +376,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val playerDiscVisible = preferences.playerDiscVisible.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val beatEffect = preferences.beatEffect.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val bottomEffect = preferences.bottomEffect.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    val lockScreenPlayer = preferences.lockScreenPlayer.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val onlineArtworkEnabled = preferences.onlineArtworkEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val onlineLyricsEnabled = preferences.onlineLyricsEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val fmModeEnabled = preferences.fmModeEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, false)
@@ -455,6 +538,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     fun setTheme(theme: ThemeAccent) = viewModelScope.launch { preferences.setTheme(theme) }
     fun setCustomThemeColor(argb: Long) = viewModelScope.launch { preferences.setCustomThemeColor(argb) }
     fun setPlayerTheme(theme: PlayerTheme) = viewModelScope.launch { preferences.setPlayerTheme(theme) }
+    fun setLockScreenPlayer(enabled: Boolean) = viewModelScope.launch { preferences.setLockScreenPlayer(enabled) }
     fun setFont(font: AppFont) = viewModelScope.launch { preferences.setFont(font); preferences.setDownloadedFont(null) }
     fun enableDownloadedFont(font: DownloadableFont) = viewModelScope.launch {
         if (!fontCatalog.isDownloaded(font)) {
@@ -467,6 +551,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         fontCatalog.delete(font)
     }
     fun setLyricsMode(mode: LyricsMode) = viewModelScope.launch { preferences.setLyricsMode(mode) }
+    fun setFloatingButtonStyle(style: FloatingButtonStyle) = viewModelScope.launch { preferences.setFloatingButtonStyle(style) }
     fun setPlayerBackground(uri: String?) = viewModelScope.launch { preferences.setPlayerBackground(uri) }
     fun setAppearanceBackground(albumArtwork: Boolean, image: String?) = viewModelScope.launch {
         preferences.setAppearanceBackground(albumArtwork, image)
@@ -888,8 +973,8 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         player.release()
     }
 
-    companion object { fun factory(repo: MusicRepository, player: PlayerController, preferences: PlaybackPreferences, lyrics: LyricsRepository, cast: CastSessionController, online: OnlineMusicRepository, together: TogetherSessionController, appContext: Context, fontCatalog: FontCatalog) = object : ViewModelProvider.Factory {
-        @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player, preferences, lyrics, cast, online, together, appContext, fontCatalog) as T
+    companion object { fun factory(repo: MusicRepository, player: () -> PlayerController, preferences: PlaybackPreferences, lyrics: LyricsRepository, cast: CastSessionController, online: OnlineMusicRepository, together: TogetherSessionController, appContext: Context, fontCatalog: FontCatalog) = object : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST") override fun <T : ViewModel> create(type: Class<T>): T = MusicViewModel(repo, player(), preferences, lyrics, cast, online, together, appContext, fontCatalog) as T
     } }
 }
 
@@ -924,6 +1009,7 @@ sealed class OnlineSearchUiState {
     val castState by vm.castState.collectAsStateWithLifecycle()
     val togetherState by vm.togetherState.collectAsStateWithLifecycle()
     val playback by vm.playback.collectAsStateWithLifecycle()
+    val floatingButtonStyle by vm.floatingButtonStyle.collectAsStateWithLifecycle()
     val songs by vm.songs.collectAsStateWithLifecycle()
     val immersivePlayer = navigationState.topLevelRoute == PlayerRoute && !fmMode && !karaokeMode
     val activity = LocalActivity.current
@@ -1053,7 +1139,28 @@ sealed class OnlineSearchUiState {
                         .padding(vertical = 10.dp)
                         .navigationBarsPadding()
                 ) {
-                  HorizontalDivider(color = Color.White.copy(alpha = .10f), modifier = Modifier.padding(bottom = 8.dp))
+                  val casting = castState.connection != CastSessionController.Connection.Disconnected
+                  val sharing = togetherState.connection == TogetherConnection.Connected
+                  val activeMode = when {
+                      casting -> castState.mode
+                      sharing -> runCatching { PlaybackMode.valueOf(togetherState.sharedMode) }.getOrDefault(playback.mode)
+                      else -> playback.mode
+                  }
+                  DrawerPlaybackModeSelector(
+                      mode = activeMode,
+                      fmMode = fmMode,
+                      enabled = !casting,
+                      status = when {
+                          casting -> "投屏中，暂不支持切换播放模式"
+                          sharing -> "与一起听房间同步"
+                          else -> null
+                      },
+                      onSelect = { mode ->
+                          if (sharing) vm.togetherSetMode(mode)
+                          else vm.player.setPlaybackMode(mode)
+                      }
+                  )
+                  HorizontalDivider(color = Color.White.copy(alpha = .10f), modifier = Modifier.padding(top = 8.dp, bottom = 8.dp))
                   Row(
                      modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
                      horizontalArrangement = Arrangement.SpaceEvenly,
@@ -1090,35 +1197,6 @@ sealed class OnlineSearchUiState {
                           )
                       }
                   }
-                  Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(
-                        PlaybackMode.Sequential to "顺序",
-                        PlaybackMode.Shuffle to "随机",
-                        PlaybackMode.RepeatOne to "循环"
-                    ).forEach { (mode, label) ->
-                        FilterChip(
-                            selected = playback.mode == mode,
-                            onClick = {
-                                if (togetherState.connection == TogetherConnection.Connected) vm.togetherSetMode(mode)
-                                else vm.player.setPlaybackMode(mode)
-                            },
-                            label = { Text(label, fontSize = 12.sp) },
-                            leadingIcon = {
-                                Icon(when (mode) {
-                                    PlaybackMode.Shuffle -> Icons.Default.Shuffle
-                                    PlaybackMode.RepeatOne -> Icons.Default.RepeatOne
-                                    PlaybackMode.Sequential -> Icons.Default.FormatListNumbered
-                                }, null, modifier = Modifier.size(16.dp))
-                            },
-                            modifier = Modifier.weight(1f),
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = accent.copy(alpha = .28f),
-                                selectedLabelColor = Color.White,
-                                selectedLeadingIconColor = accent
-                            )
-                        )
-                    }
-                }
                 }
             }
         }
@@ -1132,7 +1210,7 @@ sealed class OnlineSearchUiState {
                 modifier = Modifier.fillMaxSize()
             )
             BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
-            if (immersivePlayer) FloatingNavigationHandle(onOpen = openMenu)
+            if (immersivePlayer) FloatingNavigationHandle(style = floatingButtonStyle, playing = playback.playing, onOpen = openMenu)
             TogetherBarrageOverlay(vm, Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 84.dp).widthIn(max = 340.dp))
              if (showCastSheet) CastControlSheet(vm) { showCastSheet = false }
              if (showTogetherSheet) TogetherSheet(vm, togetherState) { showTogetherSheet = false }
@@ -3569,6 +3647,40 @@ private fun dateTimeText(ms: Long): String {
     }
 }
 
+@Composable private fun LockScreenPlayerSettings(vm: MusicViewModel) {
+    val context = LocalContext.current
+    val enabled by vm.lockScreenPlayer.collectAsStateWithLifecycle()
+    var permissionGranted by remember { mutableStateOf(android.provider.Settings.canDrawOverlays(context)) }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        permissionGranted = android.provider.Settings.canDrawOverlays(context)
+        if (permissionGranted) vm.setLockScreenPlayer(true)
+        else android.widget.Toast.makeText(context, "未授予后台展示权限，锁屏播放页未开启", android.widget.Toast.LENGTH_LONG).show()
+    }
+    Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface) {
+        Column {
+            SettingsToggle(
+                "锁屏播放页", "播放音乐时，锁屏展示当前播放主题、歌词和控制", Icons.Default.Lock,
+                enabled && permissionGranted
+            ) { checked ->
+                permissionGranted = android.provider.Settings.canDrawOverlays(context)
+                if (!checked || permissionGranted) vm.setLockScreenPlayer(checked)
+                else {
+                    try {
+                        permissionLauncher.launch(Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:${context.packageName}")))
+                    } catch (_: android.content.ActivityNotFoundException) {
+                        android.widget.Toast.makeText(context, "请在系统设置中为 XSTAR 开启显示在其他应用上层权限", android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+            Text(
+                "开启时需授权“显示在其他应用上层”，用于后台打开锁屏播放页。使用返回手势可回到系统锁屏；底部可切换屏幕常亮，退出锁屏播放页自动取消。部分手机还需允许后台弹出界面。",
+                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 14.dp)
+            )
+        }
+    }
+}
+
 @Composable private fun SettingsScreen(vm: MusicViewModel, openMenu: () -> Unit, appearanceOnly: Boolean = false) {
     if (appearanceOnly) {
         AppearanceSettingsScreen(vm, openMenu)
@@ -3805,6 +3917,7 @@ private fun dateTimeText(ms: Long): String {
         }
         }
         if (!appearanceOnly) {
+        LockScreenPlayerSettings(vm)
         SettingsSection("音乐库", "管理本地音乐文件夹与扫描", expandedSection == "音乐库", { toggleSection("音乐库") }) {
             if (folders.isEmpty()) {
                 Text("还没有添加音乐文件夹", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 14.sp, modifier = Modifier.padding(16.dp))

@@ -42,9 +42,35 @@ class PlaybackService : MediaSessionService() {
     private var spectrumJob: Job? = null
     private var equalizerPersistenceJob: Job? = null
     private var karaokePersistenceJob: Job? = null
+    private var lockScreenEnabled = false
+    private val lockScreenReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != Intent.ACTION_SCREEN_OFF || !lockScreenEnabled) return
+            val player = mediaSession?.player ?: return
+            if (!player.playWhenReady || player.mediaItemCount == 0 ||
+                player.playbackState == Player.STATE_ENDED || !android.provider.Settings.canDrawOverlays(context)) return
+            // Overlay permission supplies the background activity launch exemption. The UI
+            // itself is an ordinary showWhenLocked activity, never an overlay window.
+            try {
+                startActivity(Intent(context, MainActivity::class.java).apply {
+                    action = MainActivity.ACTION_LOCK_SCREEN_PLAYER
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                })
+            } catch (error: RuntimeException) {
+                android.util.Log.w("LockScreenPlayer", "Unable to show lock screen player", error)
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
+        androidx.core.content.ContextCompat.registerReceiver(
+            this, lockScreenReceiver, android.content.IntentFilter(Intent.ACTION_SCREEN_OFF),
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
+        )
+        scope.launch {
+            (application as XstarApplication).playbackPreferences.lockScreenPlayer.collect { lockScreenEnabled = it }
+        }
         createPlaybackChannel()
         setMediaNotificationProvider(PlaybackNotificationProvider(this))
         spectrum = SpectrumAudioProcessor()
@@ -111,6 +137,7 @@ class PlaybackService : MediaSessionService() {
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
 
     override fun onDestroy() {
+        unregisterReceiver(lockScreenReceiver)
         equalizer.release()
         karaoke.release()
         scope.cancel()

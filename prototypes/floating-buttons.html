@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>XSTAR · 悬浮按钮设计实验室</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0c0e13;color:#eff0f6;font:14px/1.6 system-ui,sans-serif}header,main{max-width:1440px;margin:auto;padding:32px}header{padding-bottom:16px}h1{font-size:clamp(26px,4vw,48px);letter-spacing:-2px;margin:12px 0}p{color:#9299ac}.eyebrow{color:#b5a3ff;letter-spacing:4px;font-size:11px}nav{display:flex;gap:8px;flex-wrap:wrap;margin:24px 0}button{font:inherit;color:inherit;cursor:pointer}nav button,.toolbar button{background:#191d29;border:1px solid #303648;border-radius:30px;padding:8px 16px}nav button.active{background:#d5caff;color:#201736;border-color:transparent}.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.toolbar span{color:#9299ac;font-size:12px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:20px}.card{background:#131720;border:1px solid #252b39;border-radius:22px;overflow:hidden}.scene{height:245px;position:relative;overflow:hidden;background:radial-gradient(ellipse at 25% 25%,#384055 0,transparent 60%),#141a27}.scene:before{content:'夜航 / NIGHT DRIVE';position:absolute;left:24px;top:24px;font-size:10px;letter-spacing:2px;color:#a6afc4}.lyrics{position:absolute;left:24px;top:84px;color:#8b96ae;font-size:15px;line-height:2.4;pointer-events:none}.lyrics b{color:#e7eaf4;font-weight:500}.meta{padding:18px 20px}.meta h2{font-size:16px;margin:0}.meta small{color:#b3a0f8;margin-right:8px;font:11px monospace}.meta p{margin:6px 0 0;font-size:12px;min-height:38px}.tag{font-size:10px;letter-spacing:1px;color:#748198}.fab{position:absolute;right:25px;bottom:36px;display:grid;place-items:center;width:54px;height:54px;background:transparent;border:0;touch-action:none;user-select:none;isolation:isolate;transition:filter .2s;outline-offset:8px}.fab:hover{filter:brightness(1.2)}.fab:active{filter:brightness(1.5)}.fab .face{position:absolute;inset:0;display:grid;place-items:center;transition:transform .25s}.fab:active .face{transform:scale(.86)}.fab svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;z-index:2}.fab:after{content:'';position:absolute;inset:-6px;border:1px solid currentColor;border-radius:inherit;opacity:0;pointer-events:none}.fab.ping:after{animation:ping .6s ease-out}.paused *{animation-play-state:paused!important}.light .scene{background:radial-gradient(ellipse at 25% 25%,#e1d7d0,transparent 65%),#ece9e2}.light .lyrics{color:#9c9790}.light .lyrics b{color:#4c494a}.light .scene:before{color:#78746e}.card.hidden{display:none}.menu{position:absolute;right:88px;bottom:35px;background:#222a3ce8;border:1px solid #4a5572;padding:10px 16px;border-radius:15px;font-size:12px;backdrop-filter:blur(15px);animation:reveal .2s ease-out}.favorite{border:0;background:none;color:#727d93;float:right;font-size:20px}.favorite.on{color:#e4c681}.hint{font-size:12px;margin-top:18px;color:#9099ad}.selected{border-color:#baa2ff}
+/* A · restrained material / true silhouettes */
+.s1 .face{border-radius:18px;background:#ffffff18;border:1px solid #ffffff55;box-shadow:inset 0 1px #ffffff66,0 8px 20px #0003;backdrop-filter:blur(16px)}
+.s2{width:64px;height:38px}.s2 .face{border-radius:99px;background:#ebedf2;color:#202a3b;box-shadow:0 6px 20px #0004}.s2 .face:after{content:'';width:4px;height:4px;background:#8a70d7;border-radius:50%;position:absolute;right:11px;animation:breathe 2s infinite}
+.s3 .face{border-radius:20px;background:linear-gradient(145deg,#f4eee2,#ccc0ab);color:#514335;box-shadow:inset 0 1px #fff,0 6px 15px #0004}.s3 svg{stroke-width:1.2}
+.s4{width:22px;height:70px;right:0}.s4 .face{border-radius:14px 0 0 14px;background:#fafaff18;border:1px solid #ffffff30;backdrop-filter:blur(14px)}.s4 svg{width:12px}.s4 .face:after{content:'';position:absolute;left:4px;width:2px;height:20px;background:#c6b8ed;border-radius:2px;animation:breathe 3s infinite}
+/* B · optical materials */
+.s5 .face{border-radius:50%;background:radial-gradient(circle at 30% 20%,#ffffffc9,transparent 38%),linear-gradient(135deg,#a7bce777,#b6a1d344);border:1px solid #e4dcff99;box-shadow:inset -5px -8px 15px #7361af66,0 10px 25px #0004;animation:float 4s ease-in-out infinite}
+.s6 .face{border-radius:16px;background:conic-gradient(from 30deg,#9eb2be,#fff,#536976,#e8ebed,#7f92a1,#fff,#9eb2be);color:#354250;box-shadow:inset 0 0 0 1px #fff8,0 8px 18px #0005}.s6 .face:before{content:'';position:absolute;inset:5px;border:1px solid #35425044;border-radius:12px}
+.s7 .face{border-radius:17px;background:linear-gradient(125deg,#bdfff2,#ccb7ff 40%,#ffb5d8 68%,#fff4be);color:#55497b;animation:hue 9s linear infinite;box-shadow:inset 0 0 0 1px #fff9,0 4px 22px #a6c7ff33}
+.s8 .face{border-radius:50%;background:radial-gradient(circle at 34% 24%,#ffffffaa,transparent 27%),radial-gradient(circle at 65% 80%,#8b68f7,transparent 60%),#303343;border:1px solid #ffffff55;box-shadow:inset 0 -4px 9px #0008,0 4px 20px #0005}.s8 svg{color:#e8dfff}
+/* C · kinetic geometry */
+.s9 .face{background:#d3ff76;color:#283418;clip-path:polygon(25% 4%,75% 4%,100% 50%,75% 96%,25% 96%,0 50%)}.s9 svg{animation:breathe 2s infinite}
+.s10 .face{border-radius:16px;background:#ff7c64;color:#482118;transform:rotate(-12deg)}.s10 .face svg{transform:rotate(12deg)}.s10:hover .face{transform:rotate(0deg)}
+.s11{width:68px;height:40px}.s11 .face{background:#b7a1ff;clip-path:polygon(12% 0,100% 0,88% 100%,0 100%);color:#241846}.s11 .face:before{content:'';position:absolute;left:8px;top:6px;bottom:6px;width:2px;background:#fff8;animation:scan 2s infinite alternate}
+.s12 .face{background:#8be3ce;color:#173d32;clip-path:polygon(50% 0,63% 20%,85% 15%,80% 38%,100% 50%,80% 63%,85% 85%,63% 80%,50% 100%,38% 80%,15% 85%,20% 63%,0 50%,20% 38%,15% 15%,38% 20%)}.s12{animation:rock 5s ease-in-out infinite}
+/* D · organic characters */
+.s13 .face{border-radius:40% 60% 55% 45% / 48% 40% 60% 52%;background:linear-gradient(140deg,#ffaeb7,#cc8bff);color:#54265a;animation:morph 5s ease-in-out infinite}
+.s14 .face{height:39px;top:11px;border-radius:30px;background:#f6f0e8;color:#7c6b83;box-shadow:0 6px 20px #0003}.s14 .face:before{content:'';position:absolute;width:30px;height:30px;border-radius:50%;background:inherit;top:-12px;left:9px;z-index:-1}.s14{animation:float 4s infinite}
+.s15 .face{border-radius:50%;background:#daf3b9;color:#384a2e;box-shadow:0 8px 20px #0003}.s15 .face:before{content:'• •';font-size:19px;letter-spacing:4px;position:absolute;top:4px;left:17px;animation:blink 5s infinite}.s15 svg{width:15px;position:absolute;bottom:8px}
+.s16{width:62px;height:44px}.s16 .face{border-radius:50% 50% 42% 42%;background:#ffbe80;color:#734622;box-shadow:inset 0 -5px #e49b5533}.s16 .face:before,.s16 .face:after{content:'';position:absolute;width:15px;height:15px;background:#ffbe80;top:-5px;border-radius:4px;transform:rotate(45deg)}.s16 .face:before{left:8px}.s16 .face:after{right:8px}.s16 svg{z-index:3}
+/* E · music objects */
+.s17 .face{border-radius:50%;background:repeating-radial-gradient(#202029 0 2px,#37333f 3px,#202029 4px);border:1px solid #5b5366;animation:spin 12s linear infinite}.s17 .face:before{content:'';position:absolute;inset:16px;background:#e8b09d;border-radius:50%}.s17 svg{width:12px;color:#422f37}
+.s18{width:70px;height:43px}.s18 .face{border-radius:7px;background:#e8d6b6;border:2px solid #af9771;color:#56482f}.s18 .face:before{content:'◎ ━ ◎';position:absolute;top:1px;left:8px;font-size:18px}.s18 svg{width:13px;position:absolute;bottom:1px}.s18 .face:after{content:'';position:absolute;inset:3px;border:1px solid #fff6;border-radius:3px}
+.s19{width:42px;height:65px}.s19 .face{border-radius:21px;background:linear-gradient(90deg,#a0a4ae,#f6f3ee 45%,#adb0b9);color:#4c505a;box-shadow:0 8px 20px #0004}.s19 .face:before{content:'';position:absolute;top:8px;width:22px;height:22px;border-radius:50%;background:#383c49;box-shadow:inset 0 0 0 4px #b9bdc6}.s19 svg{position:absolute;bottom:7px;width:15px}
+.s20{width:68px;height:36px}.s20 .face{border-radius:7px;background:#182c28;border:1px solid #527365;color:#b3dfad;box-shadow:inset 0 0 10px #0008}.s20 .face:before{content:'▂▅▃▇▂';font-size:18px;letter-spacing:2px;animation:breathe .8s infinite alternate}.s20 svg{display:none}
+/* F · expressive light */
+.s21 .face{border-radius:18px;background:#141723;color:#8ef8ea;border:1px solid #61f7dd;box-shadow:0 0 10px #61f7dd55,inset 0 0 10px #61f7dd22;animation:neon 3s infinite}
+.s22 .face{border-radius:50%;background:#111525;color:#e5d9ff;border:1px solid #9780d2}.s22 .face:before{content:'';position:absolute;inset:-9px -3px;border:1px solid #b3a0ff;border-radius:50%;transform:rotate(45deg);animation:spin 6s linear infinite}.s22 .face:after{content:'';position:absolute;inset:-3px -9px;border:1px solid #f4a9d777;border-radius:50%;transform:rotate(-45deg)}
+.s23 .face{border-radius:50%;background:#18131f;color:#ffdfa8;box-shadow:0 0 0 4px #e8916633,0 0 22px #e8916655}.s23 .face:before{content:'';position:absolute;inset:-5px;border:2px solid transparent;border-top-color:#ffd5a2;border-right-color:#d379ad;border-radius:50%;animation:spin 4s linear infinite}
+.s24{width:65px;height:39px}.s24 .face{border-radius:99px;background:linear-gradient(110deg,#7ce4c6,#ad9bef,#eb9cc5);color:#292545;box-shadow:0 5px 25px #b394ff44;animation:hue 10s infinite}.s24 .face:before{content:'';position:absolute;inset:3px;border:1px solid #ffffff88;border-radius:inherit}.s24 svg{width:18px}
+@keyframes breathe{50%{opacity:.45;transform:scaleY(.8)}}@keyframes float{50%{transform:translateY(-5px)}}@keyframes hue{50%{filter:hue-rotate(45deg)}}@keyframes spin{to{transform:rotate(360deg)}}@keyframes rock{50%{transform:rotate(15deg)}}@keyframes morph{50%{border-radius:60% 40% 42% 58% / 40% 60% 40% 60%;transform:rotate(8deg)}}@keyframes blink{0%,43%,49%,100%{transform:scaleY(1)}46%{transform:scaleY(.1)}}@keyframes scan{to{transform:translateX(43px)}}@keyframes neon{50%{box-shadow:0 0 20px #61f7dd66,inset 0 0 16px #61f7dd33}}@keyframes ping{from{opacity:.7;transform:scale(.8)}to{opacity:0;transform:scale(1.8)}}@keyframes reveal{from{opacity:0;transform:translateX(8px)}to{opacity:1;transform:none}}
+/* Round 02 — independent effect layers keep the navigation glyph legible. */
+.experimental{width:58px;height:58px;color:#e5ddff}.experimental .face{inset:10px;border-radius:13px;background:#13172bd9;border:1px solid #d6c3ff66;box-shadow:0 0 15px #b39aff33;z-index:2}.experimental .face svg{width:18px}.fx{position:absolute;inset:0;pointer-events:none;perspective:160px}.fx i{position:absolute;display:block;inset:0;transition:translate .45s,scale .45s;animation-delay:calc(var(--n)*-0.23s)}.experimental.ping .fx{filter:brightness(1.5)}.experimental.ping .fx i{scale:1.45}.experimental.ping .face{box-shadow:0 0 30px #d2a3ff99}.experimental .fx i:nth-child(n+5){display:none}
+.s25 .fx i{border:2px solid #b86bff;border-radius:39% 61% 62% 38% / 58% 37% 63% 42%;box-shadow:0 0 9px currentColor,inset 0 0 9px #ac69ff44;color:#ac69ff;animation:plasma 4s linear infinite}.s25 .fx i:nth-child(2){inset:4px -5px;border-color:#6afce2;color:#6afce2;animation-direction:reverse}.s25 .fx i:nth-child(3){inset:-4px 6px;border-color:#ff8acb;color:#ff8acb;animation-duration:6s}.s25 .fx i:nth-child(4){display:none}
+.s26 .face{border-radius:50%;background:radial-gradient(circle at 30% 20%,#fff,#83dccd 18%,#143e4d 70%)}.s26 .fx{filter:drop-shadow(0 0 6px #6cf4c1)}.s26 .fx i{inset:20px;border-radius:50%;background:linear-gradient(130deg,#fff,#7af3bf,#5d77db);animation:mercury 3.8s ease-in-out infinite}.s26 .fx i:nth-child(4){display:none}.s26.ping .fx i{translate:12px -10px}
+.s27 .face{border-radius:50%;border-color:#77dfff;background:radial-gradient(circle,#0b4161,#0c1725)}.s27 .fx i{border:2px dashed #69dfff;border-radius:50%;box-shadow:0 0 8px #56bbff66;animation:arc 2.8s linear infinite}.s27 .fx i:nth-child(2){inset:-7px;border:1px dotted #8c8dff;animation-direction:reverse}.s27 .fx i:nth-child(n+3){display:none}.s27.ping .fx i{scale:1.8}
+.s28 .fx i{inset:0 -6px;border:5px solid #a2e8fb99;border-radius:50%;animation:ribbon 4s linear infinite}.s28 .fx i:nth-child(2){border-color:#e7a0ff99;animation-delay:-1.3s}.s28 .fx i:nth-child(3){border-color:#9effce99;animation-delay:-2.6s}.s28 .fx i:nth-child(4){display:none}.s28 .face{border-radius:50%;background:#151e35cc}.s28.ping .fx{transform:scaleX(1.4)}
+.s29 .face{border-radius:50%;background:#080b13;border:0;box-shadow:0 0 14px #000}.s29 .fx i{border-radius:50%;border:4px solid transparent;border-top-color:#a78bff;border-bottom-color:#63e4e9;box-shadow:0 0 8px #b49dff44;animation:wormhole 3s linear infinite}.s29 .fx i:nth-child(2){inset:-8px;animation-direction:reverse;opacity:.7}.s29 .fx i:nth-child(3){inset:6px;animation-duration:1.7s}.s29 .fx i:nth-child(4){display:none}.s29.ping .face{transform:scale(.55)}
+.s30 .fx i:nth-child(n){display:block;inset:25px;border-radius:50%;background:#dfcfff;box-shadow:0 0 7px #b696ff;animation:stardust 4s linear infinite;animation-delay:calc(var(--n)*-.5s)}.s30.ping .fx i{scale:2;translate:0 -10px}.s30 .face{background:linear-gradient(140deg,#2f2547,#161c35);border-radius:18px}
+.s31 .face{border-radius:11px;transform:rotate(45deg);border-color:#7cf9ef}.s31 .face svg{transform:rotate(-45deg)}.s31 .fx i{inset:23px -6px;background:linear-gradient(90deg,transparent,#8bfdec);border-radius:99px;transform-origin:center;animation:beacon 3s linear infinite}.s31 .fx i:nth-child(2){animation-delay:-1.5s;background:linear-gradient(90deg,transparent,#ffaddb)}.s31 .fx i:nth-child(n+3){display:none}.s31.ping .fx i{scale:1.7}
+.s32 .face{inset:6px 13px;border-radius:4px;background:linear-gradient(140deg,#e1ffff99,#8baaff66 45%,#d77bff99);clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%);border:0}.s32 .face svg{width:15px}.s32 .fx i{inset:3px 11px;border:1px solid #b9edff99;transform:rotate(45deg);background:linear-gradient(130deg,#acddff33,#c09fff11);animation:crystal 5s ease-in-out infinite}.s32 .fx i:nth-child(2){inset:8px 17px;animation-direction:reverse}.s32 .fx i:nth-child(n+3){display:none}.s32.ping .fx i{translate:8px -8px}
+.s33 .fx i{inset:0 25px;background:linear-gradient(#a7bcdf,#4e546e);border:1px solid #c2cfff55;transform-origin:50% 50%;border-radius:4px;animation:iris 4s ease-in-out infinite;--turn:calc(var(--n)*90deg)}.s33 .face{border-radius:50%;background:#0f1725;border-color:#e3ceff}.s33.ping .fx i{scale:1.45;translate:0 -5px}
+.s34 .face{inset:10px;background:#53427c77;border:1px solid #bda8fc;transform:rotate(-20deg) skew(10deg,10deg);border-radius:3px}.s34 .face svg{transform:skew(-10deg,-10deg) rotate(20deg)}.s34 .fx i{inset:4px;border:1px solid #b5a4ff;background:linear-gradient(130deg,#baa1ff22,#63f7ed22);border-radius:3px;animation:cube 6s ease-in-out infinite}.s34 .fx i:nth-child(2){inset:12px -4px;animation-direction:reverse}.s34 .fx i:nth-child(n+3){display:none}.s34.ping .fx i{translate:10px -10px}
+.s35{width:65px}.s35 .fx i:nth-child(n){display:block;inset:0 28px 12px;border-radius:5px;background:linear-gradient(#83e9f1,#ba90ff,#f99abf);transform-origin:50% 100%;animation:fan 3s ease-in-out infinite;--turn:calc((var(--n) - 3.5)*15deg)}.s35 .face{inset:29px 18px 0;border-radius:50%;background:#20223c}.s35 .face svg{width:13px}.s35.ping .fx i{scale:1.2}
+.s36{width:70px;height:48px}.s36 .face{inset:6px 19px;border-radius:9px;background:linear-gradient(140deg,#8890b4,#343756);border-color:#d8dbff}.s36 .fx i{inset:7px 0;border-radius:2px;background:linear-gradient(140deg,#ebd9ff,#6a80bd);clip-path:polygon(0 0,45% 35%,100% 0,76% 100%,45% 55%,24% 100%);animation:wing 3s ease-in-out infinite}.s36 .fx i:nth-child(2){inset:13px 3px;background:#c69aff;animation-delay:-1.5s}.s36 .fx i:nth-child(n+3){display:none}.s36.ping .fx i{scale:1.5 1}
+.s37 .face{inset:0 3px 17px;border-radius:60% 60% 20% 20%;background:radial-gradient(ellipse at 35% 20%,#e1ffffbb,#ae8cff66 55%,#9fefff33);border-color:#d5f6ff88;animation:jelly 3s ease-in-out infinite}.s37 .face svg{width:16px}.s37 .fx i:nth-child(n){display:block;inset:28px auto -9px;left:calc(9px + var(--n)*8px);width:2px;background:linear-gradient(#c3afff,#7ff6e9aa,transparent);border-radius:50%;transform-origin:top;animation:tentacle 2.7s ease-in-out infinite}.s37 .fx i:nth-child(n+6){display:none}.s37.ping{animation:leap .7s ease-out}
+.s38 .face{inset:3px;background:linear-gradient(140deg,#cbffb3,#60d5ad);border:0;border-radius:44% 56% 38% 62%;color:#164a40;animation:alien 2.7s ease-in-out infinite}.s38 .face:before{content:'••';position:absolute;top:1px;font-size:26px;letter-spacing:7px;margin-left:7px;animation:blink 4s infinite}.s38 svg{position:absolute;bottom:8px;width:15px}.s38 .fx i{display:none}.s38.ping .face{animation:squash .7s ease-out}
+.s39 .face{inset:14px 23px;border-radius:9px;background:#f7c9f1;border:0}.s39 .face svg{display:none}.s39 .fx i{inset:0 29px 17px 0;border-radius:70% 70% 15% 70%;background:linear-gradient(150deg,#a49bff,#f7b4f0);transform-origin:100% 100%;animation:butterfly 2s ease-in-out infinite}.s39 .fx i:nth-child(2){inset:0 0 17px 29px;transform-origin:0 100%;border-radius:70% 70% 70% 15%;animation-direction:reverse}.s39 .fx i:nth-child(3){inset:30px 29px 0 7px;transform-origin:100% 0;background:#b798ee}.s39 .fx i:nth-child(4){inset:30px 7px 0 29px;transform-origin:0 0;background:#e9a5dd}.s39.ping .fx i{animation-play-state:paused;scale:1.2}
+.s40 .face{inset:0 5px;background:linear-gradient(#fbf5ff,#a5a8f5);border:0;box-shadow:0 0 22px #ac9dff44;border-radius:50% 50% 12% 12%;clip-path:polygon(0 0,100% 0,100% 100%,80% 87%,62% 100%,42% 86%,22% 100%,0 89%);color:#41415f;animation:ghost 3.5s ease-in-out infinite}.s40 .face:before{content:'• •';position:absolute;top:8px;font-size:21px;letter-spacing:2px;animation:blink 5s infinite}.s40 svg{position:absolute;bottom:10px;width:13px}.s40 .fx i{display:none}.s40.ping .face{animation:vanish .8s ease-in-out}
+@keyframes plasma{50%{border-radius:60% 40% 35% 65% / 42% 60% 40% 58%;transform:rotate(180deg)}to{transform:rotate(360deg)}}
+@keyframes mercury{0%,100%{transform:rotate(0deg) translateX(26px) scale(.65)}50%{transform:rotate(180deg) translateX(30px) scale(1.1)}}
+@keyframes arc{0%,100%{transform:rotate(0);opacity:.8}48%{opacity:1}50%{opacity:.4}to{transform:rotate(360deg)}}
+@keyframes ribbon{from{transform:rotateZ(30deg) rotateY(0)}to{transform:rotateZ(30deg) rotateY(360deg)}}
+@keyframes wormhole{0%{transform:rotate(0) scale(.85)}50%{transform:rotate(180deg) scale(1.1)}100%{transform:rotate(360deg) scale(.85)}}
+@keyframes stardust{from{transform:rotate(var(--a)) translateX(34px) rotate(0)}to{transform:rotate(calc(var(--a) + 360deg)) translateX(34px) rotate(-360deg)}}
+@keyframes beacon{to{transform:rotate(360deg)}}@keyframes crystal{50%{transform:rotate(45deg) rotateY(70deg);filter:brightness(1.4)}}
+@keyframes iris{0%,100%{transform:rotate(var(--turn)) translateX(12px)}50%{transform:rotate(calc(var(--turn) + 35deg)) translateX(19px)}}
+@keyframes cube{0%,100%{transform:rotate(-20deg) skew(10deg,10deg)}50%{transform:rotate(20deg) skew(-10deg,-10deg)}}
+@keyframes fan{0%,100%{transform:rotate(var(--turn))}50%{transform:rotate(calc(var(--turn)*.6)) scaleY(.85)}}
+@keyframes wing{50%{transform:scaleX(.75) rotateX(30deg)}}@keyframes jelly{50%{transform:scale(1.07,.88) translateY(-3px)}}
+@keyframes tentacle{50%{transform:skewX(18deg) scaleY(.75)}}@keyframes alien{50%{transform:translateY(-5px) scale(.94,1.06);border-radius:55% 45% 50% 50%}}
+@keyframes butterfly{50%{transform:rotateY(65deg)}}@keyframes ghost{50%{transform:translateY(-7px) rotate(6deg)}}
+@keyframes leap{50%{transform:translateY(-20px) scale(.9,1.1)}}@keyframes squash{30%{transform:scale(1.3,.65)}65%{transform:translateY(-12px) scale(.85,1.15)}}@keyframes vanish{50%{transform:rotateY(180deg) translateY(-12px);opacity:.15}}
+.paused *,.paused *:before,.paused *:after{animation-play-state:paused!important}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important}}@media(max-width:600px){header,main{padding:20px}.grid{grid-template-columns:1fr}.scene{height:260px}}
+</style>
+</head>
+<body>
+<header>
+<div class="eyebrow">XSTAR / INTERACTION STUDIES 01</div>
+<h1>小小入口，40 种性格。</h1>
+<p><a href="floating-buttons-100.html">进入第三轮：100 款全新动态交互原型 →</a></p>
+<p><a href="song-linked-buttons-100.html">进入歌曲关联专题：首字、歌词、进度等 100 款原型 →</a></p>
+<p>第二轮：更大胆的形态，更鲜活的运动。新增 25—40 号动态实验，点击按钮查看专属反馈。</p>
+<nav id="filters" aria-label="风格筛选"></nav>
+<div class="toolbar"><button id="motion" aria-pressed="false">暂停动效</button><button id="theme" aria-pressed="false">浅色背景</button><button id="saved" aria-pressed="false">只看收藏</button><span>拖动按钮调整位置 · 点击模拟打开导航 · ☆ 收藏方案（本地保存）</span></div>
+<div class="hint">原型保留导航入口语义；暂停动效可观察静态轮廓。所有方案以接近实际尺寸展示，不使用外部资源。</div>
+</header>
+<main><div id="grid" class="grid"></div><p id="empty" hidden>此分类暂无收藏，点击卡片右侧 ☆ 添加。</p></main>
+<script>
+const groups=['全部','第二轮 · 动态实验','极简克制','光学材质','动感几何','有机趣味','音乐物件','氛围光效','能量场','空间粒子','机械装置','生命感'];
+const designs=[
+ ['雾面玻璃方糖','半透明圆角方形，细亮边与柔和内反光。','极简克制'],
+ ['白瓷短胶囊','横向低重心，小状态点缓慢明灭。','极简克制'],
+ ['暖砂陶瓷','奶油砂色与轻微厚度，温暖、安静的触感。','极简克制'],
+ ['侧边书签','贴边细窄把手，收起时最大限度让出歌词空间。','极简克制'],
+ ['冰川玻璃珠','冰蓝高光与透明体积感，轻轻悬浮。','光学材质'],
+ ['拉丝银锭','金属方形与机械倒角，清晰、精密。','光学材质'],
+ ['偏光糖纸','薄膜彩虹反射，色相缓慢迁移。','光学材质'],
+ ['黑曜珍珠','深色玻璃与紫色底光，保持低调的立体感。','光学材质'],
+ ['酸性六边','荧光绿实心六边形，利落且有辨识度。','动感几何'],
+ ['斜角珊瑚','旋转方块带一点失衡感，悬停时轻轻归正。','动感几何'],
+ ['速度切片','倾斜平行四边形，一道扫光横向穿过。','动感几何'],
+ ['薄荷星芒','八角软星轮廓，慢速摇摆而非持续旋转。','动感几何'],
+ ['莓果软糖','真正变化的非规则轮廓，粉紫双色软糖。','有机趣味'],
+ ['奶油浮云','不对称云朵剪影，轻盈上下浮动。','有机趣味'],
+ ['豆豆搭子','淡绿豆形小角色，偶尔眨眼陪伴听歌。','有机趣味'],
+ ['橘猫耳朵','横向圆脸加两只小耳朵，可爱但不占大面积。','有机趣味'],
+ ['黑胶旋钮','细密唱片纹理与桃色标签，慢速匀速转动。','音乐物件'],
+ ['口袋卡带','完整矩形磁带轮廓，米色复古工业细节。','音乐物件'],
+ ['银色遥控器','纵向迷你设备，扬声器孔与金属机身。','音乐物件'],
+ ['掌心电平表','小型墨绿仪表，发光字形模拟电平反馈。','音乐物件'],
+ ['青色霓虹框','清晰的深色实体，边框向外释放微光。','氛围光效'],
+ ['双轨卫星','核心与两层交错轨道，保留可见的呼吸空间。','氛围光效'],
+ ['日蚀余辉','暗色核心与暖色日冕，局部高光绕行。','氛围光效'],
+ ['极光滑块','低饱和流彩胶囊，透明内框提供精致层次。','氛围光效'],
+ ['等离子裂隙','三层不规则光膜错速扭转；点击时光膜向外炸开。','能量场'],
+ ['液态磁场','三颗水银卫星沿不同路径流动；点击时卫星向外分离。','能量场'],
+ ['电弧反应堆','断续蓝色电弧包围稳定核心；点击放出一轮高压脉冲。','能量场'],
+ ['极光丝带','三条通透彩带立体翻转；点击时带环伸展为蝴蝶结。','能量场'],
+ ['微型虫洞','紫青两道透视涡环持续吞吐；点击时核心收缩、涡环膨胀。','空间粒子'],
+ ['星尘引擎','八枚发光粒子沿错位轨道运行；点击时粒子向外散射。','空间粒子'],
+ ['流星信标','双颗彗星绕方形信标追逐；点击时发出交叉光束。','空间粒子'],
+ ['全息水晶','通透菱形晶体缓慢翻面；点击展开四片折射棱镜。','空间粒子'],
+ ['机械虹膜','四瓣机械叶片围绕中间入口开合；点击时快门全部打开。','机械装置'],
+ ['悬浮魔方','正面、侧面与顶面形成透明立方；点击时三面短暂分解。','机械装置'],
+ ['声波折扇','七片渐变叶片依次摆动；点击时折扇完全展开。','机械装置'],
+ ['机甲飞翼','两片银紫机械翼上下扇动；点击时侧翼向两侧伸出。','机械装置'],
+ ['水母电台','半透明伞盖呼吸，五条触须流动；点击时水母轻弹上浮。','生命感'],
+ ['果冻外星人','青绿色软体跳动与眨眼；点击时压扁，再弹回。','生命感'],
+ ['蝴蝶频率','四片粉紫翅膀立体扑动；点击时双翼短暂完全展开。','生命感'],
+ ['小小幽灵','白紫渐变幽灵轻晃，底部波浪起伏；点击时旋身消隐再出现。','生命感']
+];
+const icon='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8h12M6 12h12M6 16h7"/></svg>';
+let favorites=new Set();try{favorites=new Set(JSON.parse(localStorage.getItem('xstar-fab-favorites')||'[]'))}catch{}
+let filter='全部',onlySaved=false;
+const grid=document.querySelector('#grid');
+designs.forEach(([name,description,group],i)=>{
+ const id=i+1,card=document.createElement('article');card.className='card';card.dataset.group=group;card.dataset.id=id;
+ const layers=id>=25?`<span class="fx" aria-hidden="true">${Array.from({length:8},(_,n)=>`<i style="--n:${n};--a:${n*45}deg"></i>`).join('')}</span>`:'';
+ card.innerHTML=`<div class="scene"><div class="lyrics">风吹过无人的街道<br><b>我们在夜色中寻找光</b><br>让这一刻慢一点</div><button class="fab s${id}${id>=25?' experimental':''}" aria-label="${name}，拖动或打开导航">${layers}<span class="face">${icon}</span></button></div><div class="meta"><button class="favorite" aria-label="收藏 ${name}">☆</button><span class="tag">${group}${id>=25?' · NEW':''}</span><h2><small>${String(id).padStart(2,'0')}</small>${name}</h2><p>${description}</p></div>`;
+ const star=card.querySelector('.favorite');
+ function updateStar(){const on=favorites.has(id);star.classList.toggle('on',on);star.textContent=on?'★':'☆';star.setAttribute('aria-pressed',on);card.classList.toggle('selected',on)}updateStar();
+ star.onclick=()=>{favorites.has(id)?favorites.delete(id):favorites.add(id);try{localStorage.setItem('xstar-fab-favorites',JSON.stringify([...favorites]))}catch{}updateStar();applyFilter()};
+ const fab=card.querySelector('.fab'),scene=card.querySelector('.scene');let start=null,moved=false;
+ fab.addEventListener('pointerdown',e=>{if(e.button!==0)return;start={x:e.clientX,y:e.clientY,left:fab.offsetLeft,top:fab.offsetTop};moved=false;fab.setPointerCapture(e.pointerId)});
+ fab.addEventListener('pointermove',e=>{if(!start)return;const dx=e.clientX-start.x,dy=e.clientY-start.y;if(Math.hypot(dx,dy)>5)moved=true;if(moved){fab.style.right='auto';fab.style.bottom='auto';fab.style.left=Math.max(0,Math.min(scene.clientWidth-fab.offsetWidth,start.left+dx))+'px';fab.style.top=Math.max(0,Math.min(scene.clientHeight-fab.offsetHeight,start.top+dy))+'px'}});
+ fab.addEventListener('pointerup',()=>{start=null});fab.addEventListener('pointercancel',()=>{start=null;moved=true});
+ fab.onclick=()=>{if(moved){moved=false;return}fab.classList.remove('ping');void fab.offsetWidth;fab.classList.add('ping');const old=scene.querySelector('.menu');if(old){old.remove();return}const menu=document.createElement('div');menu.className='menu';menu.textContent='音乐库　 /　 队列　 /　 外观';scene.append(menu);setTimeout(()=>menu.remove(),2400)};
+ grid.append(card);
+});
+const filters=document.querySelector('#filters');groups.forEach(group=>{const b=document.createElement('button');b.textContent=group;b.className=group===filter?'active':'';b.setAttribute('aria-pressed',group===filter);b.onclick=()=>{filter=group;filters.querySelectorAll('button').forEach(x=>{x.classList.toggle('active',x===b);x.setAttribute('aria-pressed',x===b)});applyFilter()};filters.append(b)});
+function applyFilter(){let visible=0;grid.querySelectorAll('.card').forEach(c=>{const show=(filter==='全部'||c.dataset.group===filter||(filter==='第二轮 · 动态实验'&&Number(c.dataset.id)>=25))&&(!onlySaved||favorites.has(Number(c.dataset.id)));c.classList.toggle('hidden',!show);if(show)visible++});document.querySelector('#empty').hidden=visible>0}
+document.querySelector('#motion').onclick=function(){const paused=document.body.classList.toggle('paused');this.textContent=paused?'播放动效':'暂停动效';this.setAttribute('aria-pressed',paused)};
+document.querySelector('#theme').onclick=function(){const light=document.body.classList.toggle('light');this.textContent=light?'深色背景':'浅色背景';this.setAttribute('aria-pressed',light)};
+document.querySelector('#saved').onclick=function(){onlySaved=!onlySaved;this.textContent=onlySaved?'显示全部':'只看收藏';this.setAttribute('aria-pressed',onlySaved);applyFilter()};
+</script>
+</body>
+</html>

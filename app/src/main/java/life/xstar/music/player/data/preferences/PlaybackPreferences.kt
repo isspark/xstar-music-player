@@ -27,12 +27,14 @@ class PlaybackPreferences(private val context: Context) {
     private val fontKey = stringPreferencesKey("app_font")
     private val downloadedFontKey = stringPreferencesKey("downloaded_font")
     private val lyricsModeKey = stringPreferencesKey("lyrics_display_mode")
+    private val floatingButtonStyleKey = stringPreferencesKey("floating_button_style")
     private val playerBackgroundKey = stringPreferencesKey("player_background_uri")
     private val albumArtworkBackgroundKey = booleanPreferencesKey("album_artwork_background")
     private val playerDiscOpacityKey = stringPreferencesKey("player_disc_opacity")
     private val playerDiscVisibleKey = booleanPreferencesKey("player_disc_visible")
     private val beatEffectKey = booleanPreferencesKey("beat_effect")
     private val bottomEffectKey = booleanPreferencesKey("bottom_effect")
+    private val lockScreenPlayerKey = booleanPreferencesKey("lock_screen_player")
     private val onlineArtworkKey = booleanPreferencesKey("online_artwork_enabled")
     private val onlineLyricsKey = booleanPreferencesKey("online_lyrics_enabled")
     private val playbackModeKey = stringPreferencesKey("playback_mode")
@@ -69,10 +71,12 @@ class PlaybackPreferences(private val context: Context) {
     val font: Flow<AppFont> = context.playbackDataStore.data.map { values -> AppFont.fromStored(values[fontKey]) }
     val downloadedFont: Flow<String> = context.playbackDataStore.data.map { it[downloadedFontKey].orEmpty() }
     val lyricsMode: Flow<LyricsMode> = context.playbackDataStore.data.map { LyricsMode.fromStored(it[lyricsModeKey]) }
+    val floatingButtonStyle: Flow<FloatingButtonStyle> = context.playbackDataStore.data.map { FloatingButtonStyle.fromStored(it[floatingButtonStyleKey]) }
     val playerDiscOpacity: Flow<Float> = context.playbackDataStore.data.map { it[playerDiscOpacityKey]?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0.42f }
     val playerDiscVisible: Flow<Boolean> = context.playbackDataStore.data.map { it[playerDiscVisibleKey] ?: true }
     val beatEffect: Flow<Boolean> = context.playbackDataStore.data.map { it[beatEffectKey] ?: true }
     val bottomEffect: Flow<Boolean> = context.playbackDataStore.data.map { it[bottomEffectKey] ?: true }
+    val lockScreenPlayer: Flow<Boolean> = context.playbackDataStore.data.map { it[lockScreenPlayerKey] ?: false }
     val onlineArtworkEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[onlineArtworkKey] ?: true }
     val onlineLyricsEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[onlineLyricsKey] ?: true }
     val fmModeEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[fmModeKey] ?: false }
@@ -164,6 +168,7 @@ class PlaybackPreferences(private val context: Context) {
         if (id.isNullOrBlank()) values.remove(downloadedFontKey) else values[downloadedFontKey] = id
     }
     suspend fun setLyricsMode(mode: LyricsMode) = context.playbackDataStore.edit { it[lyricsModeKey] = mode.name }
+    suspend fun setFloatingButtonStyle(style: FloatingButtonStyle) = context.playbackDataStore.edit { it[floatingButtonStyleKey] = style.name }
     suspend fun setPlayerBackground(uri: String?) = context.playbackDataStore.edit { values ->
         if (uri.isNullOrBlank()) values.remove(playerBackgroundKey) else values[playerBackgroundKey] = uri
     }
@@ -178,6 +183,7 @@ class PlaybackPreferences(private val context: Context) {
     suspend fun setPlayerDiscVisible(visible: Boolean) = context.playbackDataStore.edit { values -> values[playerDiscVisibleKey] = visible }
     suspend fun setBeatEffect(enabled: Boolean) = context.playbackDataStore.edit { it[beatEffectKey] = enabled }
     suspend fun setBottomEffect(enabled: Boolean) = context.playbackDataStore.edit { it[bottomEffectKey] = enabled }
+    suspend fun setLockScreenPlayer(enabled: Boolean) = context.playbackDataStore.edit { it[lockScreenPlayerKey] = enabled }
     suspend fun setOnlineArtworkEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineArtworkKey] = enabled }
     suspend fun setOnlineLyricsEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineLyricsKey] = enabled }
     suspend fun setOnlineSearchEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineSearchEnabledKey] = enabled }
@@ -275,6 +281,23 @@ enum class PlayerTheme(val title: String, val subtitle: String) {
 
     companion object {
         fun fromStored(value: String?): PlayerTheme = entries.firstOrNull { it.name == value } ?: Classic
+    }
+}
+
+enum class FloatingButtonStyle(val title: String, val subtitle: String) {
+    Classic("经典按钮", "简洁音乐符号，轻量省电"),
+    Breathing("呼吸光晕", "播放时柔和呼吸，暂停后静止"),
+    Spectrum("频谱环", "外圈随节拍律动，强化音乐感"),
+    Liquid("液态气泡", "渐变形变与水波扩散效果"),
+    Magnetic("磁吸胶囊", "靠近边缘时压缩并贴合屏幕"),
+    Playback("播放状态", "用播放、暂停和加载状态表达当前状态"),
+    IceSnowflake("冰晶雪花", "六向冰晶缓缓旋转 · 点击晶枝舒展"),
+    StardustWreath("星尘花环", "彩色星尘错速环绕 · 点击散成星雨"),
+    MiniWormhole("微型虫洞", "紫青涡环交错吞吐 · 点击核心收缩"),
+    VinylKnob("黑胶旋钮", "细密黑胶纹理 · 桃色唱片标 · 播放时旋转");
+
+    companion object {
+        fun fromStored(value: String?): FloatingButtonStyle = entries.firstOrNull { it.name == value } ?: Breathing
     }
 }
 
