@@ -147,6 +147,7 @@ class LocalMusicServer(private val context: Context) {
 
     private fun openUri(uri: String): InputStream? = runCatching {
         when {
+            uri.startsWith("nas://") -> (context.applicationContext as life.xstar.music.player.XstarApplication).nasRepository.open(uri)
             uri.startsWith("http://") || uri.startsWith("https://") -> URL(uri).openStream()
             uri.startsWith("content://") || uri.startsWith("file://") ->
                 context.contentResolver.openInputStream(Uri.parse(uri))
@@ -197,9 +198,9 @@ class LocalMusicServer(private val context: Context) {
     private fun respondStream(output: java.io.OutputStream, spec: StreamSpec, rangeHeader: String?) {
         val total = spec.fileSize ?: queryLength(spec.uri)
         val range = total?.let { parseRange(rangeHeader, it) }
-        val inputStream = runCatching {
-            context.contentResolver.openInputStream(Uri.parse(spec.uri))
-        }.getOrNull()
+        val inputStream = if (spec.uri.startsWith("nas://") && range != null) runCatching {
+            (context.applicationContext as life.xstar.music.player.XstarApplication).nasRepository.open(spec.uri, "bytes=${range.first}-${range.second}")
+        }.getOrNull() else openUri(spec.uri)
         if (inputStream == null) {
             respond(output, "404 Not Found", null, byteArrayOf())
             return
@@ -207,7 +208,7 @@ class LocalMusicServer(private val context: Context) {
         inputStream.use { input ->
             if (range != null && range.first <= range.second && range.first < (total ?: Long.MAX_VALUE)) {
                 var skipped = 0L
-                val skipTarget = range.first
+                val skipTarget = if (spec.uri.startsWith("nas://")) 0L else range.first
                 while (skipped < skipTarget) {
                     val skippedNow = input.skip(skipTarget - skipped)
                     if (skippedNow <= 0) break
@@ -224,7 +225,14 @@ class LocalMusicServer(private val context: Context) {
                 }
                 output.write(header.toByteArray(Charsets.ISO_8859_1))
                 output.flush()
-                input.copyTo(output)
+                var remaining = length
+                val buffer = ByteArray(65536)
+                while (remaining > 0) {
+                    val read = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                    if (read < 0) break
+                    output.write(buffer, 0, read)
+                    remaining -= read
+                }
             } else {
                 val header = buildString {
                     append("HTTP/1.1 200 OK\r\n")

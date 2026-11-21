@@ -28,6 +28,16 @@ class PlaybackPreferences(private val context: Context) {
     private val downloadedFontKey = stringPreferencesKey("downloaded_font")
     private val lyricsModeKey = stringPreferencesKey("lyrics_display_mode")
     private val floatingButtonStyleKey = stringPreferencesKey("floating_button_style")
+    private val playerShortcutsKey = stringPreferencesKey("player_floating_shortcuts")
+    val playerShortcuts: Flow<List<PlayerShortcut>> = context.playbackDataStore.data.map { values ->
+        val stored = values[playerShortcutsKey]?.split(",")?.mapNotNull { name -> PlayerShortcut.entries.firstOrNull { it.name == name } }
+        stored?.takeIf { it.size == 4 && it.distinct().size == 4 } ?: PlayerShortcut.defaults
+    }
+    suspend fun setPlayerShortcuts(actions: List<PlayerShortcut>) {
+        if (actions.size == 4 && actions.distinct().size == 4) context.playbackDataStore.edit { it[playerShortcutsKey] = actions.joinToString(",") { action -> action.name } }
+    }
+    private val libraryViewModeKey = stringPreferencesKey("library_view_mode")
+    private val playlistStyleKey = stringPreferencesKey("playlist_style")
     private val playerBackgroundKey = stringPreferencesKey("player_background_uri")
     private val albumArtworkBackgroundKey = booleanPreferencesKey("album_artwork_background")
     private val playerDiscOpacityKey = stringPreferencesKey("player_disc_opacity")
@@ -59,6 +69,7 @@ class PlaybackPreferences(private val context: Context) {
     private val togetherServerAddressKey = stringPreferencesKey("together_server_address")
 
     val folders: Flow<Set<String>> = context.playbackDataStore.data.map { it[foldersKey].orEmpty() }
+    val playlistStyle: Flow<PlaylistStyle> = context.playbackDataStore.data.map { PlaylistStyle.fromStored(it[playlistStyleKey]) }
     val theme: Flow<ThemeAccent> = context.playbackDataStore.data.map { values ->
         if (values[themeKey] == "Custom") ThemeAccent.custom(values[customThemeColorKey] ?: ThemeAccent.Blue.argb)
         else runCatching { ThemeAccent.valueOf(values[themeKey] ?: ThemeAccent.Blue.name) }.getOrDefault(ThemeAccent.Blue)
@@ -72,6 +83,7 @@ class PlaybackPreferences(private val context: Context) {
     val downloadedFont: Flow<String> = context.playbackDataStore.data.map { it[downloadedFontKey].orEmpty() }
     val lyricsMode: Flow<LyricsMode> = context.playbackDataStore.data.map { LyricsMode.fromStored(it[lyricsModeKey]) }
     val floatingButtonStyle: Flow<FloatingButtonStyle> = context.playbackDataStore.data.map { FloatingButtonStyle.fromStored(it[floatingButtonStyleKey]) }
+    val libraryViewMode: Flow<LibraryViewMode> = context.playbackDataStore.data.map { LibraryViewMode.fromStored(it[libraryViewModeKey]) }
     val playerDiscOpacity: Flow<Float> = context.playbackDataStore.data.map { it[playerDiscOpacityKey]?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0.42f }
     val playerDiscVisible: Flow<Boolean> = context.playbackDataStore.data.map { it[playerDiscVisibleKey] ?: true }
     val beatEffect: Flow<Boolean> = context.playbackDataStore.data.map { it[beatEffectKey] ?: true }
@@ -169,6 +181,8 @@ class PlaybackPreferences(private val context: Context) {
     }
     suspend fun setLyricsMode(mode: LyricsMode) = context.playbackDataStore.edit { it[lyricsModeKey] = mode.name }
     suspend fun setFloatingButtonStyle(style: FloatingButtonStyle) = context.playbackDataStore.edit { it[floatingButtonStyleKey] = style.name }
+    suspend fun setLibraryViewMode(mode: LibraryViewMode) = context.playbackDataStore.edit { it[libraryViewModeKey] = mode.name }
+    suspend fun setPlaylistStyle(style: PlaylistStyle) = context.playbackDataStore.edit { it[playlistStyleKey] = style.name }
     suspend fun setPlayerBackground(uri: String?) = context.playbackDataStore.edit { values ->
         if (uri.isNullOrBlank()) values.remove(playerBackgroundKey) else values[playerBackgroundKey] = uri
     }
@@ -271,6 +285,30 @@ enum class LyricsMode(val title: String, val subtitle: String) {
 
 val LyricsMode.isSpatial: Boolean get() = this in setOf(LyricsMode.TypeMachine,
     LyricsMode.DeepSea, LyricsMode.Stardust, LyricsMode.ForestLight)
+
+enum class PlaylistStyle(val title: String, val subtitle: String, val prototype: String) {
+    Tape("口袋磁带", "把每份歌单，录成一盘私人混音带", "07"),
+    Turntable("离心唱盘", "换一张唱片，放下唱针", "11"),
+    Desktop("桌面逃逸", "在堆叠的音乐窗口之间切换", "14"),
+    Cinema("胶片长镜头", "横滑选片，为日常挑一份原声", "18"),
+    Bookshelf("折叠书脊", "滑过书架，抽一本声音", "19"),
+    Radar("声呐寻频", "扫描歌单，锁定喜欢的信号", "20");
+
+    companion object { fun fromStored(value: String?): PlaylistStyle = entries.firstOrNull { it.name == value } ?: Tape }
+}
+
+enum class PlayerShortcut(val title: String) {
+    Library("音乐库"), Favorites("收藏"), Playlists("播放列表"), Settings("设置"),
+    PlaybackMode("播放模式"), Appearance("外观"), SleepTimer("定时"), Equalizer("均衡器"), Online("在线搜歌"), Share("分享");
+    companion object { val defaults = listOf(Online, PlaybackMode, Appearance, SleepTimer) }
+}
+
+enum class LibraryViewMode(val title: String, val subtitle: String) {
+    List("列表模式", "经典歌曲、专辑与艺术家列表"),
+    Galaxy("银河模式", "星球、星云与拖动探索");
+
+    companion object { fun fromStored(value: String?): LibraryViewMode = entries.firstOrNull { it.name == value } ?: List }
+}
 
 enum class PlayerTheme(val title: String, val subtitle: String) {
     Classic("经典播放器", "专辑光碟 · 原有界面"),

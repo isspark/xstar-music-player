@@ -60,9 +60,11 @@ private enum class AppearancePage(val title: String, val icon: ImageVector) {
     Colors("主题与颜色", Icons.Default.Palette),
     Fonts("字体", Icons.Default.TextFields),
     Player("播放界面", Icons.Default.Album),
+    Playlists("播放列表外观", Icons.Default.QueueMusic),
     Lyrics("歌词显示", Icons.AutoMirrored.Filled.Notes),
     FloatingButton("悬浮按钮", Icons.Default.TouchApp),
-    Effects("动态效果", Icons.Default.GraphicEq)
+    Effects("动态效果", Icons.Default.GraphicEq),
+    Library("音乐库视图", Icons.Default.AutoAwesome)
 }
 
 @Composable
@@ -82,6 +84,8 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
     val opacity by vm.playerDiscOpacity.collectAsStateWithLifecycle()
     val beat by vm.beatEffect.collectAsStateWithLifecycle()
     val spectrum by vm.bottomEffect.collectAsStateWithLifecycle()
+    val libraryViewMode by vm.libraryViewMode.collectAsStateWithLifecycle()
+    val playlistStyle by vm.playlistStyle.collectAsStateWithLifecycle()
     val backgroundName = if (album) "专辑封面" else if (image.isNotBlank()) "自定义图片" else "默认背景"
     val fontName = downloadableFonts.firstOrNull { it.id == fontId }?.name ?: font.title
     BackHandler(page != null) { page = null }
@@ -113,9 +117,11 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
                         AppearancePage.Colors -> "${if (theme.name == "Custom") "自定义" else "主题色"} · #${"%06X".format(theme.argb and 0xFFFFFF)}"
                         AppearancePage.Fonts -> fontName
                         AppearancePage.Player -> "${scene.title} · $backgroundName"
+                        AppearancePage.Playlists -> playlistStyle.title
                         AppearancePage.Lyrics -> lyrics.title
                         AppearancePage.FloatingButton -> floatingButton.title
                         AppearancePage.Effects -> "节拍${if (beat) "已开启" else "已关闭"} · 频谱${if (spectrum) "已开启" else "已关闭"}"
+                        AppearancePage.Library -> libraryViewMode.title
                     }
                     Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface) {
                         ListItem(headlineContent = { Text(entry.title) }, supportingContent = { Text(summary) },
@@ -130,7 +136,8 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
             when (page) {
                 AppearancePage.Fonts -> AppearanceFonts(vm)
                 AppearancePage.Lyrics -> AppearanceLyrics(lyrics, vm::setLyricsMode)
-                AppearancePage.FloatingButton -> AppearanceFloatingButton(floatingButton, vm::setFloatingButtonStyle)
+                AppearancePage.FloatingButton -> AppearanceFloatingButton(floatingButton, vm::setFloatingButtonStyle, vm)
+                AppearancePage.Playlists -> AppearancePlaylists(playlistStyle, vm::setPlaylistStyle)
                 else -> Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     when (page) {
                         AppearancePage.Colors -> AppearanceColors(theme, vm)
@@ -151,6 +158,7 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
                             AppearanceToggle("音乐节拍动态效果", "播放时切换背景颜色并轻微缩放封面", beat, vm::setBeatEffect)
                             AppearanceToggle("底部频谱特效", "播放时显示实时频谱律动与氛围粒子", spectrum, vm::setBottomEffect)
                         }
+                        AppearancePage.Library -> AppearanceLibraryView(libraryViewMode, vm::setLibraryViewMode)
                         else -> Unit
                     }
                     Spacer(Modifier.height(24.dp))
@@ -172,8 +180,10 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
                     vm.setPlayerDiscOpacity(.42f)
                 }
                 AppearancePage.Lyrics -> vm.setLyricsMode(LyricsMode.Normal)
-                AppearancePage.FloatingButton -> vm.setFloatingButtonStyle(FloatingButtonStyle.Breathing)
+                AppearancePage.FloatingButton -> { vm.setFloatingButtonStyle(FloatingButtonStyle.Breathing); vm.setPlayerShortcuts(PlayerShortcut.defaults) }
                 AppearancePage.Effects -> { vm.setBeatEffect(true); vm.setBottomEffect(true) }
+                AppearancePage.Library -> vm.setLibraryViewMode(LibraryViewMode.List)
+                AppearancePage.Playlists -> vm.setPlaylistStyle(PlaylistStyle.Tape)
                 null -> Unit
             }
             reset = false
@@ -181,14 +191,80 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
 }
 
 @Composable
-private fun AppearanceFloatingButton(style: FloatingButtonStyle, select: (FloatingButtonStyle) -> Unit) {
+private fun AppearancePlaylists(style: PlaylistStyle, select: (PlaylistStyle) -> Unit) {
+    LazyColumn(
+        Modifier.fillMaxSize().selectableGroup(),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            AppearanceCard {
+                Text("用喜欢的方式，收纳声音", style = MaterialTheme.typography.titleMedium)
+                Text("预览跟随当前主题色。选择后即时应用到歌单首页、详情和播放队列，自动保存。",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+            }
+        }
+        items(PlaylistStyle.entries, key = { it.name }) { candidate ->
+            val selected = style == candidate
+            Surface(
+                Modifier.fillMaxWidth().selectable(selected, role = Role.RadioButton, onClick = { select(candidate) }),
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = androidx.compose.foundation.BorderStroke(if (selected) 2.dp else 1.dp,
+                    if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant)
+            ) {
+                Column(Modifier.padding(15.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    life.xstar.music.player.ui.playlist.PlaylistAppearancePreview(candidate, Modifier.fillMaxWidth().height(190.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(candidate.title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                            Text(candidate.subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp,
+                                modifier = Modifier.padding(top = 5.dp))
+                        }
+                        RadioButton(selected, onClick = null)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppearanceFloatingButton(style: FloatingButtonStyle, select: (FloatingButtonStyle) -> Unit, vm: MusicViewModel) {
+    val shortcuts by vm.playerShortcuts.collectAsStateWithLifecycle()
+    var editing by remember { mutableStateOf<Int?>(null) }
+    editing?.let { slot ->
+        AlertDialog(onDismissRequest = { editing = null }, title = { Text("快捷打开 ${slot + 1}") },
+            text = { Column(Modifier.verticalScroll(rememberScrollState())) {
+                PlayerShortcut.entries.forEach { action ->
+                    val used = action in shortcuts && shortcuts[slot] != action
+                    TextButton(enabled = !used, onClick = {
+                        vm.setPlayerShortcuts(shortcuts.toMutableList().also { it[slot] = action }); editing = null
+                    }, modifier = Modifier.fillMaxWidth()) {
+                        Icon(action.icon(), null, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(10.dp)); Text(action.title + if (used) " · 已使用" else "")
+                    }
+                }
+            } }, confirmButton = { TextButton({ editing = null }) { Text("关闭") } })
+    }
     Column(
         verticalArrangement = Arrangement.spacedBy(10.dp),
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).selectableGroup()
     ) {
         AppearanceCard {
+            Text("快捷打开设置", style = MaterialTheme.typography.titleMedium)
+            Text("播放页点击展开五个花瓣，导航栏入口固定，其余四个可自定义。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            ListItem(headlineContent = { Text("导航栏 · 固定") }, leadingContent = { Icon(Icons.Default.Menu, null) })
+            shortcuts.forEachIndexed { index, action ->
+                ListItem(headlineContent = { Text("快捷 ${index + 1} · ${action.title}") },
+                    leadingContent = { Icon(action.icon(), null) }, trailingContent = { Icon(Icons.Default.ChevronRight, null) },
+                    modifier = Modifier.clickable { editing = index })
+            }
+            TextButton({ vm.setPlayerShortcuts(PlayerShortcut.defaults) }) { Text("恢复默认快捷操作") }
+        }
+        AppearanceCard {
             Text("悬浮按钮样式", style = MaterialTheme.typography.titleMedium)
-            Text("所有样式共享拖动、边缘吸附和导航行为，选择后立即生效。", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+            Text("播放页与音乐库共享样式，支持拖动和点击展开快捷操作。选择后立即生效。", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
             FloatingButtonStyle.entries.forEach { candidate ->
                 Surface(
                     Modifier.fillMaxWidth().selectable(style == candidate, role = Role.RadioButton, onClick = { select(candidate) }),
@@ -206,6 +282,35 @@ private fun AppearanceFloatingButton(style: FloatingButtonStyle, select: (Floati
                         if (style == candidate) Icon(Icons.Default.CheckCircle, "使用中", tint = MaterialTheme.colorScheme.primary)
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppearanceLibraryView(mode: LibraryViewMode, select: (LibraryViewMode) -> Unit) {
+    Column(Modifier.fillMaxSize().selectableGroup(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        AppearanceCard {
+            Text("音乐库首页", style = MaterialTheme.typography.labelMedium)
+            Text("选择你探索音乐的方式。切换后立即应用并自动保存。", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+        }
+        LibraryViewMode.entries.forEach { candidate ->
+            val selected = candidate == mode
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = if (selected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = .55f) else MaterialTheme.colorScheme.surface,
+                modifier = Modifier.fillMaxWidth().selectable(selected = selected, role = Role.RadioButton, onClick = { select(candidate) })
+            ) {
+                ListItem(
+                    headlineContent = { Text(candidate.title) },
+                    supportingContent = { Text(candidate.subtitle) },
+                    leadingContent = {
+                        Icon(if (candidate == LibraryViewMode.Galaxy) Icons.Default.AutoAwesome else Icons.Default.ViewList, null,
+                            tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                    },
+                    trailingContent = { if (selected) Icon(Icons.Default.Check, "已选择", tint = MaterialTheme.colorScheme.primary) },
+                    colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+                )
             }
         }
     }

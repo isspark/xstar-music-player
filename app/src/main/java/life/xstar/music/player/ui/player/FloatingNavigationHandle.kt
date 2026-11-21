@@ -34,12 +34,17 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.activity.compose.BackHandler
+import life.xstar.music.player.data.preferences.PlayerShortcut
 import life.xstar.music.player.data.preferences.FloatingButtonStyle
 import kotlin.math.roundToInt
 
 @Composable fun FloatingNavigationHandle(
     style: FloatingButtonStyle = FloatingButtonStyle.Breathing,
     playing: Boolean = false,
+    shortcuts: List<PlayerShortcut> = PlayerShortcut.defaults,
+    onShortcut: (PlayerShortcut) -> Unit = {},
     onOpen: () -> Unit
 ) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -50,13 +55,19 @@ import kotlin.math.roundToInt
         val width = with(density) { maxWidth.toPx() }
         val height = with(density) { maxHeight.toPx() }
         val margin = with(density) { 16.dp.toPx() }
-        var xFraction by rememberSaveable { mutableFloatStateOf(.9f) }
-        var yFraction by rememberSaveable { mutableFloatStateOf(.65f) }
+        val bottomInset = with(density) { WindowInsets.navigationBars.getBottom(this).toFloat() }
+        val defaultY = if (height > diameter) {
+            ((height - bottomInset - with(density) { 129.dp.toPx() } - diameter / 2f) / (height - diameter)).coerceIn(0f, 1f)
+        } else .5f
+        var xFraction by rememberSaveable { mutableFloatStateOf(.5f) }
+        var yFraction by rememberSaveable { mutableFloatStateOf(defaultY) }
         var docked by rememberSaveable { mutableStateOf(false) }
         var leftEdge by rememberSaveable { mutableStateOf(false) }
         var verticalEdge by rememberSaveable { mutableIntStateOf(0) }
         var dragging by remember { mutableStateOf(false) }
         var clickEffect by remember { mutableIntStateOf(0) }
+        var expanded by remember { mutableStateOf(false) }
+        BackHandler(expanded) { expanded = false }
         val limitX = (width - diameter).coerceAtLeast(0f)
         val limitY = (height - diameter).coerceAtLeast(0f)
         val targetX = if (docked && verticalEdge == 0) { if (leftEdge) -diameter * .68f else width - diameter * .32f } else xFraction * limitX
@@ -68,12 +79,18 @@ import kotlin.math.roundToInt
             val phase by transition.animateFloat(0f, 1f, infiniteRepeatable(tween(1900), RepeatMode.Reverse), label = "floatingButtonBreath")
             val pulse = if (playing) phase else 0f
             val scale by animateFloatAsState(if (dragging) 1.08f else 1f, tween(160), label = "floatingButtonScale")
+            val petalSize = with(density) { 210.dp.toPx() }
+            Box(Modifier.offset { IntOffset(
+                (animatedX + diameter / 2 - petalSize / 2).coerceIn(0f, (width - petalSize).coerceAtLeast(0f)).roundToInt(),
+                (animatedY + diameter / 2 - petalSize / 2).coerceIn(0f, (height - petalSize).coerceAtLeast(0f)).roundToInt()) }) {
+                PlayerShortcutPetals(expanded && !dragging && !docked, shortcuts, onMenu = { expanded = false; onOpen() }, onAction = { expanded = false; onShortcut(it) })
+            }
             Box(Modifier.offset { IntOffset(animatedX.roundToInt(), animatedY.roundToInt()) }.size(buttonSize)
                 .graphicsLayer { scaleX = scale; scaleY = scale }
-                .then(if (docked || !sculpted) Modifier
+                .then(if (docked) Modifier
                     .clip(if (docked) RoundedCornerShape(15.dp) else CircleShape)
                     .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = (if (docked) .45f else .58f) + pulse * .08f)) else Modifier)
-                .semantics { contentDescription = if (docked) "展开导航悬浮按钮" else "打开右侧导航，可拖动" }
+                .semantics { contentDescription = if (docked) "展开悬浮按钮" else "展开播放页快捷操作，可拖动" }
                 .pointerInput(width, height, diameter) {
                     detectDragGestures(
                     onDragStart = { dragging = true; if (docked) { if (verticalEdge == 0) xFraction = if (leftEdge) 0f else 1f; else yFraction = if (verticalEdge == -1) 0f else 1f; docked = false } },
@@ -101,11 +118,10 @@ import kotlin.math.roundToInt
                         docked = false
                         if (verticalEdge == 0) xFraction = if (leftEdge) margin / limitX.coerceAtLeast(1f) else 1f - margin / limitX.coerceAtLeast(1f)
                         else yFraction = if (verticalEdge == -1) margin / limitY.coerceAtLeast(1f) else 1f - margin / limitY.coerceAtLeast(1f)
-                    } else { clickEffect++; onOpen() }
+                    } else { clickEffect++; expanded = !expanded }
                 }, contentAlignment = Alignment.Center) {
                 if (!docked) {
-                    if (sculpted) SculptedFloatingButton(style, playing, Modifier.fillMaxSize(), clickEffect)
-                    else FloatingButtonVisual(style, playing, pulse, MaterialTheme.colorScheme.primary)
+                    FloatingButtonFace(style, playing, clickEffect = clickEffect, modifier = Modifier.fillMaxSize())
                 }
                 else Box(Modifier.align(when(verticalEdge) { -1 -> Alignment.BottomCenter; 1 -> Alignment.TopCenter; else -> if (leftEdge) Alignment.CenterEnd else Alignment.CenterStart })
                     .padding(5.dp).size(if (verticalEdge == 0) 2.dp else 17.dp, if (verticalEdge == 0) 17.dp else 2.dp).background(MaterialTheme.colorScheme.primary.copy(alpha = .8f), CircleShape))
@@ -114,8 +130,8 @@ import kotlin.math.roundToInt
 }
 
 @Composable
-private fun FloatingButtonVisual(style: FloatingButtonStyle, playing: Boolean, pulse: Float, accent: Color) {
-    val icon = if (style == FloatingButtonStyle.Playback && playing) Icons.Default.Pause else Icons.Default.MusicNote
+internal fun FloatingButtonVisual(style: FloatingButtonStyle, playing: Boolean, pulse: Float, accent: Color, glyph: ImageVector? = null) {
+    val icon = glyph ?: if (style == FloatingButtonStyle.Playback && playing) Icons.Default.Pause else Icons.Default.MusicNote
     Box(contentAlignment = Alignment.Center) {
         when (style) {
             FloatingButtonStyle.Breathing -> Canvas(Modifier.size(42.dp)) {
@@ -138,5 +154,28 @@ private fun FloatingButtonVisual(style: FloatingButtonStyle, playing: Boolean, p
             else -> Unit
         }
         Icon(icon, null, tint = accent.copy(alpha = .9f), modifier = Modifier.size(20.dp))
+    }
+}
+
+/** Shared complete face for player navigation and library controls. */
+@Composable
+fun FloatingButtonFace(
+    style: FloatingButtonStyle,
+    playing: Boolean,
+    modifier: Modifier = Modifier,
+    clickEffect: Int = 0,
+    glyph: ImageVector? = null
+) {
+    val transition = rememberInfiniteTransition(label = "sharedFloatingMotion")
+    val phase by transition.animateFloat(0f, 1f, infiniteRepeatable(tween(1900), RepeatMode.Reverse), label = "sharedFloatingBreath")
+    val pulse = if (playing) phase else 0f
+    Box(
+        modifier.then(if (!style.isSculptedFloatingStyle) Modifier.clip(CircleShape)
+            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = .58f + pulse * .08f)) else Modifier),
+        contentAlignment = Alignment.Center
+    ) {
+        if (style.isSculptedFloatingStyle) {
+            SculptedFloatingButton(style, playing, Modifier.fillMaxSize(), clickEffect, gear = glyph != null)
+        } else FloatingButtonVisual(style, playing, pulse, MaterialTheme.colorScheme.primary, glyph)
     }
 }

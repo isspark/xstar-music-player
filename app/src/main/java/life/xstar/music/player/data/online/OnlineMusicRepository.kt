@@ -18,6 +18,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import life.xstar.music.player.data.audio.AudioAnalyzer
 import life.xstar.music.player.data.audio.cacheDownloadedArtwork
 import life.xstar.music.player.data.audio.stableSongId
@@ -45,15 +48,40 @@ class OnlineMusicRepository(
     private val _downloads = MutableStateFlow<Map<String, OnlineDownloadState>>(emptyMap())
     val downloads: StateFlow<Map<String, OnlineDownloadState>> = _downloads.asStateFlow()
 
+    private val audioInfoCache = ConcurrentHashMap<String, OnlineResolvedAudio>()
+    private val audioInfoSlots = kotlinx.coroutines.sync.Semaphore(3)
+
+    suspend fun audioInfo(track: OnlineTrack): OnlineResolvedAudio? {
+        audioInfoCache[track.onlineId]?.let { return it }
+        audioInfoSlots.acquire()
+        return try {
+            audioInfoCache[track.onlineId] ?: provider(track.platform).resolveAudio(track.id)?.also {
+                audioInfoCache[track.onlineId] = it
+            }
+        } finally {
+            audioInfoSlots.release()
+        }
+    }
+
     suspend fun search(keyword: String): List<OnlineTrack> = provider().search(keyword, 30)
+
+    suspend fun searchAll(keyword: String): List<OnlineTrack> = coroutineScope {
+        val base = preferences.currentOnlineApiBase().ifBlank { GdstudioProvider.DEFAULT_BASE_URL }
+        supportedOnlinePlatforms.map { platform ->
+            async(Dispatchers.IO) {
+                runCatching { GdstudioProvider(base, platform.id).search(keyword, 30) }.getOrDefault(emptyList())
+            }
+        }.awaitAll().flatten()
+            .distinctBy { it.title.lowercase() + "\u0000" + it.artist.lowercase() + "\u0000" + it.album.lowercase() }
+    }
 
     suspend fun findByOnlineId(onlineId: String): SongEntity? = dao.findByOnlineId(onlineId)
 
     /** Resolve a search result without adding it to the local library. */
     suspend fun resolveForPlayback(track: OnlineTrack): SongEntity {
-        val resolved = provider().resolveAudio(track.id)
+        val resolved = provider(track.platform).resolveAudio(track.id)
             ?: throw IllegalStateException("暂无可用的在线播放地址，该歌曲可能需要会员或受版权保护")
-        val artwork = runCatching { provider().albumPic(track.id) }.getOrNull()
+        val artwork = runCatching { provider(track.platform).albumPic(track.id) }.getOrNull()
         return SongEntity(
             mediaStoreId = stableSongId("online_play:${track.onlineId}"),
             title = track.title,
@@ -105,7 +133,7 @@ class OnlineMusicRepository(
     private suspend fun downloadNow(track: OnlineTrack) {
         val key = track.onlineId
         if (dao.findByOnlineId(key) != null) return
-        val provider = provider()
+        val provider = provider(track.platform)
         val resolved = provider.resolveAudio(track.id)
             ?: throw IllegalStateException("暂无可用的下载链接，该歌曲可能需要会员或受版权保护")
         val downloadFolderUri = preferences.downloadFolder.first()
@@ -215,6 +243,11 @@ class OnlineMusicRepository(
     private suspend fun provider(): GdstudioProvider = GdstudioProvider(
         baseUrl = preferences.currentOnlineApiBase().ifBlank { GdstudioProvider.DEFAULT_BASE_URL },
         platform = preferences.currentOnlinePlatform()
+    )
+
+    private suspend fun provider(platform: String): GdstudioProvider = GdstudioProvider(
+        baseUrl = preferences.currentOnlineApiBase().ifBlank { GdstudioProvider.DEFAULT_BASE_URL },
+        platform = platform
     )
 
     private fun setState(key: String, state: OnlineDownloadState) {

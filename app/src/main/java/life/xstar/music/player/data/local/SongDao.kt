@@ -7,14 +7,41 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface SongDao {
-    @Query("SELECT * FROM songs ORDER BY title COLLATE NOCASE")
+    @Query("SELECT COUNT(*) FROM songs")
+    fun observeCount(): Flow<Int>
+
+    @Query("SELECT * FROM songs WHERE (:artist IS NULL OR artist = :artist) AND (:album IS NULL OR album = :album) AND (:query = '' OR title LIKE '%' || :query || '%' OR artist LIKE '%' || :query || '%' OR album LIKE '%' || :query || '%' OR fileName LIKE '%' || :query || '%') ORDER BY title COLLATE NOCASE, mediaStoreId")
+    fun pagedSongs(query: String, artist: String?, album: String?): androidx.paging.PagingSource<Int, SongEntity>
+
+    @Query("SELECT artist AS name, COUNT(*) AS count, MIN(albumArtUri) AS artwork FROM songs WHERE :query = '' OR artist LIKE '%' || :query || '%' OR title LIKE '%' || :query || '%' OR album LIKE '%' || :query || '%' GROUP BY artist ORDER BY artist COLLATE NOCASE")
+    fun pagedArtists(query: String): androidx.paging.PagingSource<Int, LibraryGroup>
+
+    @Query("SELECT album AS name, COUNT(*) AS count, MIN(albumArtUri) AS artwork FROM songs WHERE :query = '' OR artist LIKE '%' || :query || '%' OR title LIKE '%' || :query || '%' OR album LIKE '%' || :query || '%' GROUP BY album ORDER BY album COLLATE NOCASE")
+    fun pagedAlbums(query: String): androidx.paging.PagingSource<Int, LibraryGroup>
+    @Query("SELECT * FROM songs WHERE sourceFolderUri = :source AND (title LIKE '%' || :query || '%' OR artist LIKE '%' || :query || '%' OR album LIKE '%' || :query || '%' OR fileName LIKE '%' || :query || '%') ORDER BY title COLLATE NOCASE LIMIT 200")
+    suspend fun searchNas(source: String, query: String): List<SongEntity>
+
+    @Query("SELECT COUNT(*) FROM songs WHERE sourceFolderUri = :source AND nasScanToken = :token")
+    suspend fun scannedCount(source: String, token: String): Int
+
+    @Query("SELECT COUNT(*) FROM songs WHERE sourceFolderUri = :source AND (nasScanToken IS NULL OR nasScanToken != :token)")
+    suspend fun missingCount(source: String, token: String): Int
+    @Query("SELECT * FROM songs WHERE title LIKE '%' || :query || '%' OR artist LIKE '%' || :query || '%' OR album LIKE '%' || :query || '%' OR fileName LIKE '%' || :query || '%' ORDER BY title COLLATE NOCASE")
+    suspend fun searchOnce(query: String): List<SongEntity>
+    @Query("SELECT * FROM songs WHERE sourceFolderUri NOT LIKE 'nas://%' OR mediaStoreId IN (SELECT mediaStoreId FROM songs WHERE sourceFolderUri LIKE 'nas://%' ORDER BY title COLLATE NOCASE LIMIT 1500) ORDER BY title COLLATE NOCASE")
     fun observeSongs(): Flow<List<SongEntity>>
+
+    @Query("SELECT * FROM songs")
+    suspend fun allSongs(): List<SongEntity>
 
     @Query("SELECT * FROM songs WHERE title LIKE '%' || :query || '%' OR artist LIKE '%' || :query || '%' OR album LIKE '%' || :query || '%' ORDER BY title COLLATE NOCASE")
     fun search(query: String): Flow<List<SongEntity>>
 
     @Query("SELECT * FROM songs WHERE mediaStoreId IN (:ids)")
-    suspend fun findByMediaIds(ids: List<Long>): List<SongEntity>
+    suspend fun findByMediaIdsBatch(ids: List<Long>): List<SongEntity>
+
+    suspend fun findByMediaIds(ids: List<Long>): List<SongEntity> =
+        ids.distinct().chunked(900).flatMap { findByMediaIdsBatch(it) }
 
     @Query("SELECT * FROM songs WHERE isFavorite = 1 ORDER BY title COLLATE NOCASE")
     fun observeFavorites(): Flow<List<SongEntity>>
@@ -46,9 +73,11 @@ interface SongDao {
     @Upsert
     suspend fun upsertAll(songs: List<SongEntity>)
 
-    @Query("DELETE FROM songs WHERE mediaStoreId NOT IN (:ids)")
+    @Query("DELETE FROM songs WHERE mediaStoreId NOT IN (:ids) AND sourceFolderUri NOT LIKE 'nas://%'")
     suspend fun deleteNotInMediaIds(ids: List<Long>)
 
-    @Query("DELETE FROM songs")
+    @Query("DELETE FROM songs WHERE sourceFolderUri NOT LIKE 'nas://%'")
     suspend fun deleteAll()
 }
+
+data class LibraryGroup(val name: String, val count: Int, val artwork: String?)

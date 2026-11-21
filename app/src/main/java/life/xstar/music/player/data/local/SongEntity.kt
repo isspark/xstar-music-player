@@ -3,7 +3,7 @@ package life.xstar.music.player.data.local
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
-@Entity(tableName = "songs")
+@Entity(tableName = "songs", indices = [androidx.room.Index("sourceFolderUri")])
 data class SongEntity(
     @PrimaryKey val mediaStoreId: Long,
     val title: String,
@@ -26,5 +26,6 @@ data class SongEntity(
     val isFavorite: Boolean = false,
     val playCount: Int = 0,
     val lastPlayedAt: Long? = null,
-    val onlineId: String? = null
+    val onlineId: String? = null,
+    val nasScanToken: String? = null
 )

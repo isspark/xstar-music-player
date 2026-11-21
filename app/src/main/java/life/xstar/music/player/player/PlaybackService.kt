@@ -83,6 +83,14 @@ class PlaybackService : MediaSessionService() {
             ): AudioSink = karaoke.createAudioSink(context, enableAudioTrackPlaybackParams, spectrum)
         }
         val player = ExoPlayer.Builder(this, renderersFactory)
+            .setMediaSourceFactory(androidx.media3.exoplayer.source.DefaultMediaSourceFactory(
+                androidx.media3.datasource.ResolvingDataSource.Factory(
+                    androidx.media3.datasource.DefaultDataSource.Factory(this)
+                ) { spec ->
+                    val (url, headers) = (application as XstarApplication).nasRepository.resolve(spec.uri.toString())
+                    spec.withUri(android.net.Uri.parse(url)).withRequestHeaders(spec.httpRequestHeaders + headers)
+                }
+            ))
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)

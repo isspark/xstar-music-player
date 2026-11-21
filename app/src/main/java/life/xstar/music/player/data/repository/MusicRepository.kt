@@ -17,12 +17,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.withContext
 
 class MusicRepository(private val context: Context, private val dao: SongDao, private val playlistDao: PlaylistDao, private val singingDao: SingingDao) {
     private val artworkChain = ArtworkProviderChain()
 
-    fun songs(): Flow<List<SongEntity>> = dao.observeSongs()
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
+    fun songs(): Flow<List<SongEntity>> = dao.observeSongs().sample(750)
     fun search(query: String): Flow<List<SongEntity>> = dao.search(query)
     fun favorites(): Flow<List<SongEntity>> = dao.observeFavorites()
     fun playlists(): Flow<List<PlaylistEntity>> = playlistDao.observePlaylists()
@@ -31,8 +33,10 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
     suspend fun toggleFavorite(id: Long) = dao.toggleFavorite(id)
     suspend fun createPlaylist(name: String) = playlistDao.insert(PlaylistEntity(name = name))
     suspend fun deletePlaylist(playlist: PlaylistEntity) = playlistDao.delete(playlist)
-    suspend fun addToPlaylist(playlistId: Long, songId: Long) = playlistDao.addSong(PlaylistSongEntity(playlistId, songId, playlistDao.nextPosition(playlistId)))
-    suspend fun removeFromPlaylist(playlistId: Long, songId: Long) = playlistDao.remove(playlistId, songId)
+    suspend fun addToPlaylist(playlistId: Long, songId: Long) = playlistDao.append(playlistId, listOf(songId))
+    suspend fun addToPlaylist(playlistId: Long, songIds: List<Long>) = playlistDao.append(playlistId, songIds)
+    suspend fun removeFromPlaylist(playlistId: Long, songId: Long) = playlistDao.removeSong(playlistId, songId)
+    suspend fun movePlaylistSong(playlistId: Long, songId: Long, delta: Int) = playlistDao.move(playlistId, songId, delta)
     suspend fun renamePlaylist(id: Long, name: String) = playlistDao.rename(id, name.trim())
     suspend fun saveSingingRecord(record: SingingRecordEntity): Long = singingDao.insert(record)
     suspend fun updateSingingRecordScore(id: Long, total: Int, pitch: Int?, activity: Int, lightweight: Boolean) = singingDao.updateScore(id, total, pitch, activity, lightweight)
@@ -40,6 +44,10 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
     suspend fun enrichMissingArtwork() = Unit
 
     suspend fun getSong(id: Long): SongEntity? = dao.findById(id)
+    suspend fun importFile(file: DocumentFile, folder: String) = withContext(Dispatchers.IO) {
+        val song = readSong(file, folder) ?: error("无法读取下载的音频文件")
+        dao.upsertAll(listOf(song))
+    }
 
     suspend fun findArtworkCandidates(artist: String, album: String): List<ArtworkCandidate> = artworkChain.search(artist, album)
 
@@ -64,6 +72,7 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
     }
 
     private suspend fun embedArtwork(song: SongEntity, path: String): Result<Unit> {
+        if (song.uri.startsWith("nas://")) return Result.success(Unit)
         val image = File(path)
         val bytes = image.readBytes()
         return life.xstar.music.player.data.audio.AudioMetadataWriter.edit(context, song,
@@ -84,33 +93,41 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
             return@withContext 0
         }
         val scanned = mutableListOf<SongEntity>()
+        val cached = dao.allSongs().associateBy { it.mediaStoreId }
         folderUris.forEach { folderUri ->
-            DocumentFile.fromTreeUri(context, Uri.parse(folderUri))?.let { scanDirectory(it, folderUri, scanned, onProgress) }
+            DocumentFile.fromTreeUri(context, Uri.parse(folderUri))?.let { scanDirectory(it, folderUri, scanned, cached, onProgress) }
         }
         val ids = scanned.map { it.mediaStoreId }
         val existing = if (ids.isEmpty()) emptyMap() else dao.findByMediaIds(ids).associateBy { it.mediaStoreId }
         val merged = scanned.map { song -> existing[song.mediaStoreId]?.let { old ->
-            song.copy(
-                albumArtUri = song.albumArtUri ?: old.albumArtUri?.takeUnless { it.endsWith(".img") },
-                isFavorite = old.isFavorite,
-                playCount = old.playCount,
-                lastPlayedAt = old.lastPlayedAt,
-                onlineId = old.onlineId
-            )
+            // SAF metadata reads are expensive on large libraries. A file's URI, size
+            // and modified time form a cheap fingerprint, so keep the indexed row when
+            // nothing changed and only re-read tags for new/changed files.
+            if (song.fileSize == old.fileSize && song.dateAdded == old.dateAdded) old
+            else song.copy(
+                    albumArtUri = song.albumArtUri ?: old.albumArtUri?.takeUnless { it.endsWith(".img") },
+                    isFavorite = old.isFavorite,
+                    playCount = old.playCount,
+                    lastPlayedAt = old.lastPlayedAt,
+                    onlineId = old.onlineId
+                )
         } ?: song }
         if (ids.isEmpty()) dao.deleteAll() else dao.deleteNotInMediaIds(ids)
         if (merged.isNotEmpty()) dao.upsertAll(merged)
         merged.size
     }
 
-    private suspend fun scanDirectory(directory: DocumentFile, folderUri: String, output: MutableList<SongEntity>, onProgress: (ScanProgress) -> Unit) {
+    private suspend fun scanDirectory(directory: DocumentFile, folderUri: String, output: MutableList<SongEntity>, cached: Map<Long, SongEntity>, onProgress: (ScanProgress) -> Unit) {
         directory.listFiles().forEach { file ->
             currentCoroutineContext().ensureActive()
             when {
-                file.isDirectory -> scanDirectory(file, folderUri, output, onProgress)
+                file.isDirectory -> scanDirectory(file, folderUri, output, cached, onProgress)
                 file.isFile && isAudio(file) -> {
                     onProgress(ScanProgress(file.name.orEmpty(), output.size))
-                    readSong(file, folderUri)?.let(output::add)
+                    val id = stableId(file.uri.toString())
+                    val old = cached[id]
+                    if (old != null && old.fileSize == file.length() && old.dateAdded == file.lastModified()) output += old
+                    else readSong(file, folderUri)?.let(output::add)
                     onProgress(ScanProgress(file.name.orEmpty(), output.size))
                 }
             }

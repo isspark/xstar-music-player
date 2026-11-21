@@ -32,7 +32,8 @@ fun SculptedFloatingButton(
     style: FloatingButtonStyle,
     playing: Boolean,
     modifier: Modifier = Modifier,
-    clickEffect: Int = 0
+    clickEffect: Int = 0,
+    gear: Boolean = false
 ) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val enabled = ValueAnimator.areAnimatorsEnabled()
@@ -102,7 +103,7 @@ fun SculptedFloatingButton(
                         drawLine(color.copy(alpha = alpha), point - Offset(0f, 2.3f * unit), point + Offset(0f, 2.3f * unit), .6f * unit)
                     }
                 }
-                navigationGlyph(Color(0xFFEEE2FF), unit)
+                navigationGlyph(Color(0xFFEEE2FF), unit, gear)
             }
             FloatingButtonStyle.MiniWormhole -> {
                 val purple = Color(0xFFAB8AFF)
@@ -118,7 +119,7 @@ fun SculptedFloatingButton(
                     drawArc(cyan.copy(alpha = .85f - layer * .15f), spin + 180f, 95f, false, topLeft, bounds, style = Stroke(1.8f * unit, cap = StrokeCap.Round))
                 }
                 drawCircle(Color(0xFF080B13), (11 - pop * 3) * unit)
-                navigationGlyph(Color(0xFFE5D9FF), unit * (1 - pop * .2f))
+                navigationGlyph(Color(0xFFE5D9FF), unit * (1 - pop * .2f), gear)
             }
             FloatingButtonStyle.VinylKnob -> {
                 val radius = 23 * unit
@@ -131,7 +132,7 @@ fun SculptedFloatingButton(
                 rotate(t * 30f) {
                     drawArc(Color.White.copy(alpha = .10f), -65f, 36f, false, center - Offset(radius, radius), androidx.compose.ui.geometry.Size(radius * 2, radius * 2), style = Stroke(6 * unit))
                     drawCircle(Color(0xFFE8B09D), (8.5f + pop) * unit)
-                    navigationGlyph(Color(0xFF593D45), unit * .63f)
+                    navigationGlyph(Color(0xFF593D45), unit * .63f, gear)
                 }
                 drawCircle(Color(0xFF29232C), 1.1f * unit)
             }
@@ -140,7 +141,14 @@ fun SculptedFloatingButton(
     }
 }
 
-private fun DrawScope.navigationGlyph(color: Color, unit: Float) {
+private fun DrawScope.navigationGlyph(color: Color, unit: Float, gear: Boolean = false) {
+    if (gear) {
+        drawCircle(color, 4 * unit, style = Stroke(1.5f * unit))
+        repeat(8) { tooth -> rotate(tooth * 45f) {
+            drawLine(color, center + Offset(0f, -4 * unit), center + Offset(0f, -6 * unit), 2 * unit, StrokeCap.Round)
+        } }
+        return
+    }
     listOf(-4f, 0f, 4f).forEachIndexed { i, y ->
         drawLine(color, center + Offset(-5 * unit, y * unit), center + Offset((if (i == 2) 1 else 5) * unit, y * unit), 1.25f * unit, StrokeCap.Round)
     }

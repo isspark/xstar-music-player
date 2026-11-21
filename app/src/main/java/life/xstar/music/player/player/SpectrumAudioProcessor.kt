@@ -29,7 +29,9 @@ class SpectrumAudioProcessor : BaseAudioProcessor() {
     override fun queueInput(inputBuffer: ByteBuffer) {
         val bytes = inputBuffer.remaining()
         if (bytes == 0) return
-        val input = inputBuffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
+        val position = inputBuffer.position()
+        val byteOrder = inputBuffer.order()
+        val input = inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
         val channels = inputAudioFormat.channelCount
         while (input.remaining() >= channels * 2) {
             // Use the strongest channel to avoid cancelling out-of-phase stereo.
@@ -44,6 +46,8 @@ class SpectrumAudioProcessor : BaseAudioProcessor() {
                 sampleCount = 0
             }
         }
+        inputBuffer.position(position)
+        inputBuffer.order(byteOrder)
         val output = replaceOutputBuffer(bytes)
         output.put(inputBuffer)
         output.flip()

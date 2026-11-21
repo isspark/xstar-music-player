@@ -7,11 +7,12 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [SongEntity::class, PlaylistEntity::class, PlaylistSongEntity::class, SingingRecordEntity::class], version = 6, exportSchema = false)
+@Database(entities = [SongEntity::class, PlaylistEntity::class, PlaylistSongEntity::class, SingingRecordEntity::class, life.xstar.music.player.data.nas.NasSyncTask::class, life.xstar.music.player.data.nas.NasSyncItem::class], version = 7, exportSchema = false)
 abstract class MusicDatabase : RoomDatabase() {
     abstract fun songDao(): SongDao
     abstract fun playlistDao(): PlaylistDao
     abstract fun singingDao(): SingingDao
+    abstract fun nasSyncDao(): life.xstar.music.player.data.nas.NasSyncDao
 
     companion object {
         fun create(context: Context) = Room.databaseBuilder(
@@ -78,6 +79,14 @@ abstract class MusicDatabase : RoomDatabase() {
                     )
                 """.trimIndent())
                 database.execSQL("CREATE INDEX IF NOT EXISTS index_singing_records_createdAt ON singing_records(createdAt)")
+            }
+        }, object : Migration(6, 7) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL("CREATE TABLE IF NOT EXISTS nas_sync_tasks (sourceId TEXT NOT NULL PRIMARY KEY, runId TEXT NOT NULL, detailed INTEGER NOT NULL, state TEXT NOT NULL, message TEXT NOT NULL, count INTEGER NOT NULL)")
+                database.execSQL("CREATE TABLE IF NOT EXISTS nas_sync_items (sourceId TEXT NOT NULL, kind INTEGER NOT NULL, path TEXT NOT NULL, done INTEGER NOT NULL, attempts INTEGER NOT NULL, retryAt INTEGER NOT NULL, PRIMARY KEY(sourceId, kind, path))")
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_nas_sync_items_sourceId_done_kind_retryAt ON nas_sync_items(sourceId, done, kind, retryAt)")
+                database.execSQL("ALTER TABLE songs ADD COLUMN nasScanToken TEXT")
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_songs_sourceFolderUri ON songs(sourceFolderUri)")
             }
         }).build()
     }

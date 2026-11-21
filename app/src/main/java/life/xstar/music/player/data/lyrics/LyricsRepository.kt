@@ -26,6 +26,10 @@ class LyricsRepository(private val context: Context) {
         if (cached.isFile && cacheMatches(metadata, song)) {
             parse(cached.readText())?.let { return@withContext LyricsDocument(it, LyricsSource.Online) }
         }
+        if (song.uri.startsWith("nas://")) {
+            val text = (context.applicationContext as life.xstar.music.player.XstarApplication).nasRepository.siblingLyrics(song)
+            return@withContext text?.let { parse(it) }?.let { LyricsDocument(it, LyricsSource.LocalLrc) }
+        }
         val lrc = findSiblingLrc(song.uri)
         if (lrc != null) parse(read(lrc.uri))?.let { return@withContext LyricsDocument(it, LyricsSource.LocalLrc) }
         readEmbedded(song)?.let { parse(it)?.let { lines -> return@withContext LyricsDocument(lines, LyricsSource.Embedded) } }
@@ -120,7 +124,7 @@ class LyricsRepository(private val context: Context) {
         return file.parentFile?.listFiles()?.firstOrNull { it.isFile && it.name?.substringBeforeLast('.')?.equals(base, true) == true && it.name?.endsWith(".lrc", true) == true }
     }
 
-    private fun read(uri: Uri): String = context.contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+    private fun read(uri: Uri): String = context.contentResolver.openInputStream(uri)?.use { LyricsTextDecoder.decode(it.readBytes()) }.orEmpty()
     private fun enc(value: String) = URLEncoder.encode(value, "UTF-8")
     private fun encPath(value: String) = enc(value).replace("+", "%20")
     private fun parse(value: String): List<LyricLine>? = LrcParser.parse(value).takeIf { it.isNotEmpty() }

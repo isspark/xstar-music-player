@@ -727,3 +727,16 @@ online_lyrics_enabled: Boolean，默认 true
   - LocalMusicServer /art 增加 Content-Length，保证隧道按长度分帧正确。
 - 部署：server/install.sh 编译单二进制并注册 systemd，放行 TCP 端口；无 TLS（明文，与 App cleartext 配置一致），TLS 留作后续。
 - 风险 R-013：中转流量明文且依赖自建服务器在线；会话码无鉴权仅做配对。若需正式使用应加 TLS 与访问控制。
+# NAS 接入设计补充
+
+- 性能：`sync(detailed=false)` 默认不调用 WebDAV MediaMetadataRetriever、不逐张获取 Navidrome 封面；WebDAV 快速索引复用已有元数据。详细同步开关保留标签读取能力。目录枚举仍为 Depth:1 递归，请求数量取决于目录数量。
+
+- `data/nas/NasRepository.kt` 管理配置、Keystore AES-GCM 加密、WebDAV PROPFIND/XML 枚举、Subsonic token 认证/search3/getCoverArt、同步和搜索。
+- `NasPaths` 限制 WebDAV 文件访问在配置服务的同协议、主机、端口和目录内，拒绝目录穿越及携带凭据的服务端路径；HTTP 枚举客户端不自动跟随重定向。
+- 复用 SongEntity：`uri=nas://<源ID>/<编码后的远程路径或歌曲ID>`，`sourceFolderUri=nas://<源ID>`；歌曲 ID 使用现有 stableSongId。无需数据库字段迁移。更换服务器/账户/类型生成新源 ID。
+- 同步完整成功后通过 Room transaction 分批 upsert，保留收藏、播放次数、最近播放和缓存封面；不自动删除历史索引。SongDao 的本地扫描删除语句排除 NAS 源。
+- PlaybackService 使用 ResolvingDataSource 在请求时解析远程地址与认证，数据库和队列不保存认证 URL。PlayerController 设置远程 MIME，避免自定义 URI 被误判为其他媒体类型。
+- LocalMusicServer 通过 NAS 客户端打开远程流，已知长度时转发 Range，供投屏/一起听复用；实际渲染器兼容性需要真机验证。
+- `ui/NasSettings.kt` 提供配置面板；MusicViewModel 暴露配置、状态和 NAS 搜索结果；音乐库列表增加来源过滤，在线音乐增加独立 NAS 来源和下载入口。
+- WebDAV 扫描尝试 MediaMetadataRetriever 远程标签与内嵌封面，失败按文件名和父目录回退；不下载整首作为扫描策略。远程元数据访问耗时取决于服务及 Android 实现。
+- 验证包括 NasPaths 单元测试、编译和既有单元测试；NAS 连接/认证/音频格式/手机后台播放需实际服务联调。

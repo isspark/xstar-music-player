@@ -27,6 +27,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import life.xstar.music.player.data.local.SongEntity
 
 class PlayerController(context: Context) {
@@ -35,6 +36,10 @@ class PlayerController(context: Context) {
     private val executor = ContextCompat.getMainExecutor(appContext)
     private val scope = CoroutineScope(Dispatchers.Main.immediate)
     private var progressJob: Job? = null
+    private var queuePreparationJob: Job? = null
+    private var queueGeneration = 0
+    private var cachedTimeline: androidx.media3.common.Timeline? = null
+    private var cachedQueue: List<SongEntity> = emptyList()
     private var listenerAttached = false
     private var released = false
     private val knownSongs = mutableMapOf<Long, SongEntity>()
@@ -109,10 +114,26 @@ class PlayerController(context: Context) {
         onlyIfSessionEmpty: Boolean = false,
         availableSongs: List<SongEntity> = songs
     ) {
+        if (songs.size > MAX_LOADED_QUEUE) {
+            val safe = index.coerceIn(songs.indices)
+            val first = (safe - MAX_LOADED_QUEUE / 2).coerceIn(0, songs.size - MAX_LOADED_QUEUE)
+            restoreQueue(songs.subList(first, first + MAX_LOADED_QUEUE).toList(), safe - first, position,
+                mode, playing, fmMode, onlyIfSessionEmpty,
+                availableSongs = songs.subList(first, first + MAX_LOADED_QUEUE).toList())
+            return
+        }
         if (songs.isNotEmpty()) {
+            queuePreparationJob?.cancel()
+            val generation = ++queueGeneration
+            queuePreparationJob = scope.launch {
+            val items = withContext(Dispatchers.Default) { songs.map { it.toMediaItem() } }
             controllerFuture.addListener({
+                if (generation != queueGeneration || released) return@addListener
                 val controller = controllerFuture.get()
-                knownSongs.putAll(availableSongs.associateBy { it.mediaStoreId })
+                knownSongs.clear()
+                knownSongs.putAll(songs.associateBy { it.mediaStoreId })
+                cachedTimeline = null
+                cachedQueue = emptyList()
                 if (onlyIfSessionEmpty && controller.mediaItemCount > 0) {
                     syncSessionState(controller)
                     startProgressUpdates(controller)
@@ -120,30 +141,46 @@ class PlayerController(context: Context) {
                 }
                 val restoredIndex = index.coerceIn(0, songs.lastIndex)
                 attachListener(controller)
-                controller.setMediaItems(songs.map { it.toMediaItem() }, restoredIndex, position)
+                controller.setMediaItems(items, restoredIndex, position)
                 applyPlaybackMode(controller, mode, fmMode)
                 controller.prepare()
                 if (playing) controller.play()
                 _state.value = PlayerState(songs[restoredIndex], playing, position, queue = songs, index = restoredIndex, mode = mode)
                 startProgressUpdates(controller)
             }, executor)
+            }
         }
     }
 
     fun playQueue(songs: List<SongEntity>, startIndex: Int, mode: PlaybackMode = _state.value.mode) {
         if (songs.isEmpty()) return
+        if (songs.size > MAX_LOADED_QUEUE) {
+            val safe = startIndex.coerceIn(songs.indices)
+            val first = (safe - MAX_LOADED_QUEUE / 2).coerceIn(0, songs.size - MAX_LOADED_QUEUE)
+            playQueue(songs.subList(first, first + MAX_LOADED_QUEUE).toList(), safe - first, mode)
+            return
+        }
+        queuePreparationJob?.cancel()
+        val generation = ++queueGeneration
+        queuePreparationJob = scope.launch {
+        val items = withContext(Dispatchers.Default) { songs.map { it.toMediaItem() } }
         controllerFuture.addListener({
+            if (generation != queueGeneration || released) return@addListener
             val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
             val safeIndex = startIndex.coerceIn(0, songs.lastIndex)
+            knownSongs.clear()
             knownSongs.putAll(songs.associateBy { it.mediaStoreId })
+            cachedTimeline = null
+            cachedQueue = emptyList()
             attachListener(controller)
-            controller.setMediaItems(songs.map { it.toMediaItem() }, safeIndex, 0)
+            controller.setMediaItems(items, safeIndex, 0)
             applyPlaybackMode(controller, mode, fmMode = false)
             controller.prepare()
             controller.play()
             _state.value = PlayerState(songs[safeIndex], true, queue = songs, index = safeIndex, mode = mode)
             startProgressUpdates(controller)
         }, executor)
+        }
     }
 
     fun playFmQueue(songs: List<SongEntity>, startIndex: Int = 0, position: Long = 0, playing: Boolean = true,
@@ -192,21 +229,19 @@ class PlayerController(context: Context) {
     }, executor)
     fun seek(position: Long) = controllerFuture.addListener({ controllerFuture.get().apply { seekTo(position); saveWidgetState(this) } }, executor)
     fun updateSong(song: SongEntity) {
-        knownSongs[song.mediaStoreId] = song
+        val previous = knownSongs[song.mediaStoreId] ?: _state.value.song?.takeIf { it.mediaStoreId == song.mediaStoreId }
+        val updated = if (song.albumArtUri.isNullOrBlank() && !previous?.albumArtUri.isNullOrBlank())
+            song.copy(albumArtUri = previous?.albumArtUri) else song
+        knownSongs[song.mediaStoreId] = updated
         if (_state.value.song?.mediaStoreId != song.mediaStoreId) return
-        _state.value = _state.value.copy(song = song, queue = _state.value.queue.map { if (it.mediaStoreId == song.mediaStoreId) song else it })
+        cachedTimeline = null
+        _state.value = _state.value.copy(song = updated, queue = _state.value.queue.map { if (it.mediaStoreId == song.mediaStoreId) updated else it })
     }
     fun remove(index: Int) = controllerFuture.addListener({
         val controller = controllerFuture.get()
         if (index in 0 until controller.mediaItemCount) {
             controller.removeMediaItem(index)
-            val queue = _state.value.queue.toMutableList().apply { removeAt(index) }
-            val currentIndex = controller.currentMediaItemIndex.coerceAtMost(queue.lastIndex)
-            _state.value = if (queue.isEmpty()) PlayerState(mode = _state.value.mode) else _state.value.copy(
-                queue = queue,
-                index = currentIndex,
-                song = queue.getOrNull(currentIndex)
-            )
+            syncSessionState(controller)
         }
     }, executor)
     fun clear() = controllerFuture.addListener({ controllerFuture.get().clearMediaItems(); _state.value = PlayerState() }, executor)
@@ -272,10 +307,12 @@ class PlayerController(context: Context) {
 
     /** The running service is authoritative, including after the activity/controller is recreated. */
     private fun syncSessionState(controller: MediaController) {
-        val queue = List(controller.mediaItemCount) { index ->
+        val timeline = controller.currentTimeline
+        val previousSongs = if (timeline === cachedTimeline) emptyMap() else _state.value.queue.associateBy { it.mediaStoreId }
+        val queue = if (timeline === cachedTimeline) cachedQueue else List(controller.mediaItemCount) { index ->
             val item = controller.getMediaItemAt(index)
             val id = item.mediaId.toLongOrNull() ?: -1L
-            knownSongs[id] ?: _state.value.queue.firstOrNull { it.mediaStoreId == id } ?: SongEntity(
+            knownSongs[id] ?: previousSongs[id] ?: SongEntity(
                 mediaStoreId = id, title = item.mediaMetadata.title?.toString().orEmpty(),
                 artist = item.mediaMetadata.artist?.toString().orEmpty(),
                 album = item.mediaMetadata.albumTitle?.toString().orEmpty(), durationMs = 0,
@@ -283,6 +320,8 @@ class PlayerController(context: Context) {
                 albumArtUri = item.mediaMetadata.artworkUri?.toString(), sourceFolderUri = "", dateAdded = 0
             )
         }
+        cachedTimeline = timeline
+        cachedQueue = queue
         val index = controller.currentMediaItemIndex
         _state.value = _state.value.copy(
             queue = queue, index = index, song = queue.getOrNull(index),
@@ -337,6 +376,7 @@ class PlayerController(context: Context) {
     private fun SongEntity.toMediaItem() = MediaItem.Builder()
         .setMediaId(mediaStoreId.toString())
         .setUri(uri)
+        .setMimeType(mimeType ?: if (uri.startsWith("nas://")) "audio/mpeg" else null)
         .setMediaMetadata(MediaMetadata.Builder().setTitle(title).setArtist(artist).setAlbumTitle(album).apply {
             albumArtUri?.let {
                 setArtworkUri(
@@ -346,6 +386,12 @@ class PlayerController(context: Context) {
             }
         }.build())
         .build()
+
+    companion object {
+        // MediaController and ExoPlayer each expand every item into multiple timeline objects.
+        // Bound the active queue rather than duplicating an entire NAS catalogue in the player.
+        private const val MAX_LOADED_QUEUE = 300
+    }
 }
 
 data class PlayerState(

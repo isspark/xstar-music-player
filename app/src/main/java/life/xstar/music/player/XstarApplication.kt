@@ -11,6 +11,7 @@ import life.xstar.music.player.together.TogetherSessionController
 
 class XstarApplication : Application() {
     val database by lazy { MusicDatabase.create(this) }
+    val nasRepository by lazy { life.xstar.music.player.data.nas.NasRepository(this, database) }
     val repository by lazy { MusicRepository(this, database.songDao(), database.playlistDao(), database.singingDao()) }
     val playbackPreferences by lazy { PlaybackPreferences(this) }
     val castController by lazy { CastSessionController(this) }
