@@ -1,0 +1,75 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="288dp"
+    android:height="288dp"
+    android:viewportWidth="288"
+    android:viewportHeight="288">
+    <!-- Keep the entire lockup, including lettering, inside the system's circular safe area. -->
+    <path
+        android:pathData="M144,77 A48,48 0,1 1,143.99,77"
+        android:fillColor="#00000000"
+        android:strokeColor="#267C4DFF"
+        android:strokeWidth="1" />
+    <path
+        android:name="orbit"
+        android:pathData="M144,77 A48,48 0,1 1,143.99,77"
+        android:fillColor="#00000000"
+        android:strokeColor="#807C4DFF"
+        android:strokeWidth="1.2"
+        android:strokeLineCap="round" />
+    <group android:name="orbit_motion" android:pivotX="144" android:pivotY="125">
+        <path
+            android:pathData="M144,77 A48,48 0,1 1,143.99,77"
+            android:fillColor="#00000000"
+            android:strokeColor="#307C4DFF"
+            android:strokeWidth="5"
+            android:trimPathStart="0.02"
+            android:trimPathEnd="0.22"
+            android:strokeLineCap="round" />
+        <path
+            android:pathData="M144,77 A48,48 0,1 1,143.99,77"
+            android:fillColor="#00000000"
+            android:strokeColor="#C5AEFF"
+            android:strokeWidth="1.7"
+            android:trimPathStart="0.08"
+            android:trimPathEnd="0.22"
+            android:strokeLineCap="round" />
+    </group>
+    <group android:name="note_motion" android:pivotX="144" android:pivotY="125">
+    <path
+        android:pathData="M143,140 V101 C156,104 165,111 168,122 M143,140 C140,132 122,134 120,143 C117,153 137,157 142,146 Z"
+        android:fillColor="#00000000"
+        android:strokeColor="#124DFFF3"
+        android:strokeWidth="12"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M143,140 V101 C156,104 165,111 168,122 M143,140 C140,132 122,134 120,143 C117,153 137,157 142,146 Z"
+        android:fillColor="#00000000"
+        android:strokeColor="#304DFFF3"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:name="note"
+        android:pathData="M143,140 V101 C156,104 165,111 168,122 M143,140 C140,132 122,134 120,143 C117,153 137,157 142,146 Z"
+        android:fillColor="#00000000"
+        android:strokeColor="#4DFFF3"
+        android:strokeWidth="2.8"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    </group>
+    <group android:name="star_motion" android:pivotX="177" android:pivotY="98">
+    <path
+        android:name="star"
+        android:pathData="M177,88 C178,95 180,97 187,98 C180,99 178,101 177,108 C176,101 174,99 167,98 C174,97 176,95 177,88 Z"
+        android:fillColor="#DDD4FF" />
+    </group>
+    <!-- Vector lettering keeps XSTAR consistent across device fonts and startup configurations. -->
+    <path
+        android:pathData="M92,188 L104,204 M104,188 L92,204 M127,190 C124,187 114,187 114,192 C114,197 127,195 127,200 C127,205 117,206 114,202 M136,188 H150 M143,188 V204 M159,204 L166,188 L173,204 M162,199 H170 M183,204 V188 H190 C199,188 199,196 190,196 H183 M190,196 L198,204"
+        android:fillColor="#00000000"
+        android:strokeColor="#B9C4D6"
+        android:strokeWidth="2"
+        android:strokeLineCap="square"
+        android:strokeLineJoin="round" />
+</vector>

@@ -1,4 +1,15 @@
 <resources>
+    <style name="Theme.XSTAR.Starting.Base" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/splash_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_logo_art</item>
+        <item name="postSplashScreenTheme">@style/Theme.XSTAR</item>
+        <item name="android:statusBarColor">@color/splash_background</item>
+        <item name="android:navigationBarColor">@color/splash_background</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+    <style name="Theme.XSTAR.Starting" parent="Theme.XSTAR.Starting.Base" />
+
     <style name="Theme.XSTAR" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowActionModeOverlay">true</item>

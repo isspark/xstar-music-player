@@ -54,9 +54,8 @@ internal fun NasFirstSyncScreen(vm: MusicViewModel, initializing: Boolean) {
     BackHandler(page != "choice" && !busy) { page = "choice"; error = null }
     Column(Modifier.fillMaxSize().background(colors.background).systemBarsPadding().imePadding()
         .verticalScroll(rememberScrollState()).padding(28.dp)) {
-        if (page != "choice") IconButton({ page = "choice"; error = null }, enabled = !busy) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回", tint = colors.onBackground)
-        } else Spacer(Modifier.height(48.dp))
+        if (page != "choice") PageTopBar("音乐来源", { if (!busy) { page = "choice"; error = null } }, back = true, parentInset = 28)
+        else Spacer(Modifier.height(24.dp))
         Text("WELCOME / XSTAR", color = colors.primary, fontSize = 10.sp, letterSpacing = 2.sp,
             modifier = Modifier.padding(top = 26.dp))
         Text(when (page) { "local" -> "听见身边的音乐"; "nas" -> "连接你的 NAS"; "developer" -> "开发者入口"; else -> "音乐，从哪里开始？" },

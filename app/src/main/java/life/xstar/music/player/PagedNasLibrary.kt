@@ -55,48 +55,39 @@ internal fun PagedNasLibrary(vm: MusicViewModel, total: Int, openMenu: () -> Uni
     fun back() { selectedArtist = null; selectedAlbum = null }
     androidx.activity.compose.BackHandler(selectedArtist != null || selectedAlbum != null) { back() }
     Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(openMenu) { Icon(Icons.Default.Menu, "菜单") }
-            Text("音乐库 · $total 首", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+        PageTopBar(selectedArtist ?: selectedAlbum ?: "音乐库", if (selectedArtist != null || selectedAlbum != null) ({ back() }) else openMenu,
+            back = selectedArtist != null || selectedAlbum != null) {
             IconButton(addFolder) { Icon(Icons.Default.CreateNewFolder, "添加音乐文件夹") }
             IconButton({ vm.syncNas(config) }, enabled = !status.busy && config.enabled && config.address.isNotBlank()) {
                 Icon(Icons.Default.Sync, "同步 NAS")
             }
         }
         NasSyncBanner(status, vm::pauseNasSync, { vm.syncNas(config) })
-        OutlinedTextField(query, { query = it }, Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            singleLine = true, label = { Text("搜索全部歌曲、歌手或专辑") },
-            trailingIcon = { if (query.isNotEmpty()) IconButton({ query = "" }) { Icon(Icons.Default.Close, "清空") } })
+        PageSearchField(query, { query = it })
+        PageSubtitle("共 $total 首歌曲")
         Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             listOf("歌曲", "专辑", "歌手").forEachIndexed { index, name ->
                 FilterChip(tab == index, { tab = index; back() }, label = { Text(name) })
             }
-        }
-        if (selectedArtist != null || selectedAlbum != null) TextButton({ back() }) {
-            Icon(Icons.AutoMirrored.Filled.ArrowBack, null); Text(selectedArtist ?: selectedAlbum.orEmpty())
         }
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)) {
             if (showingSongs) {
                 items(songs.itemCount, key = songs.itemKey { it.mediaStoreId }) { index ->
                     val song = songs[index]
                     if (song == null) Text("正在加载…", Modifier.padding(16.dp)) else {
-                        ListItem(
-                            headlineContent = { Text(song.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            supportingContent = { Text("${song.artist} · ${song.album}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            leadingContent = { Icon(if (playback.song?.mediaStoreId == song.mediaStoreId) Icons.Default.GraphicEq else if (song.uri.startsWith("nas://")) Icons.Default.Storage else Icons.Default.MusicNote, null) },
-                            trailingContent = { IconButton({ vm.favorite(song.mediaStoreId) }) {
-                                Icon(if (song.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, "收藏")
-                            } },
-                            modifier = Modifier.clickable { vm.play(song, songs.itemSnapshotList.items) }
-                        )
+                        LibrarySongRow(song, index + 1, playback.song?.mediaStoreId == song.mediaStoreId, playback.playing,
+                            onPlay = {
+                                if (selectedArtist != null || selectedAlbum != null) vm.playLibraryGroup(selectedArtist, selectedAlbum, query, song)
+                                else vm.play(song, songs.itemSnapshotList.items)
+                            }, onFavorite = { vm.favorite(song.mediaStoreId) })
                     }
                 }
             } else {
                 items(groups.itemCount, key = groups.itemKey { it.name }) { index ->
                     groups[index]?.let { group ->
-                        ListItem(headlineContent = { Text(group.name) }, supportingContent = { Text("${group.count} 首") },
-                            leadingContent = { Icon(if (tab == 1) Icons.Default.Album else Icons.Default.Person, null) },
-                            modifier = Modifier.clickable { if (tab == 1) selectedAlbum = group.name else selectedArtist = group.name })
+                        LibraryGroupRow(group.name, "${group.count} 首歌曲", group.artwork,
+                            onOpen = { if (tab == 1) selectedAlbum = group.name else selectedArtist = group.name },
+                            onPlay = { vm.playLibraryGroup(artist = if (tab == 2) group.name else null, album = if (tab == 1) group.name else null, query = query) })
                     }
                 }
             }
@@ -112,7 +103,7 @@ internal fun PagedNasLibrary(vm: MusicViewModel, total: Int, openMenu: () -> Uni
 
 @Composable
 internal fun NasSyncBanner(status: NasStatus, pause: () -> Unit, resume: () -> Unit) {
-    if (status.message.isBlank()) return
+    if (status.message.isBlank() || (!status.busy && !status.resumable)) return
     Surface(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
         color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.medium) {
         Column(Modifier.padding(12.dp)) {

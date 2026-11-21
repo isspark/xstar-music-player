@@ -57,7 +57,6 @@ internal fun OnlineMusicContent(
     val colors = MaterialTheme.colorScheme
     var query by rememberSaveable { mutableStateOf((state as? OnlineSearchUiState.Results)?.query.orEmpty()) }
     val keyboard = LocalSoftwareKeyboardController.current
-    var searchFocused by remember { mutableStateOf(false) }
     fun search(keyword: String = query) {
         if (!enabled || keyword.isBlank()) return
         query = keyword
@@ -67,57 +66,10 @@ internal fun OnlineMusicContent(
     val activeDownloads = downloads.values.count { it is OnlineDownloadState.DownloadingPercent }
     CompositionLocalProvider(LocalContentColor provides colors.onBackground) {
         Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp).height(60.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(openMenu) { Icon(Icons.Default.Menu, "菜单") }
-                Text("在线音乐", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f))
-                Surface(shape = CircleShape, color = colors.primary.copy(alpha = .1f)) {
-                    Row(Modifier.padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        Icon(if (activeDownloads > 0) Icons.Default.Downloading else Icons.Default.GraphicEq,
-                            null, Modifier.size(14.dp), tint = colors.primary)
-                        Text(if (activeDownloads > 0) "$activeDownloads 首下载中" else "随心听见", color = colors.primary,
-                            style = MaterialTheme.typography.labelSmall)
-                    }
-                }
-                Spacer(Modifier.width(8.dp))
-            }
-            Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(top = 10.dp, bottom = 8.dp)) {
-                Text("SEARCH / 探索音乐", color = colors.onSurfaceVariant, fontSize = 9.sp, letterSpacing = 1.5.sp)
-                Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Search, null, Modifier.size(20.dp), tint = colors.primary)
-                    Spacer(Modifier.width(12.dp))
-                    BasicTextField(
-                value = query,
-                onValueChange = { query = it; if (it.isBlank()) onClearSearch() },
-                enabled = enabled,
-                modifier = Modifier.weight(1f).onFocusChanged { searchFocused = it.isFocused },
-                textStyle = MaterialTheme.typography.bodyLarge.copy(color = if (enabled) colors.onBackground else colors.onSurfaceVariant),
-                cursorBrush = SolidColor(colors.primary),
-                decorationBox = { input ->
-                    Box {
-                        if (query.isEmpty()) Text("搜索歌曲、歌手或专辑", color = colors.onSurfaceVariant.copy(alpha = .65f),
-                            style = MaterialTheme.typography.bodyMedium)
-                        input()
-                    }
-                },
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                keyboardActions = KeyboardActions(onSearch = { search() })
-                    )
-                        if (query.isNotEmpty()) IconButton({ query = ""; onClearSearch() }) {
-                            Icon(Icons.Default.Close, "清空搜索", Modifier.size(18.dp))
-                        }
-                        IconButton({ search() }, enabled = enabled && query.isNotBlank()) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowForward, "搜索")
-                        }
-                }
-                HorizontalDivider(color = if (searchFocused) colors.primary.copy(alpha = .8f)
-                    else colors.outlineVariant, thickness = if (searchFocused) 1.5.dp else 1.dp)
-            }
+            PageTopBar("在线搜歌", openMenu)
+            PageSearchField(query, { query = it; if (it.isBlank()) onClearSearch() },
+                enabled = enabled, onSearch = { search() })
+            if (activeDownloads > 0) PageSubtitle("$activeDownloads 首歌曲正在下载")
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth(),
                 contentPadding = PaddingValues(start = 22.dp, end = 22.dp, top = 14.dp, bottom = 32.dp),
@@ -290,7 +242,7 @@ private fun OnlineDiscoveryHero() {
 }
 
 @Composable
-private fun OnlineSongRow(
+internal fun OnlineSongRow(
     title: String,
     artist: String,
     album: String,
@@ -298,6 +250,9 @@ private fun OnlineSongRow(
     quality: String,
     number: Int,
     download: OnlineDownloadState? = null,
+    selected: Boolean = false,
+    playing: Boolean = false,
+    leading: (@Composable () -> Unit)? = null,
     onPlay: () -> Unit,
     action: @Composable () -> Unit
 ) {
@@ -306,11 +261,17 @@ private fun OnlineSongRow(
         HorizontalDivider(color = colors.outlineVariant.copy(alpha = .6f))
         Column(Modifier.fillMaxWidth().clickable(onClick = onPlay).padding(vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(number.toString().padStart(2, '0'), color = colors.primary, fontSize = 11.sp,
-                    letterSpacing = 1.sp, modifier = Modifier.width(34.dp))
+                if (leading != null) {
+                    leading()
+                    Spacer(Modifier.width(12.dp))
+                } else Box(Modifier.width(34.dp), contentAlignment = Alignment.CenterStart) {
+                    if (selected && playing) Icon(Icons.Default.GraphicEq, "正在播放", Modifier.size(18.dp), tint = colors.primary)
+                    else Text(number.toString().padStart(2, '0'), color = colors.primary, fontSize = 11.sp, letterSpacing = 1.sp)
+                }
                 Column(Modifier.weight(1f).padding(end = 2.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(title, fontWeight = FontWeight.Medium, fontSize = 16.sp,
+                        Text(title, color = if (selected) colors.primary else colors.onBackground,
+                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium, fontSize = 16.sp,
                             maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                         Spacer(Modifier.width(4.dp))
                         OnlineInfoIcon(
@@ -326,7 +287,8 @@ private fun OnlineSongRow(
                         )
                         OnlineInfoIcon(
                             icon = when (source) {
-                                "NAS" -> Icons.Default.Storage
+                                 "NAS" -> Icons.Default.Storage
+                                 "本地" -> Icons.Default.PhoneAndroid
                                 "网易云" -> Icons.Default.Album
                                 "QQ音乐" -> Icons.Default.MusicNote
                                 "酷狗" -> Icons.Default.Headphones
@@ -375,7 +337,7 @@ private fun onlineQualityLabel(audio: OnlineResolvedAudio): String {
     return if (audio.br > 0) "$label · ${audio.br} kbps" else label
 }
 
-private fun songQualityLabel(song: SongEntity): String {
+internal fun songQualityLabel(song: SongEntity): String {
     if (song.bitrate == null && song.codec == null && song.sampleRate == null && song.bitDepth == null &&
         song.audioQuality == "Standard") return "音质待确认"
     val label = when (song.audioQuality) {

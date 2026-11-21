@@ -1,0 +1,6 @@
+<resources>
+    <style name="Theme.XSTAR.Starting" parent="Theme.XSTAR.Starting.Base">
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_logo_animated</item>
+        <item name="windowSplashScreenAnimationDuration">700</item>
+    </style>
+</resources>

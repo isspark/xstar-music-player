@@ -17,6 +17,7 @@ import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicInteger
 import android.os.Bundle
 import androidx.core.view.WindowCompat
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.ui.unit.LayoutDirection
@@ -210,7 +211,20 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onCreate(state: Bundle?) {
+        val splashScreen = installSplashScreen()
         super.onCreate(state)
+        splashScreen.setOnExitAnimationListener { splash ->
+            splash.view.animate()
+                .alpha(0f)
+                .setDuration(200L)
+                .withEndAction { splash.remove() }
+                .start()
+            splash.iconView.animate()
+                .scaleX(.94f)
+                .scaleY(.94f)
+                .setDuration(200L)
+                .start()
+        }
         enableEdgeToEdge()
         if (state?.getBoolean("lock_screen_player_visible") == true) setLockScreenMode(true)
         val app = application as XstarApplication
@@ -1010,6 +1024,13 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
             lock.unlock()
         }
     }
+    fun playLibraryGroup(artist: String? = null, album: String? = null, query: String = "", song: SongEntity? = null) {
+        viewModelScope.launch {
+            val queue = (appContext.applicationContext as XstarApplication).database.songDao().libraryQueue(query.trim(), artist, album)
+            val start = song?.let { selected -> queue.firstOrNull { it.mediaStoreId == selected.mediaStoreId } } ?: queue.firstOrNull()
+            if (start != null) play(start, queue)
+        }
+    }
     fun createPlaylist(name: String) = viewModelScope.launch { if (name.isNotBlank()) repo.createPlaylist(name.trim()) }
     fun deletePlaylist(item: PlaylistEntity) = viewModelScope.launch { repo.deletePlaylist(item) }
     fun renamePlaylist(id: Long, name: String) = viewModelScope.launch { if (name.isNotBlank()) repo.renamePlaylist(id, name) }
@@ -1233,14 +1254,14 @@ sealed class OnlineSearchUiState {
     val openMenu: () -> Unit = { scope.launch { drawerState.open() } }
     val entryProvider = entryProvider<NavKey> {
         entry<PlayerRoute> { PlayerScreen(vm, openMenu, onOpenCastSheet = { showCastSheet = true }, onOpenTogetherSheet = { showTogetherSheet = true }) }
-        entry<LibraryRoute> { LibraryScreen(vm, openMenu) }
-        entry<FavoritesRoute> { CollectionScreen(vm.favorites.collectAsStateWithLifecycle().value, vm, openMenu, goToLibrary = { navigator.navigate(LibraryRoute) }) }
-        entry<PlaylistsRoute> { life.xstar.music.player.ui.playlist.PlaylistLibraryScreen(vm, openMenu) }
-        entry<OnlineRoute> { OnlineScreen(vm, openMenu) }
-        entry<EqualizerRoute> { EqualizerScreen(vm, openMenu) }
-        entry<SettingsRoute> { SettingsScreen(vm, openMenu) }
-        entry<life.xstar.music.player.navigation.AppearanceRoute> { SettingsScreen(vm, openMenu, appearanceOnly = true) }
-        entry<SingingHistoryRoute> { SingingHistoryScreen(vm, openMenu, goKaraoke = { vm.setKaraokeMode(true) }) }
+        entry<LibraryRoute> { ThemedPageChrome(playerTheme) { LibraryScreen(vm, openMenu) } }
+        entry<FavoritesRoute> { ThemedPageChrome(playerTheme) { CollectionScreen(vm.favorites.collectAsStateWithLifecycle().value, vm, openMenu, goToLibrary = { navigator.navigate(LibraryRoute) }) } }
+        entry<PlaylistsRoute> { ThemedPageChrome(playerTheme) { life.xstar.music.player.ui.playlist.PlaylistLibraryScreen(vm, openMenu) } }
+        entry<OnlineRoute> { ThemedPageChrome(playerTheme) { OnlineScreen(vm, openMenu) } }
+        entry<EqualizerRoute> { ThemedPageChrome(playerTheme) { EqualizerScreen(vm, openMenu) } }
+        entry<SettingsRoute> { ThemedPageChrome(playerTheme) { SettingsScreen(vm, openMenu) } }
+        entry<life.xstar.music.player.navigation.AppearanceRoute> { ThemedPageChrome(playerTheme) { SettingsScreen(vm, openMenu, appearanceOnly = true) } }
+        entry<SingingHistoryRoute> { ThemedPageChrome(playerTheme) { SingingHistoryScreen(vm, openMenu, goKaraoke = { vm.setKaraokeMode(true) }) } }
     }
     val primaryDrawerRoutes = listOf(
         PlayerRoute to (Icons.Default.Headphones to "正在播放"),
@@ -2172,9 +2193,7 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
         )
     }
     Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 22.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(openMenu) { Icon(Icons.Default.Menu, "菜单", tint = colors.onBackground) }
-        }
+        PageTopBar("正在播放", openMenu, parentInset = 22, immersive = true)
         Spacer(Modifier.weight(.5f).heightIn(min = 16.dp))
         BoxWithConstraints(
             Modifier.fillMaxWidth().weight(3f),
@@ -2429,11 +2448,7 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(theme.color().copy(alpha = .18f), Color(0xFF0B0E14))))) {
         PlayerBackground(vm, song)
         Column(Modifier.fillMaxSize().systemBarsPadding(), horizontalAlignment = Alignment.CenterHorizontally) {
-            Row(Modifier.fillMaxWidth().height(52.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(openMenu) { Icon(Icons.Default.Menu, "菜单", tint = Color.White) }
-                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    Text("卡拉OK模式", color = Color(0xFFB8C1CF), fontSize = 15.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 3.sp)
-                }
+            PageTopBar("卡拉OK", openMenu, immersive = true) {
                 IconButton({ expanded = !expanded }, enabled = song != null) { Icon(if (expanded) Icons.Default.ExpandLess else Icons.Default.Tune, if (expanded) "收起控制" else "展开跟唱控制", tint = if (song != null) Color.White else Color(0xFF5B6577)) }
             }
             if (song != null) {
@@ -3283,8 +3298,7 @@ private data class PendingTake(val takeId: Int, val startMs: Long, val notes: Li
     var selected by remember { mutableStateOf<SingingRecordEntity?>(null) }
     var pendingDelete by remember { mutableStateOf<SingingRecordEntity?>(null) }
     Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) {
-        PageHeader(openMenu)
-        Text("我的演唱", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+        PageTopBar("我的演唱", openMenu, parentInset = 18)
         Text(if (records.isEmpty()) "卡拉OK每次跟唱结束都会自动保存" else "共 ${records.size} 条演唱记录 · 点击可播放与查看评分", color = Color(0xFF818C9C), fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp, bottom = 6.dp))
         if (records.isEmpty()) {
             EmptyState("还没有演唱记录", "进入卡拉OK模式，点开「演唱评分」录完一遍后，录音和评分会自动保存到这里。", "去卡拉OK跟唱", goKaraoke)
@@ -3586,44 +3600,25 @@ private fun dateTimeText(ms: Long): String {
 @Composable private fun CollectionScreen(songs: List<SongEntity>, vm: MusicViewModel, openMenu: () -> Unit, goToLibrary: () -> Unit) {
     val colors = MaterialTheme.colorScheme
     var query by rememberSaveable { mutableStateOf("") }
-    var focused by remember { mutableStateOf(false) }
     val playback by vm.playback.collectAsStateWithLifecycle()
     val filtered = remember(songs, query) {
         songs.filter { query.isBlank() || "${it.title} ${it.artist} ${it.album}".contains(query, true) }
     }
     CompositionLocalProvider(LocalContentColor provides colors.onBackground) {
         Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp).height(60.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(openMenu) { Icon(Icons.Default.Menu, "菜单") }
-                Text("我的收藏", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            PageTopBar("我的收藏", openMenu) {
                 if (songs.isNotEmpty()) {
                     IconButton({ vm.play(filtered.firstOrNull() ?: songs.first(), filtered.ifEmpty { songs }) }) {
                         Icon(Icons.Default.PlayArrow, "播放收藏")
                     }
                 }
             }
-            Column(Modifier.padding(horizontal = 22.dp).padding(top = 10.dp, bottom = 8.dp)) {
-                Text("COLLECTION / 你的收藏", color = colors.primary, fontSize = 9.sp, letterSpacing = 1.5.sp, fontWeight = FontWeight.SemiBold)
-                Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.Bottom) {
-                    Column(Modifier.weight(1f)) {
-                        Text("喜欢的声音，随时重温", fontSize = 24.sp, fontWeight = FontWeight.Medium)
-                        Text("${songs.size} 首歌曲${if (query.isNotBlank()) " · 找到 ${filtered.size} 首" else ""}", color = colors.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
-                    }
-                    if (songs.isNotEmpty()) {
-                        IconButton({ val queue = songs.shuffled(); vm.play(queue.first(), queue) }) {
-                            Icon(Icons.Default.Shuffle, "随机播放", tint = colors.primary)
-                        }
-                    }
+            PageSearchField(query, { query = it }, "搜索收藏歌曲、歌手或专辑")
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                PageSubtitle("${songs.size} 首歌曲${if (query.isNotBlank()) " · 找到 ${filtered.size} 首" else ""}", Modifier.weight(1f))
+                if (songs.isNotEmpty()) IconButton({ val queue = songs.shuffled(); vm.play(queue.first(), queue) }) {
+                    Icon(Icons.Default.Shuffle, "随机播放", tint = colors.primary)
                 }
-                Row(Modifier.fillMaxWidth().padding(top = 14.dp).heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Search, null, Modifier.size(20.dp), tint = colors.primary)
-                    Spacer(Modifier.width(12.dp))
-                    BasicTextField(query, { query = it }, Modifier.weight(1f).onFocusChanged { focused = it.isFocused },
-                        singleLine = true, textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onBackground), cursorBrush = SolidColor(colors.primary),
-                        decorationBox = { input -> Box { if (query.isEmpty()) Text("搜索收藏歌曲、歌手或专辑", color = colors.onSurfaceVariant.copy(alpha = .65f), style = MaterialTheme.typography.bodyMedium); input() } })
-                    if (query.isNotEmpty()) IconButton({ query = "" }) { Icon(Icons.Default.Close, "清空搜索", Modifier.size(18.dp)) }
-                }
-                HorizontalDivider(color = if (focused) colors.primary.copy(alpha = .8f) else colors.outlineVariant, thickness = if (focused) 1.5.dp else 1.dp)
             }
             if (songs.isEmpty()) {
                 EmptyState("还没有收藏", "在歌曲右侧点击爱心即可收藏。", "前往音乐库", goToLibrary)
@@ -3799,10 +3794,11 @@ private fun dateTimeText(ms: Long): String {
     val state by vm.equalizerState.collectAsStateWithLifecycle()
     LaunchedEffect(Unit) { vm.refreshEqualizer() }
     Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 18.dp)) {
-        PageHeader(openMenu)
+        PageTopBar("均衡器", openMenu, parentInset = 18) {
+            Switch(checked = state.enabled, enabled = state.ready, onCheckedChange = vm::setEqualizerEnabled)
+        }
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("均衡器", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
                 Text(
                     when {
                         !state.available -> "当前设备不支持"
@@ -3813,7 +3809,6 @@ private fun dateTimeText(ms: Long): String {
                     fontSize = 13.sp
                 )
             }
-            Switch(checked = state.enabled, enabled = state.ready, onCheckedChange = vm::setEqualizerEnabled)
         }
         state.error?.let {
             Surface(Modifier.fillMaxWidth().padding(vertical = 10.dp), shape = RoundedCornerShape(14.dp), color = Color(0xFFFF8A96).copy(alpha = .12f)) {
@@ -3963,10 +3958,9 @@ private fun dateTimeText(ms: Long): String {
     }
     val canScan = folders.isNotEmpty() || downloadFolder.isNotBlank()
     Column(Modifier.fillMaxSize().systemBarsPadding().imePadding().padding(horizontal = 18.dp)) {
-        PageHeader(openMenu)
+        PageTopBar(if (appearanceOnly) "外观" else "设置", openMenu, parentInset = 18)
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(20.dp)) {
         if (appearanceOnly) {
-        Text("外观设置", color = MaterialTheme.colorScheme.primary, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
         Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surface) {
         Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {

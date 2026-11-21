@@ -68,7 +68,7 @@ import kotlin.math.*
 import kotlin.random.Random
 
 internal data class ScenePalette(val background: Color, val ink: Color, val accent: Color)
-private fun PlayerTheme.palette() = when (this) {
+internal fun PlayerTheme.palette() = when (this) {
     PlayerTheme.Orbital -> ScenePalette(Color(0xFF100D1C), Color(0xFFF1EAFF), Color(0xFFC4B4FF))
     PlayerTheme.Theatre -> ScenePalette(Color(0xFF171512), Color(0xFFF7EDDB), Color(0xFFEDCF95))
     PlayerTheme.Liquid -> ScenePalette(Color(0xFF161329), Color(0xFFF7EAF4), Color(0xFFE5BCD7))

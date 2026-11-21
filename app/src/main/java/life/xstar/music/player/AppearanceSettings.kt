@@ -91,18 +91,12 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
     BackHandler(page != null) { page = null }
     CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onBackground) {
     Column(Modifier.fillMaxSize().systemBarsPadding().imePadding().padding(horizontal = 18.dp)) {
-        Row(Modifier.fillMaxWidth().height(56.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton({ if (page == null) openMenu() else page = null }) {
-                Icon(if (page == null) Icons.Default.Menu else Icons.AutoMirrored.Filled.ArrowBack, if (page == null) "菜单" else "返回外观设置",
-                    tint = MaterialTheme.colorScheme.onBackground)
-            }
-            Text(page?.title ?: "外观设置", Modifier.weight(1f), color = MaterialTheme.colorScheme.primary, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+        PageTopBar(page?.title ?: "外观", { if (page == null) openMenu() else page = null }, back = page != null, parentInset = 18) {
             if (page != null) IconButton({ reset = true }) {
                 Icon(Icons.Default.RestartAlt, "恢复本页默认", tint = MaterialTheme.colorScheme.onBackground)
             }
         }
-        Text("选择后即时生效，自动保存", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp,
-            modifier = Modifier.padding(start = 8.dp, bottom = 12.dp))
+        PageSubtitle("选择后即时生效，自动保存")
         if (page == null) {
             Column(Modifier.weight(1f).verticalScroll(homeScroll), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 AppearanceCard {

@@ -116,7 +116,7 @@ internal fun LibraryEditorialContent(
     val nasStatus by nasRepository.status.collectAsState()
     var group by rememberSaveable { mutableIntStateOf(0) }
     var artist by rememberSaveable { mutableStateOf<String?>(null) }
-    var focused by remember { mutableStateOf(false) }
+    var album by rememberSaveable { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
     val index by produceState(
         if (LibraryIndexCache.source === songs && LibraryIndexCache.query == query) LibraryIndexCache.index else LibraryIndex(), songs, query
@@ -138,8 +138,12 @@ internal fun LibraryEditorialContent(
     val filtered = index.songs
     val albums = index.albums
     val artists = index.artists
-    val showingSongs = group == 0 || (group == 2 && artist != null)
-    val visibleSongs = if (group == 2 && artist != null) artists[artist].orEmpty() else filtered
+    val showingSongs = group == 0 || artist != null || album != null
+    val visibleSongs = when {
+        group == 2 && artist != null -> artists[artist].orEmpty()
+        group == 1 && album != null -> albums[album].orEmpty()
+        else -> filtered
+    }
     val entries = remember(index, group) {
         (if (group == 1) albums else artists).entries.toList()
     }
@@ -151,42 +155,29 @@ internal fun LibraryEditorialContent(
             buildMap { names.forEachIndexed { position, name -> putIfAbsent(libraryInitial(sortKeys[name]), position) } }
         }
     }
-    val headerCount = 1 + (if (scanState.running || scanState.message != null) 1 else 0) +
-        (if (group == 2 && artist != null && filtered.isNotEmpty()) 1 else 0)
+    val headerCount = if (scanState.running || scanState.message != null) 1 else 0
     var touchedLetter by remember { mutableStateOf<String?>(null) }
     val currentLetter by remember(names, headerCount, sortKeys) { derivedStateOf {
         names.getOrNull((listState.firstVisibleItemIndex - headerCount).coerceAtLeast(0))?.let { libraryInitial(sortKeys[it]) }
     } }
-    LaunchedEffect(group, artist, query) { listState.scrollToItem(0) }
-    androidx.activity.compose.BackHandler(artist != null) { artist = null }
+    LaunchedEffect(group, artist, album, query) { listState.scrollToItem(0) }
+    androidx.activity.compose.BackHandler(artist != null || album != null) { artist = null; album = null }
     CompositionLocalProvider(LocalContentColor provides colors.onBackground) {
         Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp).height(60.dp), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(openMenu) { Icon(Icons.Default.Menu, "菜单") }
-                Text("音乐库", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            PageTopBar(artist ?: album ?: "音乐库", { if (artist != null || album != null) { artist = null; album = null } else openMenu() },
+                back = artist != null || album != null) {
                 IconButton(addFolder, enabled = !scanState.running) { Icon(Icons.Default.CreateNewFolder, "添加音乐文件夹") }
                 IconButton(onScan, enabled = scanEnabled) { Icon(Icons.Default.Refresh, "扫描音乐库", tint = if (scanEnabled) colors.primary else colors.onSurfaceVariant.copy(alpha = .4f)) }
             }
-            Column(Modifier.padding(horizontal = 22.dp).padding(top = 10.dp, bottom = 8.dp)) {
-                Text("SEARCH / 我的收藏库", color = colors.onSurfaceVariant, fontSize = 9.sp, letterSpacing = 1.5.sp)
-                Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Search, null, Modifier.size(20.dp), tint = colors.primary)
-                    Spacer(Modifier.width(12.dp))
-                    BasicTextField(query, { onQueryChange(it); artist = null },
-                        modifier = Modifier.weight(1f).onFocusChanged { focused = it.isFocused }, singleLine = true,
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = colors.onBackground), cursorBrush = SolidColor(colors.primary),
-                        decorationBox = { input -> Box {
-                            if (query.isEmpty()) Text("搜索歌曲、歌手或专辑", color = colors.onSurfaceVariant.copy(alpha = .65f), style = MaterialTheme.typography.bodyMedium)
-                            input()
-                        } })
-                    if (query.isNotEmpty()) IconButton({ onQueryChange(""); artist = null }) { Icon(Icons.Default.Close, "清空搜索", Modifier.size(18.dp)) }
-                }
-                HorizontalDivider(color = if (focused) colors.primary.copy(alpha = .8f) else colors.outlineVariant,
-                    thickness = if (focused) 1.5.dp else 1.dp)
-            }
+            PageSearchField(query, { onQueryChange(it) })
             NasSyncBanner(nasStatus,
                 { life.xstar.music.player.data.nas.NasSyncService.pause(context) },
                 { life.xstar.music.player.data.nas.NasSyncService.start(context) })
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                listOf("歌曲" to filtered.size, "专辑" to albums.size, "歌手" to artists.size).forEachIndexed { position, (label, count) ->
+                    FilterChip(group == position, { group = position; artist = null; album = null }, label = { Text("$label $count") })
+                }
+            }
             Box(Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(22.dp, 14.dp, 34.dp, 32.dp)) {
                 if (scanState.running || scanState.message != null) item {
@@ -205,18 +196,6 @@ internal fun LibraryEditorialContent(
                         }
                     }
                 }
-                item {
-                    Row(Modifier.fillMaxWidth().padding(bottom = 18.dp), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-                        listOf("歌曲" to filtered.size, "专辑" to albums.size, "歌手" to artists.size).forEachIndexed { index, (label, count) ->
-                            Column(Modifier.clickable { group = index; artist = null }.padding(vertical = 6.dp)) {
-                                Text("$label ${count}", fontSize = 14.sp, fontWeight = if (group == index) FontWeight.Bold else FontWeight.Normal,
-                                    color = if (group == index) colors.primary else colors.onSurfaceVariant)
-                                Box(Modifier.padding(top = 9.dp).width(20.dp).height(2.dp)
-                                    .background(if (group == index) colors.primary else androidx.compose.ui.graphics.Color.Transparent))
-                            }
-                        }
-                    }
-                }
                 if (filtered.isEmpty()) item {
                     Column(Modifier.fillMaxWidth().padding(vertical = 24.dp)) {
                         val preparing = songs.isNotEmpty() && index.keys.isEmpty()
@@ -227,40 +206,18 @@ internal fun LibraryEditorialContent(
                             Text("添加音乐文件夹"); Spacer(Modifier.width(8.dp)); Icon(Icons.AutoMirrored.Filled.ArrowForward, null, Modifier.size(18.dp))
                         }
                     }
-                } else if (group == 0 || (group == 2 && artist != null)) {
-                    if (artist != null && group == 2) item {
-                        TextButton({ artist = null }, contentPadding = PaddingValues(0.dp)) { Text("返回歌手索引 / $artist") }
-                    }
-                    itemsIndexed(visibleSongs, key = { _, song -> song.mediaStoreId }) { _, song ->
-                        EditorialLibraryRow(song.title, "${song.artist} · ${song.album}", artwork = song.albumArtUri,
-                            selected = song.mediaStoreId == currentSongId, playing = playing,
-                            onClick = { onPlay(song, visibleSongs) }, badge = {
-                                Icon(when (song.audioQuality) {
-                                    "HiRes" -> Icons.Default.AutoAwesome
-                                    "Lossless" -> Icons.Default.Verified
-                                    "High" -> Icons.Default.HighQuality
-                                    else -> Icons.Default.Sd
-                                }, "音质：${song.audioQuality}", Modifier.size(15.dp), tint = colors.primary.copy(alpha = .8f))
-                                Spacer(Modifier.width(6.dp))
-                                val isNas = song.uri.startsWith("nas://") || song.sourceFolderUri.startsWith("nas://")
-                                Icon(if (isNas) Icons.Default.Storage else Icons.Default.PhoneAndroid,
-                                    if (isNas) "NAS 歌曲" else "本地歌曲", Modifier.size(14.dp), tint = colors.onSurfaceVariant)
-                            }) {
-                            IconButton({ onFavorite(song.mediaStoreId) }) {
-                                Icon(if (song.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, "收藏",
-                                    Modifier.size(20.dp), tint = if (song.isFavorite) colors.primary else colors.onSurfaceVariant)
-                            }
-                        }
+                } else if (showingSongs) {
+                    itemsIndexed(visibleSongs, key = { _, song -> song.mediaStoreId }) { position, song ->
+                        LibrarySongRow(song, position + 1, song.mediaStoreId == currentSongId, playing,
+                            onPlay = { onPlay(song, visibleSongs) }, onFavorite = { onFavorite(song.mediaStoreId) })
                     }
                 } else {
                     itemsIndexed(entries, key = { _, entry -> entry.key }) { _, entry ->
-                        EditorialLibraryRow(entry.key,
+                        LibraryGroupRow(entry.key,
                             if (group == 1) "${entry.value.size} 首歌曲 · ${entry.value.map { it.artist }.distinct().joinToString(" / ")}" else "${entry.value.size} 首歌曲 · ${entry.value.map { it.album }.distinct().size} 张专辑",
-                            artwork = if (group == 1) entry.value.firstOrNull { !it.albumArtUri.isNullOrBlank() }?.albumArtUri else null,
-                            avatar = group == 2,
-                            onClick = { if (group == 1) onAlbum(entry.key, entry.value) else artist = entry.key }) {
-                            IconButton({ onPlay(entry.value.first(), entry.value) }) { Icon(Icons.Default.PlayArrow, "播放${entry.key}", tint = colors.primary) }
-                        }
+                            artwork = entry.value.firstOrNull { !it.albumArtUri.isNullOrBlank() }?.albumArtUri,
+                            onOpen = { if (group == 1) album = entry.key else artist = entry.key },
+                            onPlay = { onPlay(entry.value.first(), entry.value) })
                     }
                 }
                 item { HorizontalDivider(color = colors.outlineVariant.copy(alpha = .6f)) }

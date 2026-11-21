@@ -53,6 +53,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.text.style.TextOverflow
 import life.xstar.music.player.data.local.SongEntity
+import life.xstar.music.player.PageTopBar
+import life.xstar.music.player.PageSearchField
 import life.xstar.music.player.data.preferences.PlayerTheme
 import life.xstar.music.player.data.preferences.FloatingButtonStyle
 import life.xstar.music.player.ui.player.FloatingButtonVisual
@@ -260,6 +262,14 @@ fun MusicGalaxy(
         }
         if (visibleSongs.isEmpty()) {
             Text("没有找到匹配的音乐", color = Color.White.copy(alpha = .65f), modifier = Modifier.align(Alignment.Center))
+        }
+        Column(Modifier.align(Alignment.TopCenter).statusBarsPadding()) {
+            androidx.compose.runtime.CompositionLocalProvider(androidx.compose.material3.LocalContentColor provides Color.White) {
+            PageTopBar("音乐库", onMenu, immersive = true) {
+                IconButton({ searchOpen = !searchOpen }) { Icon(Icons.Default.Search, "搜索音乐库") }
+                IconButton(onScan, enabled = scanEnabled) { Icon(Icons.Default.Refresh, "扫描音乐库") }
+            }
+            }
         }
     }
 }

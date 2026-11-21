@@ -33,6 +33,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.flow.flowOf
 import life.xstar.music.player.MusicViewModel
+import life.xstar.music.player.PageTopBar
+import life.xstar.music.player.PageSearchField
 import life.xstar.music.player.data.local.PlaylistEntity
 import life.xstar.music.player.data.local.SongEntity
 import life.xstar.music.player.data.preferences.PlaylistStyle
@@ -70,32 +72,29 @@ fun PlaylistLibraryScreen(vm: MusicViewModel, openMenu: () -> Unit) {
     BackHandler(selectedId!=null) { selectedId=null;managing=false }
     CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onBackground) {
         Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
-            Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal=12.dp),verticalAlignment=Alignment.CenterVertically) {
-                IconButton({ if(selectedId!=null) selectedId=null else openMenu() }) {
-                    Icon(if(selectedId!=null) Icons.AutoMirrored.Filled.ArrowBack else Icons.Default.Menu,if(selectedId!=null)"返回歌单" else "菜单")
-                }
-                Text(if(selectedId!=null)"歌单" else "XSTAR / MIXES",Modifier.weight(1f),fontSize=13.sp,fontFamily=FontFamily.Monospace,color=MaterialTheme.colorScheme.primary)
+            PageTopBar(selected?.name ?: "播放列表", { if(selectedId!=null) { selectedId=null; managing=false } else openMenu() }, back=selectedId!=null) {
                 if(selected!=null) Box {
                     IconButton({menu=true}) { Icon(Icons.Default.MoreHoriz,"歌单操作") }
                     DropdownMenu(menu,{menu=false}) {
                         DropdownMenuItem(text={Text("重命名")},onClick={menu=false;rename=true;name=selected.name;nameDialog=true},leadingIcon={Icon(Icons.Default.Edit,null)})
                         DropdownMenuItem(text={Text("删除歌单")},onClick={menu=false;deleting=true},leadingIcon={Icon(Icons.Default.DeleteOutline,null)})
                     }
-                } else IconButton({searching=!searching;if(!searching)query=""}) { Icon(Icons.Default.Search,"搜索歌单") }
+                } else {
+                    IconButton({searching=!searching;if(!searching)query=""}) { Icon(Icons.Default.Search,"搜索歌单") }
+                    IconButton({rename=false;name="";nameDialog=true}) { Icon(Icons.Default.Add,"新建歌单") }
+                }
             }
             if(selectedId==null) {
+                if(searching) PageSearchField(query, {query=it}, "搜索播放列表")
                 LazyColumn(Modifier.weight(1f),contentPadding=PaddingValues(start=22.dp,end=22.dp,bottom=24.dp),verticalArrangement=Arrangement.spacedBy(16.dp)) {
                     item {
                         Row(Modifier.fillMaxWidth().padding(top=12.dp),verticalAlignment=Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) {
-                                Text(style.title.uppercase(),fontSize=10.sp,color=MaterialTheme.colorScheme.primary,fontFamily=FontFamily.Monospace,letterSpacing=2.sp)
-                                Text(when(style){PlaylistStyle.Tape->"我的混音带";PlaylistStyle.Turntable->"今晚转哪张？";PlaylistStyle.Desktop->"耳朵的桌面";PlaylistStyle.Cinema->"日常，正在上映。";PlaylistStyle.Bookshelf->"有声，无需翻译。";PlaylistStyle.Radar->"附近有好声音"},fontSize=28.sp,fontWeight=FontWeight.SemiBold,letterSpacing=(-1).sp,modifier=Modifier.padding(top=7.dp))
+                                Text("${lists.size} 份播放列表 · ${style.title}",fontSize=12.sp,color=MaterialTheme.colorScheme.onSurfaceVariant)
                             }
-                            FilledIconButton({rename=false;name="";nameDialog=true}) { Icon(Icons.Default.Add,"新建歌单") }
                         }
                         Text(style.subtitle,fontSize=12.sp,color=MaterialTheme.colorScheme.onSurfaceVariant,modifier=Modifier.padding(top=9.dp))
                     }
-                    if(searching) item { OutlinedTextField(query,{query=it},Modifier.fillMaxWidth(),placeholder={Text("搜索歌单")},singleLine=true,leadingIcon={Icon(Icons.Default.Search,null)}) }
                     if(focused!=null&&!searching) item {
                         LibraryFeature(style,shown,focused,playback.playing,onOpen={open(it)},onCycle={cycle()},onFocus={focusId=it.id})
                     }

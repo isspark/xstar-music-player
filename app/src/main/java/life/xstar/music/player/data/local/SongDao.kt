@@ -7,6 +7,8 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface SongDao {
+    @Query("SELECT * FROM songs WHERE (:artist IS NULL OR artist = :artist) AND (:album IS NULL OR album = :album) AND (:query = '' OR title LIKE '%' || :query || '%' OR artist LIKE '%' || :query || '%' OR album LIKE '%' || :query || '%' OR fileName LIKE '%' || :query || '%') ORDER BY title COLLATE NOCASE, mediaStoreId")
+    suspend fun libraryQueue(query: String, artist: String?, album: String?): List<SongEntity>
     @Query("SELECT COUNT(*) FROM songs")
     fun observeCount(): Flow<Int>
 

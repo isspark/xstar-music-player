@@ -1,0 +1,69 @@
+<animated-vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:drawable="@drawable/splash_logo_art">
+    <target android:name="orbit_motion">
+        <aapt:attr name="android:animation">
+            <objectAnimator android:propertyName="rotation"
+                android:valueFrom="-60" android:valueTo="300"
+                android:valueType="floatType" android:duration="700"
+                android:interpolator="@android:interpolator/fast_out_slow_in" />
+        </aapt:attr>
+    </target>
+    <target android:name="note_motion">
+        <aapt:attr name="android:animation">
+            <set android:ordering="together">
+                <objectAnimator android:propertyName="scaleX"
+                    android:valueFrom="1" android:valueTo="1.045"
+                    android:valueType="floatType" android:duration="350"
+                    android:repeatCount="1" android:repeatMode="reverse"
+                    android:interpolator="@android:interpolator/fast_out_slow_in" />
+                <objectAnimator android:propertyName="scaleY"
+                    android:valueFrom="1" android:valueTo="1.045"
+                    android:valueType="floatType" android:duration="350"
+                    android:repeatCount="1" android:repeatMode="reverse"
+                    android:interpolator="@android:interpolator/fast_out_slow_in" />
+            </set>
+        </aapt:attr>
+    </target>
+    <target android:name="star_motion">
+        <aapt:attr name="android:animation">
+            <set android:ordering="together">
+                <objectAnimator android:propertyName="scaleX"
+                    android:valueFrom="1" android:valueTo="1.18"
+                    android:valueType="floatType" android:duration="350"
+                    android:repeatCount="1" android:repeatMode="reverse" />
+                <objectAnimator android:propertyName="scaleY"
+                    android:valueFrom="1" android:valueTo="1.18"
+                    android:valueType="floatType" android:duration="350"
+                    android:repeatCount="1" android:repeatMode="reverse" />
+            </set>
+        </aapt:attr>
+    </target>
+    <target android:name="orbit">
+        <aapt:attr name="android:animation">
+            <objectAnimator android:propertyName="trimPathEnd"
+                android:valueFrom="0.15" android:valueTo="1"
+                android:valueType="floatType" android:duration="500"
+                android:interpolator="@android:interpolator/fast_out_slow_in" />
+        </aapt:attr>
+    </target>
+    <target android:name="note">
+        <aapt:attr name="android:animation">
+            <objectAnimator android:propertyName="strokeAlpha"
+                android:valueFrom="0.55" android:valueTo="1"
+                android:valueType="floatType" android:duration="400" />
+        </aapt:attr>
+    </target>
+    <target android:name="star">
+        <aapt:attr name="android:animation">
+            <set android:ordering="sequentially">
+                <objectAnimator android:propertyName="fillAlpha"
+                    android:valueFrom="0.4" android:valueTo="1"
+                    android:valueType="floatType" android:duration="250" />
+                <objectAnimator android:propertyName="fillAlpha"
+                    android:valueFrom="1" android:valueTo="0.75"
+                    android:valueType="floatType" android:duration="250" />
+            </set>
+        </aapt:attr>
+    </target>
+</animated-vector>
