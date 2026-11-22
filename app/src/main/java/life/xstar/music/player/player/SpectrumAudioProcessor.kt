@@ -32,8 +32,13 @@ class SpectrumAudioProcessor : BaseAudioProcessor() {
         val position = inputBuffer.position()
         val byteOrder = inputBuffer.order()
         val input = inputBuffer.order(ByteOrder.LITTLE_ENDIAN)
-        val channels = inputAudioFormat.channelCount
-        while (input.remaining() >= channels * 2) {
+        val channels = inputAudioFormat.channelCount.coerceAtLeast(1)
+        // Audio sinks normally provide small PCM chunks. Do not spend an
+        // unbounded amount of work analyzing a malformed/oversized buffer;
+        // playback remains pass-through even when spectrum analysis is skipped.
+        val maxAnalysisBytes = samples.size * channels * 2 * 8
+        val analysisLimit = input.position() + minOf(input.remaining(), maxAnalysisBytes)
+        while (input.position() + channels * 2 <= analysisLimit) {
             // Use the strongest channel to avoid cancelling out-of-phase stereo.
             var sample = 0f
             repeat(channels) {

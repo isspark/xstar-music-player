@@ -63,6 +63,7 @@ private enum class AppearancePage(val title: String, val icon: ImageVector) {
     Playlists("播放列表外观", Icons.Default.QueueMusic),
     Lyrics("歌词显示", Icons.AutoMirrored.Filled.Notes),
     FloatingButton("悬浮按钮", Icons.Default.TouchApp),
+    BottomNavigation("底部导航", Icons.Default.ViewWeek),
     Effects("动态效果", Icons.Default.GraphicEq),
     Library("音乐库视图", Icons.Default.AutoAwesome)
 }
@@ -78,6 +79,7 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
     val scene by vm.playerTheme.collectAsStateWithLifecycle()
     val lyrics by vm.selectedLyricsMode.collectAsStateWithLifecycle()
     val floatingButton by vm.floatingButtonStyle.collectAsStateWithLifecycle()
+    val bottomNavigation by vm.bottomNavigation.collectAsStateWithLifecycle()
     val image by vm.playerBackground.collectAsStateWithLifecycle()
     val album by vm.albumArtworkBackground.collectAsStateWithLifecycle()
     val disc by vm.playerDiscVisible.collectAsStateWithLifecycle()
@@ -114,6 +116,7 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
                         AppearancePage.Playlists -> playlistStyle.title
                         AppearancePage.Lyrics -> lyrics.title
                         AppearancePage.FloatingButton -> floatingButton.title
+                        AppearancePage.BottomNavigation -> "${if (bottomNavigation.enabled) "已开启" else "已关闭"} · ${bottomNavigation.count} 个按钮 · 时光刻度"
                         AppearancePage.Effects -> "节拍${if (beat) "已开启" else "已关闭"} · 频谱${if (spectrum) "已开启" else "已关闭"}"
                         AppearancePage.Library -> libraryViewMode.title
                     }
@@ -131,6 +134,7 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
                 AppearancePage.Fonts -> AppearanceFonts(vm)
                 AppearancePage.Lyrics -> AppearanceLyrics(lyrics, vm::setLyricsMode)
                 AppearancePage.FloatingButton -> AppearanceFloatingButton(floatingButton, vm::setFloatingButtonStyle, vm)
+                AppearancePage.BottomNavigation -> AppearanceBottomNavigation(vm)
                 AppearancePage.Playlists -> AppearancePlaylists(playlistStyle, vm::setPlaylistStyle)
                 else -> Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                     when (page) {
@@ -175,6 +179,7 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
                 }
                 AppearancePage.Lyrics -> vm.setLyricsMode(LyricsMode.Normal)
                 AppearancePage.FloatingButton -> { vm.setFloatingButtonStyle(FloatingButtonStyle.Breathing); vm.setPlayerShortcuts(PlayerShortcut.defaults) }
+                AppearancePage.BottomNavigation -> vm.resetBottomNavigation()
                 AppearancePage.Effects -> { vm.setBeatEffect(true); vm.setBottomEffect(true) }
                 AppearancePage.Library -> vm.setLibraryViewMode(LibraryViewMode.List)
                 AppearancePage.Playlists -> vm.setPlaylistStyle(PlaylistStyle.Tape)

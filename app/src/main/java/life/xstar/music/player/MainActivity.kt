@@ -165,6 +165,9 @@ import life.xstar.music.player.ui.LocalXstarFontFamily
 import life.xstar.music.player.ui.toFontFamily
 import life.xstar.music.player.ui.downloadedFontFamily
 import life.xstar.music.player.player.*
+import life.xstar.music.player.update.AppUpdateInfo
+import life.xstar.music.player.update.AppUpdateManager
+import life.xstar.music.player.update.AppUpdateDialog
 
 private fun persistMusicFolderPermission(context: Context, uri: Uri) {
     try {
@@ -182,7 +185,12 @@ class MainActivity : ComponentActivity() {
     private var showingLockScreen by mutableStateOf(false)
     private val unlockReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == Intent.ACTION_USER_PRESENT) setLockScreenMode(false)
+            if (intent.action == Intent.ACTION_USER_PRESENT && showingLockScreen) {
+                // Unlocking is the exit gesture for the lock-screen player.
+                // Only changing the flag leaves the normal player underneath
+                // (and its floating handle) visible, requiring a second swipe.
+                closeLockScreenPlayer()
+            }
         }
     }
 
@@ -195,14 +203,27 @@ class MainActivity : ComponentActivity() {
 
     private fun closeLockScreenPlayer() {
         setLockScreenMode(false)
-        moveTaskToBack(true)
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Removing the task is important here. Moving it to the background can
+        // be ignored by some Android 16 lock-screen implementations, which
+        // exposes the normal player (and its floating handle) after the first
+        // unlock swipe.
+        if (!isFinishing && !isDestroyed) finishAndRemoveTask()
     }
 
     override fun onResume() {
         super.onResume()
         val locked = getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked
         val interactive = getSystemService(android.os.PowerManager::class.java).isInteractive
-        if (showingLockScreen && interactive && !locked) setLockScreenMode(false)
+        if (showingLockScreen && interactive && !locked) closeLockScreenPlayer()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && showingLockScreen) {
+            val keyguard = getSystemService(android.app.KeyguardManager::class.java)
+            if (!keyguard.isKeyguardLocked) closeLockScreenPlayer()
+        }
     }
 
     override fun onDestroy() {
@@ -219,11 +240,9 @@ class MainActivity : ComponentActivity() {
                 .setDuration(200L)
                 .withEndAction { splash.remove() }
                 .start()
-            splash.iconView.animate()
-                .scaleX(.94f)
-                .scaleY(.94f)
-                .setDuration(200L)
-                .start()
+            // Do not access splash.iconView here. On Android 16 the platform
+            // getter itself can throw when the splash is handed over during a
+            // lock-screen resume, so even a Kotlin safe-call is not safe.
         }
         enableEdgeToEdge()
         if (state?.getBoolean("lock_screen_player_visible") == true) setLockScreenMode(true)
@@ -239,6 +258,16 @@ class MainActivity : ComponentActivity() {
             val font by vm.font.collectAsStateWithLifecycle()
             val downloadedFont by vm.downloadedFont.collectAsStateWithLifecycle()
             val lockScreenEnabled by vm.lockScreenPlayer.collectAsStateWithLifecycle()
+            var updateInfo by remember { mutableStateOf<AppUpdateInfo?>(null) }
+            var updateDownloading by remember { mutableStateOf(false) }
+            var updateProgress by remember { mutableStateOf(0f) }
+            var updateError by remember { mutableStateOf<String?>(null) }
+            LaunchedEffect(Unit) {
+                delay(1500)
+                runCatching { AppUpdateManager(this@MainActivity).check() }
+                    .onSuccess { updateInfo = it }
+                    .onFailure { /* Update checks are optional and must not affect startup. */ }
+            }
             LaunchedEffect(lockScreenEnabled) {
                 if (!lockScreenEnabled && showingLockScreen && !app.playbackPreferences.lockScreenPlayer.first()) setLockScreenMode(false)
             }
@@ -275,6 +304,32 @@ class MainActivity : ComponentActivity() {
                         false -> XstarApp(vm, if (hasShownSetup) LibraryRoute else startRoute)
                         else -> NasFirstSyncScreen(vm, initialSyncRequired == null)
                     }
+                }
+                updateInfo?.let { info ->
+                    AppUpdateDialog(
+                        info = info,
+                        downloading = updateDownloading,
+                        progress = updateProgress,
+                        error = updateError,
+                        onUpdate = {
+                            updateError = null
+                            updateDownloading = true
+                            updateProgress = 0f
+                            lifecycleScope.launch {
+                                runCatching {
+                                    val manager = AppUpdateManager(this@MainActivity)
+                                    val apk = manager.download(info) { completed, total ->
+                                        if (total > 0) updateProgress = completed.toFloat() / total
+                                    }
+                                    manager.install(apk)
+                                }.onFailure { error ->
+                                    updateError = error.message ?: "下载失败"
+                                }
+                                updateDownloading = false
+                            }
+                        },
+                        onDismiss = { updateInfo = null }
+                    )
                 }
             }
         }
@@ -532,6 +587,11 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val selectedLyricsMode = preferences.lyricsMode.stateIn(viewModelScope, SharingStarted.Eagerly, LyricsMode.Normal)
     val floatingButtonStyle = preferences.floatingButtonStyle.stateIn(viewModelScope, SharingStarted.Eagerly, FloatingButtonStyle.Breathing)
     val playerShortcuts = preferences.playerShortcuts.stateIn(viewModelScope, SharingStarted.Eagerly, PlayerShortcut.defaults)
+    val bottomNavigation = preferences.bottomNavigation.stateIn(viewModelScope, SharingStarted.Eagerly, life.xstar.music.player.data.preferences.BottomNavigationSettings())
+    fun setBottomNavigationEnabled(enabled: Boolean) = viewModelScope.launch { preferences.setBottomNavigationEnabled(enabled) }
+    fun setBottomNavigationCount(count: Int) = viewModelScope.launch { preferences.setBottomNavigationCount(count) }
+    fun setBottomNavigationSlots(slots: List<life.xstar.music.player.data.preferences.BottomDestination>) = viewModelScope.launch { preferences.setBottomNavigationSlots(slots) }
+    fun resetBottomNavigation() = viewModelScope.launch { preferences.resetBottomNavigation() }
     fun setPlayerShortcuts(actions: List<PlayerShortcut>) = viewModelScope.launch { preferences.setPlayerShortcuts(actions) }
     val libraryViewMode = preferences.libraryViewMode.stateIn(viewModelScope, SharingStarted.Eagerly, LibraryViewMode.List)
     val playlistStyle = preferences.playlistStyle.stateIn(viewModelScope, SharingStarted.Eagerly, life.xstar.music.player.data.preferences.PlaylistStyle.Tape)
@@ -1235,6 +1295,9 @@ sealed class OnlineSearchUiState {
     val playerTheme by vm.playerTheme.collectAsStateWithLifecycle()
     val floatingButtonStyle by vm.floatingButtonStyle.collectAsStateWithLifecycle()
     val songs by vm.songs.collectAsStateWithLifecycle()
+    val bottomNavigation by vm.bottomNavigation.collectAsStateWithLifecycle()
+    val keyboardVisible = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
+    val showBottomNavigation = bottomNavigation.enabled && !keyboardVisible
     val immersivePlayer = navigationState.topLevelRoute == PlayerRoute && !fmMode && !karaokeMode && playerTheme != PlayerTheme.Classic
     val activity = LocalActivity.current
     DisposableEffect(activity, immersivePlayer) {
@@ -1433,8 +1496,15 @@ sealed class OnlineSearchUiState {
             NavDisplay(
                 entries = navigationState.toDecoratedEntries(entryProvider),
                 onBack = { navigator.goBack() },
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize().then(
+                    if (showBottomNavigation) Modifier
+                        .padding(bottom = 58.dp + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding())
+                        .consumeWindowInsets(WindowInsets.navigationBars) else Modifier
+                )
             )
+            if (showBottomNavigation) Box(Modifier.align(Alignment.BottomCenter)) {
+                MusicBottomNavigation(vm, bottomNavigation, playerTheme, navigationState.topLevelRoute) { navigator.navigate(it) }
+            }
             BackHandler(enabled = drawerState.isOpen) { scope.launch { drawerState.close() } }
             if (immersivePlayer && playerTheme != PlayerTheme.Classic) FloatingNavigationHandle(
                 style = floatingButtonStyle, playing = playback.playing,
@@ -3904,6 +3974,16 @@ private fun dateTimeText(ms: Long): String {
 }
 
 @Composable private fun SettingsScreen(vm: MusicViewModel, openMenu: () -> Unit, appearanceOnly: Boolean = false) {
+    val updateContext = LocalContext.current
+    val updateScope = rememberCoroutineScope()
+    val updateManager = remember(updateContext) { AppUpdateManager(updateContext) }
+    var latestVersion by rememberSaveable { mutableStateOf<String?>(null) }
+    var updateChecking by remember { mutableStateOf(false) }
+    var updateMessage by remember { mutableStateOf<String?>(null) }
+    var manualUpdateInfo by remember { mutableStateOf<AppUpdateInfo?>(null) }
+    var manualDownloading by remember { mutableStateOf(false) }
+    var manualProgress by remember { mutableStateOf(0f) }
+    var manualError by remember { mutableStateOf<String?>(null) }
     if (appearanceOnly) {
         AppearanceSettingsScreen(vm, openMenu)
         return
@@ -4272,9 +4352,63 @@ private fun dateTimeText(ms: Long): String {
             Text("服务器仅转发数据、不保存音乐；不可达时仅提示，不自动回退到 UPnP 通道", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 12.dp))
         }
         }
-        SettingsSection("关于", "应用信息", expandedSection == "关于", { toggleSection("关于") }) {
-        ListItem(colors = ListItemDefaults.colors(containerColor = Color.Transparent), headlineContent = { Text("XSTAR", color = Color.White) }, supportingContent = { Text("本地音乐播放器 · 0.1.0", color = Color.Gray) }, leadingContent = { Icon(Icons.Default.Info, null) })
-        }
+         SettingsSection("关于", "应用信息", expandedSection == "关于", { toggleSection("关于") }) {
+         ListItem(
+             colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+             headlineContent = { Text("XSTAR", color = Color.White) },
+             supportingContent = { Text("本地音乐播放器", color = Color.Gray) },
+             leadingContent = { Icon(Icons.Default.Info, null) }
+         )
+         ListItem(
+             colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+             headlineContent = { Text("当前版本") },
+             supportingContent = { Text("${updateManager.currentVersionName()} (${updateManager.currentVersionCode()})") }
+         )
+         ListItem(
+             modifier = Modifier.clickable(enabled = !updateChecking) {
+                 updateChecking = true
+                 updateMessage = null
+                 updateScope.launch {
+                     runCatching { updateManager.fetchLatest() }
+                         .onSuccess { remote ->
+                             latestVersion = "${remote.versionName} (${remote.versionCode})"
+                             manualUpdateInfo = remote.takeIf { it.versionCode > updateManager.currentVersionCode() }
+                             updateMessage = if (manualUpdateInfo == null) "当前已经是最新版本" else "发现新版本"
+                         }
+                         .onFailure { updateMessage = "检查失败：${it.message ?: "网络不可用"}" }
+                     updateChecking = false
+                 }
+             },
+             colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+             headlineContent = { Text("最新版本") },
+             supportingContent = { Text(latestVersion ?: "尚未检查") },
+             trailingContent = { Text(if (updateChecking) "检查中…" else "检查更新", color = MaterialTheme.colorScheme.primary) }
+         )
+         updateMessage?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp)) }
+         manualUpdateInfo?.let { info ->
+             AppUpdateDialog(
+                 info = info,
+                 downloading = manualDownloading,
+                 progress = manualProgress,
+                 error = manualError,
+                 onUpdate = {
+                     manualError = null
+                     manualDownloading = true
+                     manualProgress = 0f
+                     updateScope.launch {
+                         runCatching {
+                             val apk = updateManager.download(info) { completed, total ->
+                                 if (total > 0) manualProgress = completed.toFloat() / total
+                             }
+                             updateManager.install(apk)
+                         }.onFailure { manualError = it.message ?: "下载失败" }
+                         manualDownloading = false
+                     }
+                 },
+                 onDismiss = { if (!manualDownloading) manualUpdateInfo = null }
+             )
+         }
+         }
         }
         Spacer(Modifier.height(16.dp))
         }

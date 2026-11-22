@@ -1,0 +1,15 @@
+{
+  "versionCode": 2,
+  "versionName": "1.1.0",
+  "forceUpdate": false,
+  "title": "发现新版本 1.1.0",
+  "changelog": [
+    "新增应用内更新检测",
+    "支持从设置中手动检查更新",
+    "优化播放体验"
+  ],
+  "apkPath": "/App/xstar-1.1.0.apk",
+  "apkSize": 50844936,
+  "sha256": "8e770cbef7673430cb9d3ee589e584797781620146f9f449a2fc1e32ed34e7d0",
+  "publishedAt": "2026-11-22T00:00:00Z"
+}

@@ -17,6 +17,29 @@ import life.xstar.music.player.together.TogetherConnectMode
 private val Context.playbackDataStore by preferencesDataStore("playback")
 
 class PlaybackPreferences(private val context: Context) {
+    private val bottomNavigationKey = booleanPreferencesKey("bottom_navigation_enabled")
+    private val bottomNavigationCountKey = longPreferencesKey("bottom_navigation_count")
+    private fun bottomSlotsKey(count: Int) = stringPreferencesKey("bottom_navigation_slots_$count")
+    val bottomNavigation: Flow<BottomNavigationSettings> = context.playbackDataStore.data.map { values ->
+        fun slots(count: Int): List<BottomDestination> {
+            val stored = values[bottomSlotsKey(count)]?.split(",")?.mapNotNull { name -> BottomDestination.entries.firstOrNull { it.name == name } }
+            return stored?.takeIf { it.size == count && it.distinct().size == count } ?: BottomDestination.defaults(count)
+        }
+        BottomNavigationSettings(values[bottomNavigationKey] ?: false,
+            if (values[bottomNavigationCountKey] == 3L) 3 else 5, slots(3), slots(5))
+    }
+    suspend fun setBottomNavigationEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[bottomNavigationKey] = enabled }
+    suspend fun setBottomNavigationCount(count: Int) {
+        if (count == 3 || count == 5) context.playbackDataStore.edit { it[bottomNavigationCountKey] = count.toLong() }
+    }
+    suspend fun setBottomNavigationSlots(slots: List<BottomDestination>) {
+        if (slots.size in listOf(3, 5) && slots.distinct().size == slots.size)
+            context.playbackDataStore.edit { it[bottomSlotsKey(slots.size)] = slots.joinToString(",") { page -> page.name } }
+    }
+    suspend fun resetBottomNavigation() = context.playbackDataStore.edit {
+        it.remove(bottomNavigationKey); it.remove(bottomNavigationCountKey)
+        it.remove(bottomSlotsKey(3)); it.remove(bottomSlotsKey(5))
+    }
     private val queueKey = stringPreferencesKey("queue_ids")
     private val indexKey = longPreferencesKey("queue_index")
     private val positionKey = longPreferencesKey("position_ms")
@@ -295,6 +318,24 @@ enum class PlaylistStyle(val title: String, val subtitle: String, val prototype:
     Radar("声呐寻频", "扫描歌单，锁定喜欢的信号", "20");
 
     companion object { fun fromStored(value: String?): PlaylistStyle = entries.firstOrNull { it.name == value } ?: Tape }
+}
+
+data class BottomNavigationSettings(
+    val enabled: Boolean = false,
+    val count: Int = 5,
+    val three: List<BottomDestination> = BottomDestination.defaults(3),
+    val five: List<BottomDestination> = BottomDestination.defaults(5)
+) {
+    val slots: List<BottomDestination> get() = if (count == 3) three else five
+}
+
+enum class BottomDestination(val title: String) {
+    Online("在线搜歌"), Library("音乐库"), Player("播放页"), Appearance("主题外观"), Settings("设置"),
+    Favorites("我的收藏"), Playlists("播放列表"), Equalizer("均衡器"), SingingHistory("我的演唱");
+    companion object {
+        fun defaults(count: Int) = if (count == 3) listOf(Online, Player, Library)
+            else listOf(Online, Library, Player, Appearance, Settings)
+    }
 }
 
 enum class PlayerShortcut(val title: String) {
