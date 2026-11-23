@@ -7,19 +7,30 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.runtime.remember
 import java.io.File
 import android.content.Context
-import life.xstar.music.player.R
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.collectAsState
+import life.xstar.music.player.XstarApplication
+import life.xstar.music.player.data.font.nasFont
 import life.xstar.music.player.data.preferences.AppFont
 
 val LocalXstarFontFamily = compositionLocalOf<FontFamily> { FontFamily.Default }
 
 @Composable
-fun AppFont.toFontFamily(): FontFamily = when (this) {
-    AppFont.Default -> FontFamily(Font(R.font.xstar_sans_sc))
-    AppFont.Serif -> FontFamily(Font(R.font.xstar_serif_sc))
-    AppFont.Monospace -> FontFamily(Font(R.font.xstar_sans_sc))
-    AppFont.Cursive -> FontFamily(Font(R.font.xstar_round))
-    AppFont.Rounded -> FontFamily(Font(R.font.xstar_round))
-    AppFont.Lishu -> FontFamily(Font(R.font.xstar_calligraphy))
+fun AppFont.toFontFamily(): FontFamily {
+    val context = LocalContext.current
+    val catalog = (context.applicationContext as XstarApplication).fontCatalog
+    val version = catalog.version.collectAsState().value
+    val font = nasFont()
+    val fallback = when (this) {
+        AppFont.Default -> FontFamily.Default
+        AppFont.Serif -> FontFamily.Serif
+        AppFont.Monospace -> FontFamily.Monospace
+        AppFont.Cursive, AppFont.Rounded, AppFont.Lishu -> FontFamily.Cursive
+    }
+    return remember(this, version) {
+        if (catalog.isDownloaded(font)) runCatching { FontFamily(Font(catalog.file(font))) }.getOrDefault(fallback)
+        else fallback
+    }
 }
 
 @Composable

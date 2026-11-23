@@ -16,6 +16,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicInteger
 import android.os.Bundle
+import android.widget.Toast
 import androidx.core.view.WindowCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowInsetsCompat
@@ -164,6 +165,7 @@ import life.xstar.music.player.navigation.*
 import life.xstar.music.player.ui.LocalXstarFontFamily
 import life.xstar.music.player.ui.toFontFamily
 import life.xstar.music.player.ui.downloadedFontFamily
+import life.xstar.music.player.data.font.nasFont
 import life.xstar.music.player.player.*
 import life.xstar.music.player.update.AppUpdateInfo
 import life.xstar.music.player.update.AppUpdateManager
@@ -179,16 +181,58 @@ private fun persistMusicFolderPermission(context: Context, uri: Uri) {
     }
 }
 
+private fun directorySize(file: File): Long {
+    if (!file.exists()) return 0L
+    if (file.isFile) return file.length()
+    return file.listFiles()?.sumOf(::directorySize) ?: 0L
+}
+
+private fun clearXstarCache(context: Context): Long {
+    val cacheSize = directorySize(context.cacheDir)
+    context.cacheDir.listFiles()?.forEach { it.deleteRecursively() }
+
+    // Update APKs are deliberately kept outside cacheDir so they can be reused.
+    // They are safe to remove from this explicit cache-cleanup action.
+    val updateDirectory = File(context.filesDir, "updates")
+    val updateSize = directorySize(updateDirectory)
+    updateDirectory.deleteRecursively()
+    return cacheSize + updateSize
+}
+
+private fun formatStorageSize(bytes: Long): String {
+    if (bytes < 1024) return "$bytes B"
+    if (bytes < 1024 * 1024) return "%.1f KB".format(bytes / 1024.0)
+    if (bytes < 1024 * 1024 * 1024) return "%.1f MB".format(bytes / (1024.0 * 1024.0))
+    return "%.1f GB".format(bytes / (1024.0 * 1024.0 * 1024.0))
+}
+
 class MainActivity : ComponentActivity() {
     private lateinit var musicViewModel: MusicViewModel
     private var sharingScreenshot = false
     private var showingLockScreen by mutableStateOf(false)
+    private var returnToAppAfterLockScreen = false
+
+    override fun onStart() {
+        super.onStart()
+        appWasForeground = true
+    }
+
+    override fun onStop() {
+        // Screen-off also stops the activity; it must not erase where the user
+        // was before locking. Home / another app while awake does erase it.
+        if (getSystemService(android.os.PowerManager::class.java).isInteractive && !showingLockScreen) {
+            appWasForeground = false
+        }
+        super.onStop()
+    }
+
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (!showingLockScreen) appWasForeground = false
+    }
     private val unlockReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             if (intent.action == Intent.ACTION_USER_PRESENT && showingLockScreen) {
-                // Unlocking is the exit gesture for the lock-screen player.
-                // Only changing the flag leaves the normal player underneath
-                // (and its floating handle) visible, requiring a second swipe.
                 closeLockScreenPlayer()
             }
         }
@@ -202,13 +246,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun closeLockScreenPlayer() {
+        if (!showingLockScreen) return
         setLockScreenMode(false)
         window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        // Removing the task is important here. Moving it to the background can
-        // be ignored by some Android 16 lock-screen implementations, which
-        // exposes the normal player (and its floating handle) after the first
-        // unlock swipe.
-        if (!isFinishing && !isDestroyed) finishAndRemoveTask()
+        if (!returnToAppAfterLockScreen && !isFinishing && !isDestroyed) {
+            appWasForeground = false
+            moveTaskToBack(true)
+        }
     }
 
     override fun onResume() {
@@ -246,6 +290,7 @@ class MainActivity : ComponentActivity() {
         }
         enableEdgeToEdge()
         if (state?.getBoolean("lock_screen_player_visible") == true) setLockScreenMode(true)
+        returnToAppAfterLockScreen = state?.getBoolean("return_to_app_after_lock_screen") ?: false
         val app = application as XstarApplication
         val vm = ViewModelProvider(this, MusicViewModel.factory(app.repository, { PlayerController(app) }, app.playbackPreferences, LyricsRepository(app), app.castController, app.onlineMusicRepository, app.togetherController, app.applicationContext, app.fontCatalog))[MusicViewModel::class.java]
         musicViewModel = vm
@@ -272,6 +317,18 @@ class MainActivity : ComponentActivity() {
                 if (!lockScreenEnabled && showingLockScreen && !app.playbackPreferences.lockScreenPlayer.first()) setLockScreenMode(false)
             }
             XstarTheme(theme, font, downloadedFont, app.fontCatalog) {
+                // Keep the normal navigation tree composed underneath the lock
+                // screen so unlock restores the exact player/page, not a new root.
+                val initialSyncRequired by vm.initialNasSyncRequired.collectAsStateWithLifecycle()
+                var hasShownSetup by rememberSaveable { mutableStateOf(false) }
+                LaunchedEffect(initialSyncRequired) {
+                    if (initialSyncRequired == true) hasShownSetup = true
+                }
+                Box(Modifier.fillMaxSize()) {
+                when (initialSyncRequired) {
+                    false -> XstarApp(vm, if (hasShownSetup) LibraryRoute else startRoute)
+                    else -> NasFirstSyncScreen(vm, initialSyncRequired == null)
+                }
                 if (showingLockScreen) {
                     var keepScreenOn by rememberSaveable { mutableStateOf(false) }
                     DisposableEffect(keepScreenOn) {
@@ -294,16 +351,7 @@ class MainActivity : ComponentActivity() {
                             Text(if (keepScreenOn) "常亮已开启" else "屏幕常亮", fontSize = 12.sp)
                         }
                     }
-                } else {
-                    val initialSyncRequired by vm.initialNasSyncRequired.collectAsStateWithLifecycle()
-                    var hasShownSetup by rememberSaveable { mutableStateOf(false) }
-                    LaunchedEffect(initialSyncRequired) {
-                        if (initialSyncRequired == true) hasShownSetup = true
-                    }
-                    when (initialSyncRequired) {
-                        false -> XstarApp(vm, if (hasShownSetup) LibraryRoute else startRoute)
-                        else -> NasFirstSyncScreen(vm, initialSyncRequired == null)
-                    }
+                }
                 }
                 updateInfo?.let { info ->
                     AppUpdateDialog(
@@ -349,6 +397,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putBoolean("lock_screen_player_visible", showingLockScreen)
+        outState.putBoolean("return_to_app_after_lock_screen", returnToAppAfterLockScreen)
         super.onSaveInstanceState(outState)
     }
 
@@ -410,7 +459,10 @@ class MainActivity : ComponentActivity() {
                 val enabled = (application as XstarApplication).playbackPreferences.lockScreenPlayer.first()
                 val locked = getSystemService(android.app.KeyguardManager::class.java).isKeyguardLocked
                 val interactive = getSystemService(android.os.PowerManager::class.java).isInteractive
-                if (enabled && (locked || !interactive)) setLockScreenMode(true)
+                if (enabled && (locked || !interactive) && !showingLockScreen) {
+                    returnToAppAfterLockScreen = intent.getBooleanExtra(EXTRA_RETURN_TO_APP, false)
+                    setLockScreenMode(true)
+                }
             }
             intent.action = null
         }
@@ -421,6 +473,9 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
+        internal var appWasForeground: Boolean = false
+            private set
+        const val EXTRA_RETURN_TO_APP = "return_to_app_after_lock_screen"
         const val ACTION_OPEN_PLAYER = "life.xstar.music.player.action.OPEN_PLAYER"
         const val ACTION_LOCK_SCREEN_PLAYER = "life.xstar.music.player.action.LOCK_SCREEN_PLAYER"
         private const val NOTIFICATION_PERMISSION_REQUEST = 1002
@@ -583,11 +638,15 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val font = preferences.font.stateIn(viewModelScope, SharingStarted.Eagerly, AppFont.Default)
     val downloadedFont = preferences.downloadedFont.stateIn(viewModelScope, SharingStarted.Eagerly, "")
     val fontCatalogVersion = fontCatalog.version
+    fun refreshFonts() = viewModelScope.launch { fontCatalog.refresh() }
+    fun useSystemFont() = viewModelScope.launch { preferences.setDownloadedFont(null); preferences.setFont(AppFont.Default) }
     val fontDownloadProgress = fontCatalog.progress
     val selectedLyricsMode = preferences.lyricsMode.stateIn(viewModelScope, SharingStarted.Eagerly, LyricsMode.Normal)
     val floatingButtonStyle = preferences.floatingButtonStyle.stateIn(viewModelScope, SharingStarted.Eagerly, FloatingButtonStyle.Breathing)
     val playerShortcuts = preferences.playerShortcuts.stateIn(viewModelScope, SharingStarted.Eagerly, PlayerShortcut.defaults)
     val bottomNavigation = preferences.bottomNavigation.stateIn(viewModelScope, SharingStarted.Eagerly, life.xstar.music.player.data.preferences.BottomNavigationSettings())
+    val navigationDrawerRight = preferences.navigationDrawerRight.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    fun setNavigationDrawerRight(right: Boolean) = viewModelScope.launch { preferences.setNavigationDrawerRight(right) }
     fun setBottomNavigationEnabled(enabled: Boolean) = viewModelScope.launch { preferences.setBottomNavigationEnabled(enabled) }
     fun setBottomNavigationCount(count: Int) = viewModelScope.launch { preferences.setBottomNavigationCount(count) }
     fun setBottomNavigationSlots(slots: List<life.xstar.music.player.data.preferences.BottomDestination>) = viewModelScope.launch { preferences.setBottomNavigationSlots(slots) }
@@ -770,10 +829,21 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     fun setCustomThemeColor(argb: Long) = viewModelScope.launch { preferences.setCustomThemeColor(argb) }
     fun setPlayerTheme(theme: PlayerTheme) = viewModelScope.launch { preferences.setPlayerTheme(theme) }
     fun setLockScreenPlayer(enabled: Boolean) = viewModelScope.launch { preferences.setLockScreenPlayer(enabled) }
-    fun setFont(font: AppFont) = viewModelScope.launch { preferences.setFont(font); preferences.setDownloadedFont(null) }
+    fun setFont(font: AppFont) = viewModelScope.launch {
+        preferences.setFont(font)
+        preferences.setDownloadedFont(null)
+        val remote = font.nasFont()
+        if (!fontCatalog.isDownloaded(remote) && fontCatalog.fonts.value.any { it.id == remote.id }) {
+            try { fontCatalog.download(remote) }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { fontCatalog.reportError(remote.id, "字体下载失败，请检查网络后重试") }
+        }
+    }
     fun enableDownloadedFont(font: DownloadableFont) = viewModelScope.launch {
         if (!fontCatalog.isDownloaded(font)) {
-            runCatching { fontCatalog.download(font) }.onFailure { fontCatalog.reportError(font.id, it.message ?: "下载失败") }
+            try { fontCatalog.download(font) }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { fontCatalog.reportError(font.id, "字体下载失败，请检查 NAS 文件与网络后重试") }
         }
         if (fontCatalog.isDownloaded(font)) preferences.setDownloadedFont(font.id)
     }
@@ -1334,7 +1404,8 @@ sealed class OnlineSearchUiState {
         PlaylistsRoute to (Icons.Default.QueueMusic to "播放列表")
     )
     var moreExpanded by rememberSaveable { mutableStateOf(false) }
-    CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
+    val navigationDrawerRight by vm.navigationDrawerRight.collectAsStateWithLifecycle()
+    CompositionLocalProvider(LocalLayoutDirection provides if (navigationDrawerRight) LayoutDirection.Rtl else LayoutDirection.Ltr) {
     ModalNavigationDrawer(drawerState = drawerState, gesturesEnabled = drawerState.isOpen, drawerContent = {
       CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Ltr) {
          ModalDrawerSheet(drawerContainerColor = Color(0xFF10131A).copy(alpha = .94f).let { base -> Color(
@@ -1565,18 +1636,31 @@ sealed class OnlineSearchUiState {
 @Composable
 private fun SleepTimerDialog(remaining: Long?, onSet: (Int) -> Unit, onCancel: () -> Unit, onClose: () -> Unit) {
     val colors = MaterialTheme.colorScheme
-    var minutes by remember(remaining) { mutableIntStateOf(((remaining ?: 30L * 60_000L) / 60_000L).toInt().coerceIn(5, 60).let { ((it + 2) / 5) * 5 }) }
+    // Countdown ticks must not overwrite the duration the user is editing.
+    var minutes by remember { mutableIntStateOf(((remaining ?: 30L * 60_000L) / 60_000L).toInt().coerceIn(5, 60).let { ((it + 2) / 5) * 5 }) }
     AlertDialog(
         onDismissRequest = onClose,
         containerColor = colors.surface,
         title = {
             Column {
                 Text("定时关闭", fontWeight = FontWeight.SemiBold)
-                Text("拨动指针选择播放时长", color = colors.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
+                Text("选择快捷时长，或拨动指针微调", color = colors.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(top = 5.dp))
             }
         },
         text = {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(Modifier.verticalScroll(rememberScrollState()), horizontalAlignment = Alignment.CenterHorizontally) {
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    listOf(10, 20, 30, 40, 60).chunked(3).forEach { options ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            options.forEach { preset ->
+                                FilterChip(selected = minutes == preset, onClick = { minutes = preset },
+                                    label = { Text("$preset 分钟") }, modifier = Modifier.weight(1f))
+                            }
+                            repeat(3 - options.size) { Spacer(Modifier.weight(1f)) }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
                 SleepTimerClock(minutes, colors.primary) { minutes = it }
                 Text("${minutes} 分钟后停止播放", color = colors.onSurfaceVariant, fontSize = 13.sp, modifier = Modifier.padding(top = 14.dp))
             }
@@ -2200,7 +2284,7 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
         onFavorite = { song?.let { vm.favorite(it.mediaStoreId) } },
         onQueue = { if (castConnected) openCast() else showQueue = true },
         onMode = { if (!castConnected) { if (session) vm.togetherSetMode(mode.next()) else vm.player.setPlaybackMode(mode.next()) } },
-        onDetails = { showDetails = true }, onFindLyrics = { vm.findLyrics() }, onLyrics = { showLyrics = true },
+        onDetails = { showDetails = true }, onFindLyrics = { showLyrics = true; vm.findLyrics() }, onLyrics = { showLyrics = true },
         backgroundContent = { PlayerBackground(vm, song) }
     )
     if (showQueue) { if (session) TogetherQueueSheet(together, vm) { showQueue = false } else QueueSheet(state, vm) { showQueue = false } }
@@ -2263,7 +2347,22 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
         )
     }
     Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 22.dp, vertical = 8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        PageTopBar("正在播放", openMenu, parentInset = 22, immersive = true)
+         Row(
+             Modifier.fillMaxWidth().height(52.dp),
+             verticalAlignment = Alignment.CenterVertically
+         ) {
+             // Keep the existing navigation callback while using the classic
+             // player's theme-aware compact control and no header copy.
+             IconButton(
+                 onClick = openMenu,
+                 modifier = Modifier.size(44.dp),
+                 colors = IconButtonDefaults.iconButtonColors(
+                     contentColor = colors.primary
+                 )
+             ) {
+                 Icon(Icons.Default.Menu, "菜单", Modifier.size(22.dp))
+             }
+         }
         Spacer(Modifier.weight(.5f).heightIn(min = 16.dp))
         BoxWithConstraints(
             Modifier.fillMaxWidth().weight(3f),
@@ -2565,6 +2664,10 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable private fun KaraokeLyricsStage(vm: MusicViewModel, modifier: Modifier = Modifier) {
+    var showLyricsSelection by remember { mutableStateOf(false) }
+    if (showLyricsSelection) ModalBottomSheet(onDismissRequest = { showLyricsSelection = false }, containerColor = Color(0xFF171B23)) {
+        LyricsPanel(vm, Modifier.fillMaxWidth().height(460.dp)) { showLyricsSelection = false }
+    }
     val lyricsMode by vm.lyricsMode.collectAsStateWithLifecycle()
     val lyricsState by vm.lyrics.collectAsStateWithLifecycle()
     val playback by vm.playback.collectAsStateWithLifecycle()
@@ -2575,12 +2678,10 @@ private fun statusTogether(together: TogetherSessionState): String = when (toget
             Column(Modifier.padding(horizontal = 32.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(Icons.Default.Notes, null, Modifier.size(42.dp), tint = Color(0xFF5B6577))
                 Spacer(Modifier.height(12.dp))
-                Text(
-                    if (lyricsState is LyricsState.Error) (lyricsState as LyricsState.Error).message else "纯音乐或暂无歌词",
-                    color = Color(0xFF7E8A9A),
-                    fontSize = 14.sp,
-                    textAlign = TextAlign.Center
-                )
+                life.xstar.music.player.ui.player.LyricsSelectionPrompt(lyricsState, {
+                    showLyricsSelection = true
+                    if (lyricsState !is LyricsState.Candidates) vm.findLyrics()
+                })
                 Text("可切到原唱继续演唱", color = Color(0xFF5B6577), fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
             }
         }
@@ -3331,10 +3432,15 @@ private data class PendingTake(val takeId: Int, val startMs: Long, val notes: Li
 }
 
 @Composable private fun LyricsEmpty(message: String, fetch: () -> Unit, close: () -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(24.dp).clickable(onClick = close), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Icon(Icons.Default.QueueMusic, null, Modifier.size(44.dp), tint = Color(0xFF8491A6))
-        Text(message, color = Color(0xFFB8C1CF), modifier = Modifier.padding(vertical = 12.dp))
-        Button(onClick = fetch) { Text("获取歌词") }
+        Text(message, color = Color(0xFFB8C1CF), modifier = Modifier.clickable(onClickLabel = "查找并选择歌词", onClick = fetch).padding(vertical = 12.dp))
+        Button(onClick = fetch) {
+            Icon(Icons.Default.Search, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("点击查找 / 选择歌词")
+        }
+        TextButton(onClick = close) { Text("返回播放页") }
     }
 }
 
@@ -3984,6 +4090,14 @@ private fun dateTimeText(ms: Long): String {
     var manualDownloading by remember { mutableStateOf(false) }
     var manualProgress by remember { mutableStateOf(0f) }
     var manualError by remember { mutableStateOf<String?>(null) }
+    var showClearCacheDialog by remember { mutableStateOf(false) }
+    var cacheSize by remember { mutableLongStateOf(0L) }
+    var clearingCache by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        cacheSize = withContext(Dispatchers.IO) {
+            directorySize(updateContext.cacheDir) + directorySize(File(updateContext.filesDir, "updates"))
+        }
+    }
     if (appearanceOnly) {
         AppearanceSettingsScreen(vm, openMenu)
         return
@@ -3992,6 +4106,8 @@ private fun dateTimeText(ms: Long): String {
     val appFont by vm.font.collectAsStateWithLifecycle()
     val downloadedFontId by vm.downloadedFont.collectAsStateWithLifecycle()
     val fontDownloadProgress by vm.fontDownloadProgress.collectAsStateWithLifecycle()
+    val downloadableFonts by vm.fontCatalog.fonts.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { vm.refreshFonts() }
     val selectedFontFamily = appFont.toFontFamily()
     val defaultFontFamily = AppFont.Default.toFontFamily()
     val context = LocalContext.current
@@ -4095,7 +4211,7 @@ private fun dateTimeText(ms: Long): String {
                     }
                 }
                 Spacer(Modifier.height(4.dp))
-                AppFont.entries.forEach { font ->
+                AppFont.systemOptions.forEach { font ->
                     Row(
                         Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { vm.setFont(font) }
                             .padding(horizontal = 4.dp, vertical = 11.dp),
@@ -4116,7 +4232,7 @@ private fun dateTimeText(ms: Long): String {
                     }
                 }
                 Spacer(Modifier.height(12.dp))
-                Text("在线字体库 · GitHub / jsDelivr", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                Text("在线字体库 · NAS /App/Font", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
                 Text("按需下载到本机，下载后可离线使用", color = Color(0xFF808B9B), fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp, bottom = 6.dp))
                 downloadableFonts.forEach { font ->
                     val downloaded = vm.fontCatalog.isDownloaded(font)
@@ -4385,6 +4501,38 @@ private fun dateTimeText(ms: Long): String {
              trailingContent = { Text(if (updateChecking) "检查中…" else "检查更新", color = MaterialTheme.colorScheme.primary) }
          )
          updateMessage?.let { Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp)) }
+         ListItem(
+             modifier = Modifier.clickable(enabled = !clearingCache) { showClearCacheDialog = true },
+             colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+             headlineContent = { Text("清除缓存") },
+             supportingContent = {
+                 Text(if (clearingCache) "正在清理…" else "清理音乐封面、临时文件和历史更新包（${formatStorageSize(cacheSize)}）")
+             },
+             leadingContent = { Icon(Icons.Default.DeleteSweep, null) },
+             trailingContent = { Text("清除", color = MaterialTheme.colorScheme.primary) }
+         )
+         if (showClearCacheDialog) {
+             AlertDialog(
+                 onDismissRequest = { if (!clearingCache) showClearCacheDialog = false },
+                 title = { Text("清除应用缓存？") },
+                 text = { Text("将删除应用缓存、音乐封面缓存、临时文件和历史更新 APK，不会删除音乐库、播放列表或应用设置。") },
+                 confirmButton = {
+                     TextButton(enabled = !clearingCache, onClick = {
+                         clearingCache = true
+                         updateScope.launch {
+                             val removed = withContext(Dispatchers.IO) { clearXstarCache(updateContext) }
+                             cacheSize = 0L
+                             clearingCache = false
+                             showClearCacheDialog = false
+                             Toast.makeText(updateContext, "已清除 ${formatStorageSize(removed)} 缓存", Toast.LENGTH_SHORT).show()
+                         }
+                     }) { Text("确认清除") }
+                 },
+                 dismissButton = {
+                     TextButton(enabled = !clearingCache, onClick = { showClearCacheDialog = false }) { Text("取消") }
+                 }
+             )
+         }
          manualUpdateInfo?.let { info ->
              AppUpdateDialog(
                  info = info,
@@ -4426,8 +4574,13 @@ private fun PlayerBackground(vm: MusicViewModel, song: SongEntity?) {
 @Composable
 private fun PlayerBackgroundImage(uri: String, fallback: String = "") {
     if (uri.isBlank()) return
+    val model: Any = when {
+        uri.startsWith("http://") || uri.startsWith("https://") -> uri
+        uri.startsWith("content://") || uri.startsWith("file://") -> Uri.parse(uri)
+        else -> Uri.fromFile(File(uri))
+    }
     SubcomposeAsyncImage(
-        model = Uri.parse(uri), contentDescription = null,
+        model = model, contentDescription = null,
         modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop,
         alpha = .34f,
         error = { if (fallback.isNotBlank() && fallback != uri) PlayerBackgroundImage(fallback) },
@@ -4583,8 +4736,12 @@ private fun contrastingContentColor(color: Color): Color =
     if (androidx.core.graphics.ColorUtils.calculateLuminance(color.toArgb()) > .179) Color.Black else Color.White
 @Composable private fun XstarTheme(accent: ThemeAccent, appFont: AppFont, downloadedFontId: String, fontCatalog: FontCatalog, content: @Composable () -> Unit) {
     val primary = accent.color()
+    val fontVersion by fontCatalog.version.collectAsStateWithLifecycle()
     val builtInFontFamily = appFont.toFontFamily()
-    val downloaded = downloadableFonts.firstOrNull { it.id == downloadedFontId }
+    val availableFonts by fontCatalog.fonts.collectAsStateWithLifecycle()
+    val downloaded = remember(downloadedFontId, fontVersion, availableFonts) {
+        availableFonts.firstOrNull { it.id == downloadedFontId && fontCatalog.isDownloaded(it) }
+    }
     val fontFamily = downloadedFontFamily(LocalContext.current, downloaded?.let { fontCatalog.file(it).absolutePath }.orEmpty(), builtInFontFamily)
     val base = Color(0xFF090B10)
     val container = lerp(base, primary, .24f)

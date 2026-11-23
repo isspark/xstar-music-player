@@ -8,7 +8,8 @@ import androidx.security.crypto.MasterKey
 /**
  * Credentials are obfuscated in the APK and encrypted at rest with Android Keystore.
  * APK-embedded credentials cannot be made secret from someone who controls the APK;
- * the NAS account must therefore be read-only and limited to the update directory.
+ * the NAS account must therefore be read-only and limited to application resources
+ * (updates and /App/Font), never personal music or writable NAS directories.
  */
 internal class UpdateCredentialStore(context: Context) {
     private val preferences = EncryptedSharedPreferences.create(

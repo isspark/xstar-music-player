@@ -56,6 +56,38 @@ import life.xstar.music.player.ui.toFontFamily
 import life.xstar.music.player.ui.player.*
 import kotlin.math.roundToInt
 
+@Composable
+private fun AppearanceNavigationDrawer(right: Boolean, select: (Boolean) -> Unit, preview: () -> Unit) {
+    AppearanceCard {
+        Text("导航栏划出方向", style = MaterialTheme.typography.titleMedium)
+        Text("点击页面菜单按钮或播放页快捷操作中的导航栏时，从所选一侧展开。", fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Box(Modifier.fillMaxWidth().height(130.dp).clip(RoundedCornerShape(16.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)) {
+            Column(Modifier.align(if (right) Alignment.CenterEnd else Alignment.CenterStart)
+                .fillMaxHeight().fillMaxWidth(.52f).background(MaterialTheme.colorScheme.primaryContainer).padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("XSTAR", color = MaterialTheme.colorScheme.onPrimaryContainer, fontWeight = FontWeight.Bold)
+                repeat(3) { Box(Modifier.fillMaxWidth().height(5.dp).background(MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = .25f), RoundedCornerShape(3.dp))) }
+            }
+        }
+    }
+    Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf(false to "从左侧划出", true to "从右侧划出").forEach { (value, title) ->
+            Surface(shape = RoundedCornerShape(16.dp)) {
+                ListItem(headlineContent = { Text(title) }, trailingContent = {
+                    RadioButton(selected = right == value, onClick = null)
+                }, modifier = Modifier.selectable(selected = right == value, role = Role.RadioButton, onClick = { select(value) }))
+            }
+        }
+    }
+    OutlinedButton(onClick = preview, modifier = Modifier.fillMaxWidth()) {
+        Icon(Icons.Default.Menu, null, Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
+        Text("预览导航栏")
+    }
+}
+
 private enum class AppearancePage(val title: String, val icon: ImageVector) {
     Colors("主题与颜色", Icons.Default.Palette),
     Fonts("字体", Icons.Default.TextFields),
@@ -64,6 +96,7 @@ private enum class AppearancePage(val title: String, val icon: ImageVector) {
     Lyrics("歌词显示", Icons.AutoMirrored.Filled.Notes),
     FloatingButton("悬浮按钮", Icons.Default.TouchApp),
     BottomNavigation("底部导航", Icons.Default.ViewWeek),
+    NavigationDrawer("侧边导航", Icons.Default.Menu),
     Effects("动态效果", Icons.Default.GraphicEq),
     Library("音乐库视图", Icons.Default.AutoAwesome)
 }
@@ -80,6 +113,7 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
     val lyrics by vm.selectedLyricsMode.collectAsStateWithLifecycle()
     val floatingButton by vm.floatingButtonStyle.collectAsStateWithLifecycle()
     val bottomNavigation by vm.bottomNavigation.collectAsStateWithLifecycle()
+    val navigationDrawerRight by vm.navigationDrawerRight.collectAsStateWithLifecycle()
     val image by vm.playerBackground.collectAsStateWithLifecycle()
     val album by vm.albumArtworkBackground.collectAsStateWithLifecycle()
     val disc by vm.playerDiscVisible.collectAsStateWithLifecycle()
@@ -89,7 +123,8 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
     val libraryViewMode by vm.libraryViewMode.collectAsStateWithLifecycle()
     val playlistStyle by vm.playlistStyle.collectAsStateWithLifecycle()
     val backgroundName = if (album) "专辑封面" else if (image.isNotBlank()) "自定义图片" else "默认背景"
-    val fontName = downloadableFonts.firstOrNull { it.id == fontId }?.name ?: font.title
+    val availableFonts by vm.fontCatalog.fonts.collectAsStateWithLifecycle()
+    val fontName = availableFonts.firstOrNull { it.id == fontId }?.name ?: font.title
     BackHandler(page != null) { page = null }
     CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onBackground) {
     Column(Modifier.fillMaxSize().systemBarsPadding().imePadding().padding(horizontal = 18.dp)) {
@@ -117,6 +152,7 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
                         AppearancePage.Lyrics -> lyrics.title
                         AppearancePage.FloatingButton -> floatingButton.title
                         AppearancePage.BottomNavigation -> "${if (bottomNavigation.enabled) "已开启" else "已关闭"} · ${bottomNavigation.count} 个按钮 · 时光刻度"
+                        AppearancePage.NavigationDrawer -> if (navigationDrawerRight) "从右侧划出" else "从左侧划出"
                         AppearancePage.Effects -> "节拍${if (beat) "已开启" else "已关闭"} · 频谱${if (spectrum) "已开启" else "已关闭"}"
                         AppearancePage.Library -> libraryViewMode.title
                     }
@@ -156,7 +192,8 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
                             AppearanceToggle("音乐节拍动态效果", "播放时切换背景颜色并轻微缩放封面", beat, vm::setBeatEffect)
                             AppearanceToggle("底部频谱特效", "播放时显示实时频谱律动与氛围粒子", spectrum, vm::setBottomEffect)
                         }
-                        AppearancePage.Library -> AppearanceLibraryView(libraryViewMode, vm::setLibraryViewMode)
+                         AppearancePage.Library -> AppearanceLibraryView(libraryViewMode, vm::setLibraryViewMode)
+                         AppearancePage.NavigationDrawer -> AppearanceNavigationDrawer(navigationDrawerRight, vm::setNavigationDrawerRight, openMenu)
                         else -> Unit
                     }
                     Spacer(Modifier.height(24.dp))
@@ -180,6 +217,7 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
                 AppearancePage.Lyrics -> vm.setLyricsMode(LyricsMode.Normal)
                 AppearancePage.FloatingButton -> { vm.setFloatingButtonStyle(FloatingButtonStyle.Breathing); vm.setPlayerShortcuts(PlayerShortcut.defaults) }
                 AppearancePage.BottomNavigation -> vm.resetBottomNavigation()
+                AppearancePage.NavigationDrawer -> vm.setNavigationDrawerRight(true)
                 AppearancePage.Effects -> { vm.setBeatEffect(true); vm.setBottomEffect(true) }
                 AppearancePage.Library -> vm.setLibraryViewMode(LibraryViewMode.List)
                 AppearancePage.Playlists -> vm.setPlaylistStyle(PlaylistStyle.Tape)
@@ -529,9 +567,13 @@ private fun AppearanceFonts(vm: MusicViewModel) {
     val font by vm.font.collectAsStateWithLifecycle()
     val id by vm.downloadedFont.collectAsStateWithLifecycle()
     val version by vm.fontCatalogVersion.collectAsStateWithLifecycle()
+    val downloadableFonts by vm.fontCatalog.fonts.collectAsStateWithLifecycle()
+    val refreshing by vm.fontCatalog.refreshing.collectAsStateWithLifecycle()
+    val catalogError by vm.fontCatalog.catalogError.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { vm.refreshFonts() }
     val progress by vm.fontDownloadProgress.collectAsStateWithLifecycle()
     var online by rememberSaveable { mutableStateOf(false) }
-    val downloaded = remember(version) { downloadableFonts.filter(vm.fontCatalog::isDownloaded) }
+    val downloaded = remember(version, downloadableFonts) { downloadableFonts.filter(vm.fontCatalog::isDownloaded) }
     val current = downloaded.firstOrNull { it.id == id }
     val family = downloadedFontFamily(context, current?.let { vm.fontCatalog.file(it).absolutePath }.orEmpty(), font.toFontFamily())
     var delete by remember { mutableStateOf<DownloadableFont?>(null) }
@@ -542,11 +584,31 @@ private fun AppearanceFonts(vm: MusicViewModel) {
             Text("春风十里 · Aa 123 XSTAR", fontFamily = family, color = MaterialTheme.colorScheme.primary)
         }
         PrimaryTabRow(if (online) 1 else 0) {
-            Tab(!online, { online = false }, text = { Text("内置字体") })
+            Tab(!online, { online = false }, text = { Text("系统 / 经典") })
             Tab(online, { online = true }, text = { Text("在线字体 · ${downloaded.size} 已下载") })
         }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("NAS 字体目录", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium)
+            TextButton({ vm.refreshFonts() }, enabled = !refreshing) { Text(if (refreshing) "同步中…" else "刷新") }
+        }
+        catalogError?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
+        if (!online) {
+            Text("经典字体也从 NAS 按需下载；未下载时使用系统字体。点击字体可下载或重试。", fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (progress.id != null && progress.error == null) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+                Text(if (progress.total > 0) "字体下载中 · ${(progress.fraction * 100).roundToInt()}%" else "正在连接 NAS 下载字体…", fontSize = 12.sp)
+            }
+            progress.error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 12.sp) }
+        }
         LazyColumn(Modifier.weight(1f).selectableGroup(), verticalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(bottom = 24.dp)) {
-            if (!online) items(AppFont.entries, key = { it.name }) { candidate ->
+            if (!online) item {
+                TextButton({ vm.useSystemFont() }) { Text("恢复默认字体") }
+            }
+            if (online && downloadableFonts.isEmpty()) item {
+                Text(if (refreshing) "正在读取 NAS 字体目录…" else "暂无可用字体，请向 NAS /App/Font 上传 TTF 或 OTF 文件后刷新。")
+            }
+            if (!online) items(AppFont.systemOptions, key = { it.name }) { candidate ->
                 val selected = id.isBlank() && font == candidate
                 Surface(shape = RoundedCornerShape(16.dp)) {
                     ListItem(headlineContent = { Text(candidate.title, fontFamily = candidate.toFontFamily()) },
@@ -557,7 +619,7 @@ private fun AppearanceFonts(vm: MusicViewModel) {
                         modifier = Modifier.selectable(selected, role = Role.RadioButton, onClick = { vm.setFont(candidate) }))
                 }
             } else {
-                item { Text("按需下载，下载后可离线使用 · GitHub / jsDelivr", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp) }
+                item { Text("从 NAS /App/Font 按需下载，下载后可离线使用", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp) }
                 val ordered = downloaded + downloadableFonts.filterNot { it in downloaded }
                 items(ordered, key = { it.id }) { candidate ->
                     val installed = candidate in downloaded
@@ -599,7 +661,7 @@ private fun AppearanceFonts(vm: MusicViewModel) {
     }
     delete?.let { target ->
         AlertDialog(onDismissRequest = { delete = null }, title = { Text("删除${target.name}？") },
-            text = { Text(if (id == target.id) "当前字体将切换为内置字体，之后可重新下载。" else "之后可重新下载此字体。") },
+            text = { Text(if (id == target.id) "当前字体将切换为经典字体（未下载时使用系统字体），之后可重新下载。" else "之后可重新下载此字体。") },
             confirmButton = { TextButton({ vm.removeDownloadedFont(target); delete = null }) { Text("删除") } },
             dismissButton = { TextButton({ delete = null }) { Text("取消") } })
     }

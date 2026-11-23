@@ -17,6 +17,9 @@ import life.xstar.music.player.together.TogetherConnectMode
 private val Context.playbackDataStore by preferencesDataStore("playback")
 
 class PlaybackPreferences(private val context: Context) {
+    private val navigationDrawerRightKey = booleanPreferencesKey("navigation_drawer_right")
+    val navigationDrawerRight: Flow<Boolean> = context.playbackDataStore.data.map { it[navigationDrawerRightKey] ?: true }
+    suspend fun setNavigationDrawerRight(right: Boolean) = context.playbackDataStore.edit { it[navigationDrawerRightKey] = right }
     private val bottomNavigationKey = booleanPreferencesKey("bottom_navigation_enabled")
     private val bottomNavigationCountKey = longPreferencesKey("bottom_navigation_count")
     private fun bottomSlotsKey(count: Int) = stringPreferencesKey("bottom_navigation_slots_$count")
@@ -98,7 +101,7 @@ class PlaybackPreferences(private val context: Context) {
         else runCatching { ThemeAccent.valueOf(values[themeKey] ?: ThemeAccent.Blue.name) }.getOrDefault(ThemeAccent.Blue)
     }
     val playerBackground: Flow<String> = context.playbackDataStore.data.map { it[playerBackgroundKey].orEmpty() }
-    val albumArtworkBackground: Flow<Boolean> = context.playbackDataStore.data.map { it[albumArtworkBackgroundKey] ?: false }
+    val albumArtworkBackground: Flow<Boolean> = context.playbackDataStore.data.map { it[albumArtworkBackgroundKey] ?: true }
     val playerTheme: Flow<PlayerTheme> = context.playbackDataStore.data.map { values ->
         PlayerTheme.fromStored(values[playerThemeKey])
     }
@@ -389,6 +392,7 @@ enum class AppFont(val title: String, val subtitle: String) {
     Lishu("隶书书法", "内置书法字形，古朴舒展");
 
     companion object {
+        val systemOptions = listOf(Default, Serif, Monospace)
         fun fromStored(value: String?): AppFont = entries.firstOrNull { it.name == value } ?: Default
     }
 }

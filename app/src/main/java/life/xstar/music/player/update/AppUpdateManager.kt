@@ -20,7 +20,7 @@ class AppUpdateManager(private val context: Context) {
     private val json = Json { ignoreUnknownKeys = true }
     private val credentials = UpdateCredentialStore(context)
 
-    private val baseUrl = "https://dav.xstar-life.fnos.net:443"
+    private val baseUrl = NasAppResources.BASE_URL
     private val manifestUrl = "$baseUrl/App/latest.json"
 
     suspend fun fetchLatest(): AppUpdateInfo = withContext(Dispatchers.IO) {
@@ -60,8 +60,15 @@ class AppUpdateManager(private val context: Context) {
         require(info.apkPath.startsWith("/")) { "apkPath 必须以 / 开头" }
         require(!info.apkPath.contains("..")) { "apkPath 不允许包含 .." }
         val url = baseUrl + info.apkPath
-        val directory = File(context.cacheDir, "updates").apply { mkdirs() }
+        // Keep completed APKs in filesDir so leaving the settings page or process
+        // recreation does not force the user to download the same version again.
+        val directory = File(context.filesDir, "updates").apply { mkdirs() }
         val apk = File(directory, "xstar-${info.versionName}.apk")
+        if (isValidApk(apk, info)) {
+            onProgress(apk.length(), apk.length())
+            return@withContext apk
+        }
+        if (apk.exists()) apk.delete()
         client.newCall(authorized(url).build()).execute().use { response ->
             check(response.isSuccessful) { "APK 下载失败：HTTP ${response.code}" }
             val body = response.body ?: error("APK 内容为空")
@@ -80,9 +87,14 @@ class AppUpdateManager(private val context: Context) {
                 }
             }
         }
-        if (info.apkSize > 0) check(apk.length() == info.apkSize) { "APK 文件大小校验失败" }
-        if (info.sha256.isNotBlank()) check(sha256(apk).equals(info.sha256, true)) { "APK 安全校验失败" }
+        check(isValidApk(apk, info)) { "APK 校验失败" }
         apk
+    }
+
+    private fun isValidApk(file: File, info: AppUpdateInfo): Boolean {
+        if (!file.isFile || file.length() == 0L) return false
+        if (info.apkSize > 0 && file.length() != info.apkSize) return false
+        return info.sha256.isBlank() || sha256(file).equals(info.sha256, ignoreCase = true)
     }
 
     fun install(apk: File) {

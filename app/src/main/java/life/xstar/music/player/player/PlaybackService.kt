@@ -54,6 +54,7 @@ class PlaybackService : MediaSessionService() {
             try {
                 startActivity(Intent(context, MainActivity::class.java).apply {
                     action = MainActivity.ACTION_LOCK_SCREEN_PLAYER
+                    putExtra(MainActivity.EXTRA_RETURN_TO_APP, MainActivity.appWasForeground)
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
                 })
             } catch (error: RuntimeException) {

@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.IntOffset
 import life.xstar.music.player.data.preferences.PlayerShortcut
 import kotlin.math.*
 
@@ -38,24 +39,28 @@ internal fun PlayerShortcut.icon(): ImageVector = when (this) {
 }
 
 @Composable
-internal fun PlayerShortcutPetals(expanded: Boolean, actions: List<PlayerShortcut>, onMenu: () -> Unit, onAction: (PlayerShortcut) -> Unit) {
+internal fun PlayerShortcutPetals(expanded: Boolean, actions: List<PlayerShortcut>, center: Offset, offsets: List<ShortcutPoint>, onMenu: () -> Unit, onAction: (PlayerShortcut) -> Unit) {
     val accent = MaterialTheme.colorScheme.primary
     val reveal by animateFloatAsState(if (expanded) 1f else 0f, tween(260), label = "playerPetalOrbit")
-    Box(Modifier.size(210.dp), contentAlignment = Alignment.Center) {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    Box(Modifier.fillMaxSize()) {
         if (reveal > .001f) Canvas(Modifier.fillMaxSize()) {
-            drawCircle(accent.copy(alpha = .12f * reveal), 60.dp.toPx() * reveal, style = Stroke(.7.dp.toPx()))
-            repeat(5) { i ->
-                val a = (-90 - i * 72) * PI.toFloat() / 180
-                val d = Offset(cos(a), sin(a))
-                drawLine(accent.copy(alpha = .27f * reveal), center + d * 29.dp.toPx(), center + d * 60.dp.toPx() * reveal, .8.dp.toPx())
+            drawCircle(accent.copy(alpha = .12f * reveal), 29.dp.toPx() * reveal, center = center, style = Stroke(.7.dp.toPx()))
+            repeat(offsets.size) { i ->
+                val target = offsets[i]
+                val d = Offset(target.x.dp.toPx(), target.y.dp.toPx())
+                drawLine(accent.copy(alpha = .27f * reveal), center, center + d * reveal, .8.dp.toPx())
             }
         }
-        repeat(5) { i ->
+        repeat(offsets.size) { i ->
             val progress by animateFloatAsState(if (expanded) 1f else 0f, tween(300, if (expanded) i * 32 else 0), label = "playerPetal$i")
             if (progress > .001f) {
-                val a = (-90 - i * 72) * PI.toFloat() / 180
+                val target = offsets[i]
                 val action = actions.getOrNull(i - 1)
-                Column(Modifier.offset((cos(a) * 60 * progress).dp, (sin(a) * 60 * progress).dp)
+                Column(Modifier.offset { with(density) { IntOffset(
+                    (center.x + target.x.dp.toPx() * progress - 24.dp.toPx()).roundToInt(),
+                    (center.y + target.y.dp.toPx() * progress - 26.dp.toPx()).roundToInt()
+                ) } }
                     .graphicsLayer { alpha = progress; scaleX = .65f + .35f * progress; scaleY = scaleX; rotationZ = -16 * (1 - progress) }
                     .size(48.dp, 52.dp).clip(RoundedCornerShape(17.dp))
                     .background(Brush.linearGradient(listOf(Color(0xFF222C40), Color(0xFF0D1422))))

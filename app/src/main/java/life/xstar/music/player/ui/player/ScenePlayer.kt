@@ -11,6 +11,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -209,9 +210,10 @@ fun ScenePlayer(
                     onClick(label = if (playing) "暂停" else "播放") { currentToggle(); true }
                     progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
                     setProgress { value -> if (currentDuration > 0) currentSeek((value.coerceIn(0f, 1f) * currentDuration).toLong()); true }
-                }.pointerInput(theme, song?.mediaStoreId, lyricsMode) {
-                    // Non-normal modes use the topmost unified playback surface below.
-                    if (lyricsMode != LyricsMode.Normal) return@pointerInput
+                }.pointerInput(theme, song?.mediaStoreId, lyricsMode, lines.isNotEmpty()) {
+                    // The unified surface only exists when there are lyrics to display.
+                    // Keep scene gestures active while lyrics are missing or being fetched.
+                    if (lyricsMode != LyricsMode.Normal && lines.isNotEmpty()) return@pointerInput
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         val start = down.position
@@ -327,10 +329,8 @@ fun ScenePlayer(
                             Modifier.fillMaxSize().padding(horizontal = 30.dp, vertical = 8.dp),
                             onLine = { index -> browseLine = index; lines[index].timeMs?.let(onSeek) },
                             onToggle = onToggle, onPrevious = onPrevious, onNext = onNext)
-                    } else Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(32.dp)) {
-                        Text(when (lyrics) { LyricsState.Loading -> "正在寻找这首歌的文字…"; is LyricsState.Error -> lyrics.message; is LyricsState.Candidates -> "找到歌词，选择一个版本"; else -> "让每一句，都有光。" }, color = palette.accent, fontSize = 22.sp, textAlign = TextAlign.Center)
-                        Text(if (lyrics == LyricsState.Loading) "" else "暂未找到歌词", color = palette.accent.copy(alpha = .4f), fontSize = 12.sp, modifier = Modifier.padding(top = 16.dp))
-                    }
+                    } else LyricsSelectionPrompt(lyrics, { if (lyrics is LyricsState.Candidates) onLyrics() else onFindLyrics() },
+                        Modifier.padding(24.dp), palette.accent)
                 }
                 if (theme != PlayerTheme.Theatre && lyricsMode != LyricsMode.ForestLight) Canvas(Modifier.fillMaxSize()) { drawSceneProgress(theme, palette.accent, fraction) }
                 Canvas(Modifier.fillMaxSize()) { effects.forEach { drawTouchEffect(it, clock, palette.accent, motionEnabled) } }
@@ -339,7 +339,7 @@ fun ScenePlayer(
                     Text("${formatSceneTime((fraction * duration).toLong())}  /  ${formatSceneTime(duration)}", color = palette.ink.copy(alpha = .75f), fontSize = 10.sp, letterSpacing = 1.sp,
                         modifier = Modifier.semantics { contentDescription = "播放进度 ${formatSceneTime(position)}，总时长 ${formatSceneTime(duration)}" })
                 }
-                if (lyricsMode != LyricsMode.Normal) LyricsPlaybackTouchSurface(
+                if (lyricsMode != LyricsMode.Normal && lines.isNotEmpty()) LyricsPlaybackTouchSurface(
                     playing, onToggle, onPrevious, onNext, Modifier.matchParentSize())
             }
             if (theme != PlayerTheme.Theatre && (lyricsMode != LyricsMode.ForestLight || lines.isEmpty())) {
@@ -366,10 +366,24 @@ fun ScenePlayer(
                     Modifier.fillMaxSize().padding(horizontal = 20.dp), compact = true, onLine = { index -> lines[index].timeMs?.let(onSeek) })
                 else if (lines.isNotEmpty()) ThreeLineLyrics(lines, currentLine, palette, theatre = false, motionEnabled = motionEnabled,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp), onLine = { index -> lines[index].timeMs?.let(onSeek) })
-                else Box(Modifier.fillMaxWidth().height(96.dp), contentAlignment = Alignment.Center) {
-                    Text(when (lyrics) { LyricsState.Loading -> "正在加载歌词…"; is LyricsState.Candidates -> "点击选择歌词版本"; else -> "暂无歌词 · 点击查找" },
-                        color = palette.ink.copy(alpha = .35f), fontSize = 12.sp,
-                        modifier = Modifier.clickable { if (lyrics is LyricsState.Candidates) onLyrics() else onFindLyrics() }.padding(12.dp))
+                else Box(Modifier.fillMaxWidth().height(96.dp).pointerInput(Unit) {
+                    // Observe drags on the prompt without covering its lookup/selection button.
+                    var horizontalDrag = 0f
+                    detectHorizontalDragGestures(
+                        onDragStart = { horizontalDrag = 0f },
+                        onDragCancel = { horizontalDrag = 0f },
+                        onDragEnd = {
+                            if (abs(horizontalDrag) > 55.dp.toPx()) {
+                                if (horizontalDrag < 0) currentNext() else currentPrevious()
+                            }
+                            horizontalDrag = 0f
+                        }
+                    ) { change, amount ->
+                        change.consume()
+                        horizontalDrag += amount
+                    }
+                }, contentAlignment = Alignment.Center) {
+                    LyricsSelectionPrompt(lyrics, { if (lyrics is LyricsState.Candidates) onLyrics() else onFindLyrics() }, color = palette.ink)
                  }
                  if (lyricsMode != LyricsMode.Normal && lines.isNotEmpty()) LyricsPlaybackTouchSurface(
                      playing, onToggle, onPrevious, onNext, Modifier.matchParentSize())

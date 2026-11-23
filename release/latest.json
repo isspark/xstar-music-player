@@ -1,15 +1,16 @@
 {
-  "versionCode": 2,
-  "versionName": "1.1.0",
+  "versionCode": 11,
+  "versionName": "1.6.4",
   "forceUpdate": false,
-  "title": "发现新版本 1.1.0",
+  "title": "发现新版本 1.6.4",
   "changelog": [
-    "新增应用内更新检测",
-    "支持从设置中手动检查更新",
-    "优化播放体验"
+    "外观设置新增侧边导航方向，可选择从左侧或右侧划出，即时生效并自动保存",
+    "侧边导航设置增加布局示意和预览入口，默认保持右侧划出",
+    "定时关闭新增 10、20、30、40、60 分钟快捷选项，支持钟盘指针联动微调",
+    "修复倒计时刷新覆盖正在编辑时长的问题，定时弹框支持滚动显示"
   ],
-  "apkPath": "/App/xstar-1.1.0.apk",
-  "apkSize": 50844936,
-  "sha256": "8e770cbef7673430cb9d3ee589e584797781620146f9f449a2fc1e32ed34e7d0",
-  "publishedAt": "2026-11-22T00:00:00Z"
+  "apkPath": "/App/xstar-1.6.4.apk",
+  "apkSize": 27685801,
+  "sha256": "124aad871e41a4fdeeeeb1bdcdcd231c9d9743b14c41bf3db2cf2dc008c79729",
+  "publishedAt": "2026-11-22T15:48:18.802Z"
 }

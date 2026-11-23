@@ -2,4 +2,5 @@
     <cache-path name="album_art" path="album_art/" />
     <cache-path name="shared_images" path="share/" />
     <cache-path name="apk_updates" path="updates/" />
+    <files-path name="persistent_apk_updates" path="updates/" />
 </paths>

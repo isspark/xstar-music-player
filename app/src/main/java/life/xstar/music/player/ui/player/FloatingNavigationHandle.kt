@@ -10,6 +10,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -36,6 +37,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.activity.compose.BackHandler
+import kotlinx.coroutines.delay
 import life.xstar.music.player.data.preferences.PlayerShortcut
 import life.xstar.music.player.data.preferences.FloatingButtonStyle
 import kotlin.math.roundToInt
@@ -65,26 +67,38 @@ import kotlin.math.roundToInt
         var leftEdge by rememberSaveable { mutableStateOf(false) }
         var verticalEdge by rememberSaveable { mutableIntStateOf(0) }
         var dragging by remember { mutableStateOf(false) }
-        var clickEffect by remember { mutableIntStateOf(0) }
-        var expanded by remember { mutableStateOf(false) }
-        BackHandler(expanded) { expanded = false }
+         var clickEffect by remember { mutableIntStateOf(0) }
+         var expanded by remember { mutableStateOf(false) }
+         BackHandler(expanded) { expanded = false }
+         LaunchedEffect(expanded) {
+             if (expanded) {
+                 delay(4000L)
+                 expanded = false
+             }
+         }
         val limitX = (width - diameter).coerceAtLeast(0f)
         val limitY = (height - diameter).coerceAtLeast(0f)
         val targetX = if (docked && verticalEdge == 0) { if (leftEdge) -diameter * .68f else width - diameter * .32f } else xFraction * limitX
         val animatedX by animateFloatAsState(targetX, tween(if (dragging) 0 else 260), label = "handleMagnet")
         val targetY = if (docked && verticalEdge != 0) { if (verticalEdge == -1) -diameter * .68f else height - diameter * .32f }
-            else (yFraction * limitY).coerceIn(margin.coerceAtMost(limitY), (limitY - margin).coerceAtLeast(margin.coerceAtMost(limitY)))
+            else (yFraction * limitY).coerceIn(0f, limitY)
         val animatedY by animateFloatAsState(targetY, tween(if (dragging) 0 else 200), label = "handleHeight")
             val transition = rememberInfiniteTransition(label = "floatingButtonMotion")
             val phase by transition.animateFloat(0f, 1f, infiniteRepeatable(tween(1900), RepeatMode.Reverse), label = "floatingButtonBreath")
             val pulse = if (playing) phase else 0f
-            val scale by animateFloatAsState(if (dragging) 1.08f else 1f, tween(160), label = "floatingButtonScale")
-            val petalSize = with(density) { 210.dp.toPx() }
-            Box(Modifier.offset { IntOffset(
-                (animatedX + diameter / 2 - petalSize / 2).coerceIn(0f, (width - petalSize).coerceAtLeast(0f)).roundToInt(),
-                (animatedY + diameter / 2 - petalSize / 2).coerceIn(0f, (height - petalSize).coerceAtLeast(0f)).roundToInt()) }) {
-                PlayerShortcutPetals(expanded && !dragging && !docked, shortcuts, onMenu = { expanded = false; onOpen() }, onAction = { expanded = false; onShortcut(it) })
-            }
+             val scale by animateFloatAsState(if (dragging) 1.08f else 1f, tween(160), label = "floatingButtonScale")
+              val center = androidx.compose.ui.geometry.Offset(animatedX + diameter / 2, animatedY + diameter / 2)
+              val offsets = remember(width, height, center, density) {
+                  shortcutOffsets(width / density.density, height / density.density, center.x / density.density, center.y / density.density)
+              }
+             if (expanded && !dragging && !docked) {
+                 Box(
+                     Modifier.fillMaxSize().pointerInput(Unit) {
+                         detectTapGestures { expanded = false }
+                     }
+                 )
+             }
+              PlayerShortcutPetals(expanded && !dragging && !docked, shortcuts, center, offsets, onMenu = { expanded = false; onOpen() }, onAction = { expanded = false; onShortcut(it) })
             Box(Modifier.offset { IntOffset(animatedX.roundToInt(), animatedY.roundToInt()) }.size(buttonSize)
                 .graphicsLayer { scaleX = scale; scaleY = scale }
                 .then(if (docked) Modifier
@@ -93,14 +107,14 @@ import kotlin.math.roundToInt
                 .semantics { contentDescription = if (docked) "展开悬浮按钮" else "展开播放页快捷操作，可拖动" }
                 .pointerInput(width, height, diameter) {
                     detectDragGestures(
-                    onDragStart = { dragging = true; if (docked) { if (verticalEdge == 0) xFraction = if (leftEdge) 0f else 1f; else yFraction = if (verticalEdge == -1) 0f else 1f; docked = false } },
+                     onDragStart = { expanded = false; dragging = true; if (docked) { if (verticalEdge == 0) xFraction = if (leftEdge) 0f else 1f; else yFraction = if (verticalEdge == -1) 0f else 1f; docked = false } },
                     onDragEnd = {
                         dragging = false
                         val x = xFraction * limitX
                         val y = yFraction * limitY
                         val horizontalDistance = minOf(x, limitX - x)
                         val verticalDistance = minOf(y, limitY - y)
-                        if (minOf(horizontalDistance, verticalDistance) < diameter) {
+                         if (shouldDockHandle(horizontalDistance / density.density, verticalDistance / density.density)) {
                             if (horizontalDistance <= verticalDistance) { leftEdge = x < width / 2; verticalEdge = 0 }
                             else verticalEdge = if (y < height / 2) -1 else 1
                             docked = true
