@@ -4,6 +4,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
 import android.widget.RemoteViews
+import android.annotation.SuppressLint
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.IconCompat
@@ -16,6 +17,7 @@ import androidx.media3.session.MediaSession
 import com.google.common.collect.ImmutableList
 import life.xstar.music.player.R
 
+@SuppressLint("UnsafeOptInUsageError")
 class PlaybackNotificationProvider(
     private val context: android.content.Context
 ) : MediaNotification.Provider {
@@ -56,7 +58,7 @@ class PlaybackNotificationProvider(
                 ?: context.getString(R.string.notification_playback_unknown_artist)
         )
         val artwork = metadata.artworkData?.let { data ->
-            BitmapFactory.decodeByteArray(data, 0, data.size)
+            decodeNotificationArtwork(data)
         } ?: metadata.artworkUri?.let(::loadArtwork)
         artwork?.let { views.setImageViewBitmap(R.id.notification_artwork, it) }
 
@@ -109,10 +111,27 @@ class PlaybackNotificationProvider(
 
     private fun loadArtwork(uri: Uri) = runCatching {
         when (uri.scheme?.lowercase()) {
-            "content", "file" -> context.contentResolver.openInputStream(uri)?.use(BitmapFactory::decodeStream)
+            "content", "file" -> context.contentResolver.openInputStream(uri)?.use { input ->
+                val bytes = input.readBytes().takeIf { it.size <= MAX_NOTIFICATION_ARTWORK_BYTES } ?: return@use null
+                decodeNotificationArtwork(bytes)
+            }
             else -> null
         }
     }.getOrNull()
+
+    private fun decodeNotificationArtwork(data: ByteArray) = runCatching {
+        if (data.size > MAX_NOTIFICATION_ARTWORK_BYTES) return@runCatching null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(data, 0, data.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= 512 && bounds.outHeight / (sample * 2) >= 512) sample *= 2
+        BitmapFactory.decodeByteArray(data, 0, data.size, BitmapFactory.Options().apply { inSampleSize = sample })
+    }.getOrNull()
+
+    private companion object {
+        const val MAX_NOTIFICATION_ARTWORK_BYTES = 10 * 1024 * 1024
+    }
 
     override fun handleCustomCommand(mediaSession: MediaSession, action: String, extras: Bundle): Boolean = false
 }

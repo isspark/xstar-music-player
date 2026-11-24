@@ -93,6 +93,7 @@ class PlaybackPreferences(private val context: Context) {
     private val togetherConnectModeKey = stringPreferencesKey("together_connect_mode")
     private val togetherServerEnabledKey = booleanPreferencesKey("together_server_enabled")
     private val togetherServerAddressKey = stringPreferencesKey("together_server_address")
+    private val onboardingCompletedKey = booleanPreferencesKey("onboarding_completed")
 
     val folders: Flow<Set<String>> = context.playbackDataStore.data.map { it[foldersKey].orEmpty() }
     val playlistStyle: Flow<PlaylistStyle> = context.playbackDataStore.data.map { PlaylistStyle.fromStored(it[playlistStyleKey]) }
@@ -112,8 +113,8 @@ class PlaybackPreferences(private val context: Context) {
     val libraryViewMode: Flow<LibraryViewMode> = context.playbackDataStore.data.map { LibraryViewMode.fromStored(it[libraryViewModeKey]) }
     val playerDiscOpacity: Flow<Float> = context.playbackDataStore.data.map { it[playerDiscOpacityKey]?.toFloatOrNull()?.coerceIn(0f, 1f) ?: 0.42f }
     val playerDiscVisible: Flow<Boolean> = context.playbackDataStore.data.map { it[playerDiscVisibleKey] ?: true }
-    val beatEffect: Flow<Boolean> = context.playbackDataStore.data.map { it[beatEffectKey] ?: true }
-    val bottomEffect: Flow<Boolean> = context.playbackDataStore.data.map { it[bottomEffectKey] ?: true }
+    val beatEffect: Flow<Boolean> = context.playbackDataStore.data.map { it[beatEffectKey] ?: false }
+    val bottomEffect: Flow<Boolean> = context.playbackDataStore.data.map { it[bottomEffectKey] ?: false }
     val lockScreenPlayer: Flow<Boolean> = context.playbackDataStore.data.map { it[lockScreenPlayerKey] ?: false }
     val onlineArtworkEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[onlineArtworkKey] ?: true }
     val onlineLyricsEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[onlineLyricsKey] ?: true }
@@ -129,6 +130,7 @@ class PlaybackPreferences(private val context: Context) {
     }
     val togetherServerEnabled: Flow<Boolean> = context.playbackDataStore.data.map { it[togetherServerEnabledKey] ?: false }
     val togetherServerAddress: Flow<String> = context.playbackDataStore.data.map { it[togetherServerAddressKey].orEmpty().trim() }
+    val onboardingCompleted: Flow<Boolean> = context.playbackDataStore.data.map { it[onboardingCompletedKey] ?: false }
 
     suspend fun save(queue: List<Long>, index: Int, position: Long, mode: String, playing: Boolean) {
         context.playbackDataStore.edit { values ->
@@ -227,6 +229,7 @@ class PlaybackPreferences(private val context: Context) {
     suspend fun setOnlineArtworkEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineArtworkKey] = enabled }
     suspend fun setOnlineLyricsEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineLyricsKey] = enabled }
     suspend fun setOnlineSearchEnabled(enabled: Boolean) = context.playbackDataStore.edit { it[onlineSearchEnabledKey] = enabled }
+    suspend fun setOnboardingCompleted(completed: Boolean = true) = context.playbackDataStore.edit { it[onboardingCompletedKey] = completed }
     suspend fun setOnlinePlatform(platform: String) = context.playbackDataStore.edit { it[onlinePlatformKey] = platform }
     suspend fun setOnlineApiBase(base: String) = context.playbackDataStore.edit { it[onlineApiBaseKey] = base.trim() }
     suspend fun setDownloadFolder(uri: String?) = context.playbackDataStore.edit { values ->

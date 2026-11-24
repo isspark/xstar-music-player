@@ -92,29 +92,30 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
             dao.deleteAll()
             return@withContext 0
         }
-        val scanned = mutableListOf<SongEntity>()
+        val scannedIds = mutableListOf<Long>()
         val cached = dao.allSongs().associateBy { it.mediaStoreId }
         folderUris.forEach { folderUri ->
-            DocumentFile.fromTreeUri(context, Uri.parse(folderUri))?.let { scanDirectory(it, folderUri, scanned, cached, onProgress) }
-        }
-        val ids = scanned.map { it.mediaStoreId }
-        val existing = if (ids.isEmpty()) emptyMap() else dao.findByMediaIds(ids).associateBy { it.mediaStoreId }
-        val merged = scanned.map { song -> existing[song.mediaStoreId]?.let { old ->
-            // SAF metadata reads are expensive on large libraries. A file's URI, size
-            // and modified time form a cheap fingerprint, so keep the indexed row when
-            // nothing changed and only re-read tags for new/changed files.
-            if (song.fileSize == old.fileSize && song.dateAdded == old.dateAdded) old
-            else song.copy(
+            val folderSongs = mutableListOf<SongEntity>()
+            DocumentFile.fromTreeUri(context, Uri.parse(folderUri))?.let {
+                scanDirectory(it, folderUri, folderSongs, cached, onProgress)
+            }
+            val folderIds = folderSongs.map { it.mediaStoreId }
+            scannedIds += folderIds
+            val existing = if (folderIds.isEmpty()) emptyMap() else dao.findByMediaIds(folderIds).associateBy { it.mediaStoreId }
+            folderSongs.map { song -> existing[song.mediaStoreId]?.let { old ->
+                // A file fingerprint avoids re-reading and rewriting unchanged metadata.
+                if (song.fileSize == old.fileSize && song.dateAdded == old.dateAdded) old
+                else song.copy(
                     albumArtUri = song.albumArtUri ?: old.albumArtUri?.takeUnless { it.endsWith(".img") },
                     isFavorite = old.isFavorite,
                     playCount = old.playCount,
                     lastPlayedAt = old.lastPlayedAt,
                     onlineId = old.onlineId
                 )
-        } ?: song }
-        if (ids.isEmpty()) dao.deleteAll() else dao.deleteNotInMediaIds(ids)
-        if (merged.isNotEmpty()) dao.upsertAll(merged)
-        merged.size
+            } ?: song }.chunked(300).forEach { dao.upsertAll(it) }
+        }
+        if (scannedIds.isEmpty()) dao.deleteAll() else dao.deleteNotInMediaIds(scannedIds)
+        scannedIds.size
     }
 
     private suspend fun scanDirectory(directory: DocumentFile, folderUri: String, output: MutableList<SongEntity>, cached: Map<Long, SongEntity>, onProgress: (ScanProgress) -> Unit) {
@@ -173,17 +174,36 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
 
     private fun readEmbeddedFromCopy(uri: Uri): ByteArray? = runCatching {
         val temporary = File.createTempFile("xstar_audio_", ".media", context.cacheDir)
-        context.contentResolver.openInputStream(uri)?.use { input -> temporary.outputStream().use { output -> input.copyTo(output) } }
-        val retriever = MediaMetadataRetriever()
-        val artwork = runCatching { retriever.setDataSource(temporary.absolutePath); retriever.embeddedPicture }.getOrNull()
-        retriever.release()
-        temporary.delete()
-        artwork
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                temporary.outputStream().use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var total = 0L
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        total += count
+                        check(total <= MAX_FALLBACK_COPY_BYTES) { "音频文件过大，无法读取内嵌封面" }
+                        output.write(buffer, 0, count)
+                    }
+                }
+            }
+            val retriever = MediaMetadataRetriever()
+            try { retriever.setDataSource(temporary.absolutePath); retriever.embeddedPicture }
+            finally { retriever.release() }
+        } finally {
+            temporary.delete()
+        }
     }.getOrNull()
 
     private fun cacheEmbeddedArtwork(id: Long, bytes: ByteArray?): String? {
         if (bytes == null || bytes.isEmpty()) return null
-        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size,
+            BitmapFactory.Options().apply { inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, MAX_ARTWORK_SIZE) })
+            ?: return null
         val directory = File(context.cacheDir, "album_art").apply { mkdirs() }
         val artwork = File(directory, "${id.toULong()}.jpg")
         artwork.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 92, it) }
@@ -209,6 +229,11 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
         var sample = 1
         while (width / (sample * 2) >= max && height / (sample * 2) >= max) sample *= 2
         return sample
+    }
+
+    private companion object {
+        const val MAX_ARTWORK_SIZE = 1024
+        const val MAX_FALLBACK_COPY_BYTES = 256L * 1024L * 1024L
     }
 
     private fun refererFor(candidate: ArtworkCandidate): Map<String, String> = when (candidate.source) {

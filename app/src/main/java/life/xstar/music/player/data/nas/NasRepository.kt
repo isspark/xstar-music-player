@@ -60,7 +60,12 @@ class NasRepository(private val context: Context, private val database: MusicDat
     }
     suspend fun useDeveloperDefault(passphrase: String) {
         require(passphrase.trim().equals("XSTAR13", ignoreCase = true)) { "口令不正确" }
-        save(NasConfig(address = "https://dav.xstar-life.fnos.net:443", username = "xstar", password = "Xstar-13", managed = true))
+        save(NasConfig(
+            address = "https://dav.xstar-life.fnos.net:443",
+            username = "xstar",
+            password = "Xstar-13",
+            managed = true
+        ))
     }
     suspend fun completeLocalSetup() = withContext(Dispatchers.IO) {
         check(prefs.edit().putBoolean("initial_sync_complete", true).commit()) { "保存初始化状态失败" }

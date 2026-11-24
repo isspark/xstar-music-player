@@ -53,7 +53,12 @@ class AppUpdateManager(private val context: Context) {
         } else {
             @Suppress("DEPRECATION") context.packageManager.getPackageInfo(context.packageName, 0)
         }
-        return info.longVersionCode.toInt()
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode.toInt()
+        } else {
+            @Suppress("DEPRECATION")
+            info.versionCode
+        }
     }
 
     suspend fun download(info: AppUpdateInfo, onProgress: (Long, Long) -> Unit): File = withContext(Dispatchers.IO) {

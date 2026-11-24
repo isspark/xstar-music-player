@@ -1,7 +1,7 @@
 package life.xstar.music.player.ui.player
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -68,7 +68,7 @@ internal fun BubbleOceanLyrics(
             candidates.randomOrNull(random) ?: 0
         }
     }
-    BoxWithConstraints(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize()) {
         Canvas(Modifier.fillMaxSize()) {
             val seconds = if (motion) time() else 0f
             val age = elapsed().coerceAtLeast(0L)

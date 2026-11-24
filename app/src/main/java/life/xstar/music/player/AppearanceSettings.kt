@@ -218,7 +218,7 @@ internal fun AppearanceSettingsScreen(vm: MusicViewModel, openMenu: () -> Unit) 
                 AppearancePage.FloatingButton -> { vm.setFloatingButtonStyle(FloatingButtonStyle.Breathing); vm.setPlayerShortcuts(PlayerShortcut.defaults) }
                 AppearancePage.BottomNavigation -> vm.resetBottomNavigation()
                 AppearancePage.NavigationDrawer -> vm.setNavigationDrawerRight(true)
-                AppearancePage.Effects -> { vm.setBeatEffect(true); vm.setBottomEffect(true) }
+                AppearancePage.Effects -> { vm.setBeatEffect(false); vm.setBottomEffect(false) }
                 AppearancePage.Library -> vm.setLibraryViewMode(LibraryViewMode.List)
                 AppearancePage.Playlists -> vm.setPlaylistStyle(PlaylistStyle.Tape)
                 null -> Unit
@@ -522,7 +522,7 @@ private fun AppearancePlayer(vm: MusicViewModel, scene: PlayerTheme, image: Stri
 
 /** Lightweight schematic rather than mounting five live player scenes. */
 @Composable
-private fun PlayerAppearancePreview(scene: PlayerTheme, modifier: Modifier, image: String = "", disc: Boolean = true, opacity: Float = 1f) {
+internal fun PlayerAppearancePreview(scene: PlayerTheme, modifier: Modifier, image: String = "", disc: Boolean = true, opacity: Float = 1f) {
     val accent = MaterialTheme.colorScheme.primary
     Box(modifier.clip(RoundedCornerShape(14.dp)).background(Brush.linearGradient(listOf(Color(0xFF101523), accent.copy(alpha = .18f))))) {
         if (image.isNotBlank()) AsyncImage(image, null, Modifier.matchParentSize(), contentScale = ContentScale.Crop, alpha = .45f)

@@ -2,6 +2,7 @@ package life.xstar.music.player.data.artwork
 
 import java.net.HttpURLConnection
 import java.net.URL
+import java.io.ByteArrayOutputStream
 
 internal object ArtworkHttp {
     private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -13,7 +14,21 @@ internal object ArtworkHttp {
     }
 
     fun getBytes(address: String, headers: Map<String, String> = emptyMap()): ByteArray? = request(address, headers) { connection ->
-        connection.inputStream.use { it.readBytes() }
+        connection.inputStream.use { input ->
+            val declared = connection.contentLengthLong
+            check(declared <= MAX_IMAGE_BYTES || declared < 0) { "封面文件过大" }
+            val output = ByteArrayOutputStream(minOf(declared.coerceAtLeast(0L), 64 * 1024L).toInt())
+            val buffer = ByteArray(16 * 1024)
+            var total = 0L
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                total += count
+                check(total <= MAX_IMAGE_BYTES) { "封面文件过大" }
+                output.write(buffer, 0, count)
+            }
+            output.toByteArray()
+        }
     }
 
     private fun <T> request(address: String, headers: Map<String, String>, read: (HttpURLConnection) -> T): T? = runCatching {
@@ -32,4 +47,6 @@ internal object ArtworkHttp {
             connection.disconnect()
         }
     }.getOrNull()
+
+    private const val MAX_IMAGE_BYTES = 10L * 1024L * 1024L
 }

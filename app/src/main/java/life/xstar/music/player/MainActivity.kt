@@ -59,6 +59,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -93,6 +94,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.input.pointer.pointerInput
@@ -319,16 +321,21 @@ class MainActivity : ComponentActivity() {
             XstarTheme(theme, font, downloadedFont, app.fontCatalog) {
                 // Keep the normal navigation tree composed underneath the lock
                 // screen so unlock restores the exact player/page, not a new root.
-                val initialSyncRequired by vm.initialNasSyncRequired.collectAsStateWithLifecycle()
-                var hasShownSetup by rememberSaveable { mutableStateOf(false) }
+                 val initialSyncRequired by vm.initialNasSyncRequired.collectAsStateWithLifecycle()
+                 val onboardingCompleted by vm.onboardingCompleted.collectAsStateWithLifecycle()
+                 var hasShownSetup by rememberSaveable { mutableStateOf(false) }
                 LaunchedEffect(initialSyncRequired) {
                     if (initialSyncRequired == true) hasShownSetup = true
                 }
                 Box(Modifier.fillMaxSize()) {
-                when (initialSyncRequired) {
-                    false -> XstarApp(vm, if (hasShownSetup) LibraryRoute else startRoute)
-                    else -> NasFirstSyncScreen(vm, initialSyncRequired == null)
-                }
+                 when (initialSyncRequired) {
+                     false -> if (!onboardingCompleted) {
+                         FirstRunOnboarding(vm)
+                     } else {
+                         XstarApp(vm, if (hasShownSetup) LibraryRoute else startRoute)
+                     }
+                     else -> NasFirstSyncScreen(vm, initialSyncRequired == null)
+                 }
                 if (showingLockScreen) {
                     var keepScreenOn by rememberSaveable { mutableStateOf(false) }
                     DisposableEffect(keepScreenOn) {
@@ -490,6 +497,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val libraryCount = (appContext.applicationContext as XstarApplication).database.songDao().observeCount()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
     val initialNasSyncRequired = nas.initialSyncRequired
+    val onboardingCompleted = preferences.onboardingCompleted.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     fun retryInitialSetup() = viewModelScope.launch {
         try { nas.initializeDefault() }
         catch (error: CancellationException) { throw error }
@@ -527,6 +535,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
             catch (_: Exception) { nas.reportStatus(false, "无法完成配置，请检查口令和网络后重试") }
         }
     }
+    fun completeOnboarding() = viewModelScope.launch { preferences.setOnboardingCompleted() }
     private var completingLocalSetup = false
     fun startLocalSetup(uri: String) {
         if (scanJob?.isActive == true) return
@@ -660,8 +669,8 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
     val albumArtworkBackground = preferences.albumArtworkBackground.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val playerDiscOpacity = preferences.playerDiscOpacity.stateIn(viewModelScope, SharingStarted.Eagerly, .42f)
     val playerDiscVisible = preferences.playerDiscVisible.stateIn(viewModelScope, SharingStarted.Eagerly, true)
-    val beatEffect = preferences.beatEffect.stateIn(viewModelScope, SharingStarted.Eagerly, true)
-    val bottomEffect = preferences.bottomEffect.stateIn(viewModelScope, SharingStarted.Eagerly, true)
+    val beatEffect = preferences.beatEffect.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val bottomEffect = preferences.bottomEffect.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val lockScreenPlayer = preferences.lockScreenPlayer.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val onlineArtworkEnabled = preferences.onlineArtworkEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
     val onlineLyricsEnabled = preferences.onlineLyricsEnabled.stateIn(viewModelScope, SharingStarted.Eagerly, true)
@@ -1350,6 +1359,199 @@ sealed class OnlineSearchUiState {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
+private enum class OnboardingStep { Welcome, Player, Lyrics, Gestures }
+
+@Composable
+private fun FirstRunOnboarding(vm: MusicViewModel) {
+    var step by rememberSaveable { mutableStateOf(OnboardingStep.Welcome) }
+    var playerTheme by rememberSaveable { mutableStateOf(PlayerTheme.Classic) }
+    var lyricsMode by rememberSaveable { mutableStateOf(LyricsMode.Normal) }
+    var floatingStyle by rememberSaveable { mutableStateOf(FloatingButtonStyle.Breathing) }
+    val needsGestureTutorial = playerTheme != PlayerTheme.Classic || lyricsMode != LyricsMode.Normal
+    val lastStep = if (needsGestureTutorial) OnboardingStep.Gestures else OnboardingStep.Lyrics
+
+    fun next() {
+        when (step) {
+            OnboardingStep.Welcome -> step = OnboardingStep.Player
+            OnboardingStep.Player -> step = OnboardingStep.Lyrics
+            OnboardingStep.Lyrics -> if (needsGestureTutorial) step = OnboardingStep.Gestures else vm.completeOnboarding()
+            OnboardingStep.Gestures -> vm.completeOnboarding()
+        }
+    }
+    fun finish() = vm.completeOnboarding()
+
+    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+        Column(
+            Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 22.dp, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("XSTAR", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = ::finish) { Text("跳过") }
+            }
+            LinearProgressIndicator(
+                progress = { (step.ordinal + 1f) / (lastStep.ordinal + 1f) },
+                Modifier.fillMaxWidth()
+            )
+            AnimatedContent(step, label = "onboardingStep", modifier = Modifier.weight(1f)) { current ->
+                Column(
+                    Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    when (current) {
+                        OnboardingStep.Welcome -> {
+                            Icon(Icons.Default.AutoAwesome, null, Modifier.size(56.dp), tint = MaterialTheme.colorScheme.primary)
+                            Text("先把 XSTAR 调成你喜欢的样子", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                            Text("用不到一分钟完成播放界面、歌词和悬浮按钮设置。之后都可以在“外观”中重新修改。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            OnboardingHint("本地优先", "音乐文件只在你授权的目录中扫描")
+                            OnboardingHint("即时生效", "每次选择都会自动保存")
+                            OnboardingHint("可跳过", "以后可以从设置 → 外观再次调整")
+                        }
+                        OnboardingStep.Player -> {
+                            Text("选择播放界面", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                            Text("普通界面适合日常操作；场景界面会提供更沉浸的动态播放体验。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            OnboardingPreviewPanel("播放器预览") {
+                                PlayerAppearancePreview(
+                                    playerTheme,
+                                    Modifier.fillMaxWidth().height(210.dp),
+                                    disc = true,
+                                    opacity = .42f
+                                )
+                            }
+                            Text("选择界面", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            PlayerTheme.entries.forEach { candidate ->
+                                val selected = playerTheme == candidate
+                                Surface(
+                                    Modifier.fillMaxWidth().selectable(
+                                        selected = selected,
+                                        role = Role.RadioButton,
+                                        onClick = { playerTheme = candidate; vm.setPlayerTheme(candidate) }
+                                    ),
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                                    border = BorderStroke(1.dp, if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant)
+                                ) {
+                                    ListItem(
+                                        headlineContent = { Text(candidate.title) },
+                                        supportingContent = { Text(candidate.subtitle) },
+                                        leadingContent = { RadioButton(selected, null) }
+                                    )
+                                }
+                            }
+                        }
+                        OnboardingStep.Lyrics -> {
+                            Text("选择歌词显示", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                            Text("普通歌词最容易阅读；其他模式会让歌词成为播放界面的一部分。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            OnboardingLyricsPreview(lyricsMode)
+                            Text("选择歌词样式", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            LyricsMode.entries.forEach { candidate ->
+                                val selected = lyricsMode == candidate
+                                Surface(
+                                    Modifier.fillMaxWidth().selectable(
+                                        selected = selected,
+                                        role = Role.RadioButton,
+                                        onClick = { lyricsMode = candidate; vm.setLyricsMode(candidate) }
+                                    ),
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+                                    border = BorderStroke(1.dp, if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant)
+                                ) {
+                                    ListItem(
+                                        headlineContent = { Text(candidate.title) },
+                                        supportingContent = { Text(candidate.subtitle) },
+                                        leadingContent = { RadioButton(selected, null) }
+                                    )
+                                }
+                            }
+                            Text("悬浮按钮样式", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                                FloatingButtonStyle.entries.forEach { candidate ->
+                                    FilterChip(
+                                        selected = floatingStyle == candidate,
+                                        onClick = { floatingStyle = candidate; vm.setFloatingButtonStyle(candidate) },
+                                        label = { Text(candidate.title) }
+                                    )
+                                }
+                            }
+                        }
+                        OnboardingStep.Gestures -> {
+                            Text("第一次使用手势提示", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                            Text("当前选择了非普通播放或歌词模式，记住下面三个操作就能顺畅使用。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            GestureTutorialCard(Icons.Default.SwapHoriz, "左右滑动", "在播放界面左滑切换下一首，右滑回到上一首")
+                            GestureTutorialCard(Icons.Default.TouchApp, "点击播放区域", "点击歌词或播放区域即可播放 / 暂停")
+                            GestureTutorialCard(Icons.Default.MoreVert, "悬浮按钮", "点击展开快捷操作；长按拖动可移动，靠近边缘会自动吸附")
+                        }
+                    }
+                }
+            }
+            Button(onClick = ::next, Modifier.fillMaxWidth()) {
+                Text(if (step == OnboardingStep.Gestures || (!needsGestureTutorial && step == OnboardingStep.Lyrics)) "开始使用" else "下一步")
+            }
+        }
+    }
+}
+
+@Composable
+private fun OnboardingPreviewPanel(title: String, content: @Composable () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(title, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+        Card(
+            Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) { content() }
+    }
+}
+
+@Composable
+private fun OnboardingLyricsPreview(mode: LyricsMode) {
+    OnboardingPreviewPanel("歌词预览") {
+        Column(
+            Modifier.fillMaxWidth().height(170.dp).padding(20.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text("当前歌词显示", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "${mode.title} · 音乐让生活更有节奏",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                if (mode == LyricsMode.Normal) "当前行高亮，歌词自动滚动" else "动态歌词效果将在播放时呈现",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun OnboardingHint(title: String, description: String) {
+    ListItem(
+        headlineContent = { Text(title, fontWeight = FontWeight.SemiBold) },
+        supportingContent = { Text(description) },
+        leadingContent = { Icon(Icons.Default.CheckCircle, null, tint = MaterialTheme.colorScheme.primary) },
+        colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surface)
+    )
+}
+
+@Composable
+private fun GestureTutorialCard(icon: ImageVector, title: String, description: String) {
+    Card(Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(icon, null, Modifier.size(32.dp), tint = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(14.dp))
+            Column { Text(title, fontWeight = FontWeight.SemiBold); Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp) }
+        }
+    }
+}
+
 @Composable private fun XstarApp(vm: MusicViewModel, initialRoute: NavKey = startRoute) {
     val navigationState = rememberNavigationState(initialRoute, topLevelRoutes)
     val navigator = remember { Navigator(navigationState) }
@@ -3399,7 +3601,9 @@ private data class PendingTake(val takeId: Int, val startMs: Long, val notes: Li
                             else -> vm.player.seek(target)
                         }
                     } })
-                  else LyricsScroll(lines, position, close)
+                  else {
+                      LyricsScroll(lines, position, close)
+                  }
                   if (simplified && lyricsMode != LyricsMode.Normal) Box(
                       Modifier.matchParentSize().clickable(
                           interactionSource = remember { MutableInteractionSource() }, indication = null,
