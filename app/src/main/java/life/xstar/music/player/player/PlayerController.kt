@@ -244,6 +244,16 @@ class PlayerController(context: Context) {
             syncSessionState(controller)
         }
     }, executor)
+    fun append(songs: List<SongEntity>) {
+        if (songs.isEmpty()) return
+        controllerFuture.addListener({
+            val controller = runCatching { controllerFuture.get() }.getOrNull() ?: return@addListener
+            val items = songs.map { it.toMediaItem() }
+            controller.addMediaItems(items)
+            knownSongs.putAll(songs.associateBy { it.mediaStoreId })
+            syncSessionState(controller)
+        }, executor)
+    }
     fun clear() = controllerFuture.addListener({ controllerFuture.get().clearMediaItems(); _state.value = PlayerState() }, executor)
     fun setPlaybackMode(mode: PlaybackMode) = controllerFuture.addListener({
         val controller = controllerFuture.get()

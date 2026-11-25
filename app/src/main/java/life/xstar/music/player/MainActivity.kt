@@ -504,6 +504,11 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
         catch (_: Exception) { nas.reportStatus(false, "初始化失败，请点击重试") }
     }
     init {
+        viewModelScope.launch(Dispatchers.IO) {
+            // Build the v8 index outside Room migration. The old LIKE search remains
+            // available while this rebuildable index is being prepared.
+            runCatching { repo.ensureSearchIndex() }
+        }
         viewModelScope.launch {
             try { nas.initializeDefault() }
             catch (error: CancellationException) { throw error }
@@ -815,7 +820,7 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
             val result = runCatching {
                 repo.scan(effectiveFolders) { progress: ScanProgress ->
                     if (scanGeneration.get() == generation) {
-                        _scanState.value = ScanState(running = true, currentFile = progress.fileName, discovered = progress.discovered)
+                        _scanState.value = ScanState(running = true, currentFile = progress.fileName, discovered = progress.discovered, unchanged = progress.unchanged, scanFailed = progress.failed)
                     }
                 }
             }
@@ -1163,6 +1168,16 @@ class MusicViewModel(private val repo: MusicRepository, val player: PlayerContro
             lock.unlock()
         }
     }
+    fun batchFavorite(ids: List<Long>, value: Boolean) = viewModelScope.launch(Dispatchers.IO) {
+        repo.setFavorite(ids, value)
+    }
+    fun batchAddToPlaylist(playlistId: Long, ids: List<Long>) = viewModelScope.launch(Dispatchers.IO) {
+        repo.addToPlaylist(playlistId, ids)
+    }
+    fun batchAppendToQueue(ids: List<Long>) = viewModelScope.launch {
+        val selected = repo.findByIds(ids)
+        player.append(selected)
+    }
     fun playLibraryGroup(artist: String? = null, album: String? = null, query: String = "", song: SongEntity? = null) {
         viewModelScope.launch {
             val queue = (appContext.applicationContext as XstarApplication).database.songDao().libraryQueue(query.trim(), artist, album)
@@ -1347,6 +1362,8 @@ data class ScanState(
     val running: Boolean = false,
     val currentFile: String? = null,
     val discovered: Int = 0,
+    val unchanged: Int = 0,
+    val scanFailed: Int = 0,
     val message: String? = null,
     val failed: Boolean = false
 )
@@ -3924,6 +3941,7 @@ private fun dateTimeText(ms: Long): String {
     val folders by vm.folders.collectAsStateWithLifecycle()
     val downloadFolder by vm.downloadFolder.collectAsStateWithLifecycle()
     val scanState by vm.scanState.collectAsStateWithLifecycle()
+    val playlists by vm.playlists.collectAsStateWithLifecycle()
     val libraryViewMode by vm.libraryViewMode.collectAsStateWithLifecycle()
     val playerTheme by vm.playerTheme.collectAsStateWithLifecycle()
     var query by remember { mutableStateOf("") }
@@ -3940,7 +3958,8 @@ private fun dateTimeText(ms: Long): String {
             scanEnabled = !scanState.running && (folders.isNotEmpty() || downloadFolder.isNotBlank()),
             floatingStyle = vm.floatingButtonStyle.collectAsStateWithLifecycle().value,
             playing = vm.playback.collectAsStateWithLifecycle().value.playing,
-            onPlay = { song -> vm.play(song, songs) }
+            onPlay = { song -> vm.play(song, songs) },
+            onRandomPlay = { available -> available.randomOrNull()?.let { vm.play(it, available.shuffled()) } }
         )
         return
     }
@@ -3951,6 +3970,8 @@ private fun dateTimeText(ms: Long): String {
         currentSongId = playback.song?.mediaStoreId, playing = playback.playing,
         openMenu = openMenu, addFolder = { folderPicker.launch(null) }, onScan = vm::scan,
         onPlay = { song, queue -> vm.play(song, queue) }, onFavorite = { vm.favorite(it) },
+        onBatchFavorite = vm::batchFavorite,
+        playlists = playlists, onBatchAddToPlaylist = vm::batchAddToPlaylist, onBatchAppendToQueue = vm::batchAppendToQueue,
         onAlbum = { name, entries -> selectedAlbum = name to entries }
     )
     selectedAlbum?.let { (name, entries) -> AlbumArtworkSheet(name, entries, vm) { selectedAlbum = null } }

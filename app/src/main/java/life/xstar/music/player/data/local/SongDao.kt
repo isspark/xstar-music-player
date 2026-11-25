@@ -3,10 +3,32 @@ package life.xstar.music.player.data.local
 import androidx.room.Dao
 import androidx.room.Query
 import androidx.room.Upsert
+import androidx.room.SkipQueryVerification
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface SongDao {
+    @SkipQueryVerification
+    @Query("SELECT * FROM songs WHERE mediaStoreId IN (SELECT mediaStoreId FROM songs_fts WHERE title LIKE '%' || :query || '%' OR artist LIKE '%' || :query || '%' OR album LIKE '%' || :query || '%' OR fileName LIKE '%' || :query || '%') ORDER BY title COLLATE NOCASE, mediaStoreId")
+    suspend fun searchFts(query: String): List<SongEntity>
+    @SkipQueryVerification
+    @Query("DELETE FROM songs_fts")
+    suspend fun clearSearchIndex()
+    @SkipQueryVerification
+    @Query("INSERT INTO songs_fts(mediaStoreId, title, artist, album, fileName) VALUES (:id, :title, :artist, :album, :fileName)")
+    suspend fun indexSong(id: Long, title: String, artist: String, album: String, fileName: String?)
+    @SkipQueryVerification
+    @Query("DELETE FROM songs_fts WHERE mediaStoreId = :id")
+    suspend fun removeFromSearchIndex(id: Long)
+    @SkipQueryVerification
+    @Query("SELECT indexedCount FROM search_index_state WHERE id = 1")
+    suspend fun searchIndexCount(): Int?
+    @SkipQueryVerification
+    @Query("UPDATE search_index_state SET indexedCount = :count, complete = :complete WHERE id = 1")
+    suspend fun updateSearchIndexState(count: Int, complete: Boolean)
+    @SkipQueryVerification
+    @Query("SELECT indexedCount = (SELECT COUNT(*) FROM songs) AND complete = 1 FROM search_index_state WHERE id = 1")
+    suspend fun isSearchIndexReady(): Boolean?
     @Query("SELECT * FROM songs WHERE (:artist IS NULL OR artist = :artist) AND (:album IS NULL OR album = :album) AND (:query = '' OR title LIKE '%' || :query || '%' OR artist LIKE '%' || :query || '%' OR album LIKE '%' || :query || '%' OR fileName LIKE '%' || :query || '%') ORDER BY title COLLATE NOCASE, mediaStoreId")
     suspend fun libraryQueue(query: String, artist: String?, album: String?): List<SongEntity>
     @Query("SELECT COUNT(*) FROM songs")
@@ -71,6 +93,8 @@ interface SongDao {
 
     @Query("UPDATE songs SET isFavorite = NOT isFavorite WHERE mediaStoreId = :id")
     suspend fun toggleFavorite(id: Long)
+    @Query("UPDATE songs SET isFavorite = :value WHERE mediaStoreId IN (:ids)")
+    suspend fun setFavorite(ids: List<Long>, value: Boolean)
 
     @Upsert
     suspend fun upsertAll(songs: List<SongEntity>)

@@ -3,6 +3,8 @@ package life.xstar.music.player
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -241,6 +243,7 @@ private fun OnlineDiscoveryHero() {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun OnlineSongRow(
     title: String,
@@ -254,12 +257,13 @@ internal fun OnlineSongRow(
     playing: Boolean = false,
     leading: (@Composable () -> Unit)? = null,
     onPlay: () -> Unit,
+    onLongClick: () -> Unit = {},
     action: @Composable () -> Unit
 ) {
     val colors = MaterialTheme.colorScheme
     Column {
         HorizontalDivider(color = colors.outlineVariant.copy(alpha = .6f))
-        Column(Modifier.fillMaxWidth().clickable(onClick = onPlay).padding(vertical = 8.dp)) {
+        Column(Modifier.fillMaxWidth().combinedClickable(onClick = onPlay, onLongClick = onLongClick).padding(vertical = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (leading != null) {
                     leading()

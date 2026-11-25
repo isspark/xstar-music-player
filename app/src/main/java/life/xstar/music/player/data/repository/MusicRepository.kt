@@ -26,11 +26,34 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
     @OptIn(kotlinx.coroutines.FlowPreview::class)
     fun songs(): Flow<List<SongEntity>> = dao.observeSongs().sample(750)
     fun search(query: String): Flow<List<SongEntity>> = dao.search(query)
+    suspend fun searchFast(query: String): List<SongEntity> = runCatching {
+        val normalized = query.trim().split(Regex("\\s+")).filter { it.isNotBlank() }
+            .joinToString(" AND ") { "\"${it.replace(Regex("[\\\"*:]"), " ")}*\"" }
+        if (normalized.isBlank()) emptyList() else dao.searchFts(normalized)
+    }.getOrDefault(emptyList())
+    suspend fun rebuildSearchIndex(onProgress: (Int) -> Unit = {}) = withContext(Dispatchers.IO) {
+        val all = dao.allSongs()
+        dao.clearSearchIndex()
+        dao.updateSearchIndexState(0, false)
+        all.chunked(250).forEachIndexed { batch, songs ->
+            songs.forEach { song -> dao.indexSong(song.mediaStoreId, song.title, song.artist, song.album, song.fileName) }
+            val count = ((batch + 1) * 250).coerceAtMost(all.size)
+            dao.updateSearchIndexState(count, count == all.size)
+            onProgress(count)
+            currentCoroutineContext().ensureActive()
+        }
+        if (all.isEmpty()) dao.updateSearchIndexState(0, true)
+    }
+    suspend fun ensureSearchIndex() {
+        if (runCatching { dao.isSearchIndexReady() == true }.getOrDefault(false)) return
+        rebuildSearchIndex()
+    }
     fun favorites(): Flow<List<SongEntity>> = dao.observeFavorites()
     fun playlists(): Flow<List<PlaylistEntity>> = playlistDao.observePlaylists()
     fun playlistSongs(id: Long): Flow<List<PlaylistSongEntity>> = playlistDao.observeSongs(id)
     fun singingRecords(): Flow<List<SingingRecordEntity>> = singingDao.observeAll()
     suspend fun toggleFavorite(id: Long) = dao.toggleFavorite(id)
+    suspend fun setFavorite(ids: List<Long>, value: Boolean) = ids.chunked(900).forEach { if (it.isNotEmpty()) dao.setFavorite(it, value) }
     suspend fun createPlaylist(name: String) = playlistDao.insert(PlaylistEntity(name = name))
     suspend fun deletePlaylist(playlist: PlaylistEntity) = playlistDao.delete(playlist)
     suspend fun addToPlaylist(playlistId: Long, songId: Long) = playlistDao.append(playlistId, listOf(songId))
@@ -97,7 +120,7 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
         folderUris.forEach { folderUri ->
             val folderSongs = mutableListOf<SongEntity>()
             DocumentFile.fromTreeUri(context, Uri.parse(folderUri))?.let {
-                scanDirectory(it, folderUri, folderSongs, cached, onProgress)
+            scanDirectory(it, folderUri, folderSongs, cached, onProgress)
             }
             val folderIds = folderSongs.map { it.mediaStoreId }
             scannedIds += folderIds
@@ -248,5 +271,5 @@ class MusicRepository(private val context: Context, private val dao: SongDao, pr
     private fun String?.orDefault(default: String) = if (isNullOrBlank() || this == "<unknown>") default else this
 }
 
-data class ScanProgress(val fileName: String, val discovered: Int)
+data class ScanProgress(val fileName: String, val discovered: Int, val unchanged: Int = 0, val failed: Int = 0)
 data class ArtworkSaveResult(val saved: Boolean, val writeFailures: List<String> = emptyList())

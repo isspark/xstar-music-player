@@ -7,6 +7,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.Modifier
@@ -24,6 +25,7 @@ import coil.compose.SubcomposeAsyncImage
 import life.xstar.music.player.data.local.SongEntity
 
 /** Shares the search-result layout so both library implementations stay visually identical. */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun LibrarySongRow(
     song: SongEntity,
@@ -31,14 +33,15 @@ internal fun LibrarySongRow(
     selected: Boolean,
     playing: Boolean,
     onPlay: () -> Unit,
-    onFavorite: () -> Unit
+    onFavorite: () -> Unit,
+    onLongClick: () -> Unit = {}
 ) {
     OnlineSongRow(
         title = song.title, artist = song.artist, album = song.album,
         source = if (song.uri.startsWith("nas://") || song.sourceFolderUri.startsWith("nas://")) "NAS" else "本地",
         quality = songQualityLabel(song), number = number, selected = selected, playing = playing,
         onPlay = onPlay,
-        leading = { LibraryArtwork(song.albumArtUri, selected && playing) }
+        leading = { LibraryArtwork(song.albumArtUri, selected && playing) }, onLongClick = onLongClick
     ) {
         IconButton(onFavorite) {
             Icon(if (song.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,

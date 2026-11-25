@@ -31,6 +31,8 @@ internal fun PagedNasLibrary(vm: MusicViewModel, total: Int, openMenu: () -> Uni
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var selectedArtist by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedAlbum by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectionMode by rememberSaveable { mutableStateOf(false) }
+    var selectedIds by rememberSaveable { mutableStateOf<Set<Long>>(emptySet()) }
     val scope = rememberCoroutineScope()
     val songFlow = remember(selectedArtist, selectedAlbum) {
         snapshotFlow { query }.debounce(300).distinctUntilChanged().flatMapLatest { text ->
@@ -57,7 +59,15 @@ internal fun PagedNasLibrary(vm: MusicViewModel, total: Int, openMenu: () -> Uni
     Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
         PageTopBar(selectedArtist ?: selectedAlbum ?: "音乐库", if (selectedArtist != null || selectedAlbum != null) ({ back() }) else openMenu,
             back = selectedArtist != null || selectedAlbum != null) {
-            IconButton(addFolder) { Icon(Icons.Default.CreateNewFolder, "添加音乐文件夹") }
+            if (selectionMode) {
+                IconButton({ vm.batchFavorite(selectedIds.toList(), true); selectedIds = emptySet(); selectionMode = false }) { Icon(Icons.Default.Favorite, "批量收藏") }
+                IconButton({ vm.batchAppendToQueue(selectedIds.toList()); selectedIds = emptySet(); selectionMode = false }) { Icon(Icons.Default.QueueMusic, "加入播放队列") }
+                IconButton({ selectedIds = songs.itemSnapshotList.items.map { it.mediaStoreId }.toSet() }) { Icon(Icons.Default.SelectAll, "全选当前结果") }
+                IconButton({ selectedIds = emptySet(); selectionMode = false }) { Icon(Icons.Default.Close, "取消选择") }
+            } else {
+                IconButton({ selectionMode = true }) { Icon(Icons.Default.Checklist, "批量管理") }
+                IconButton(addFolder) { Icon(Icons.Default.CreateNewFolder, "添加音乐文件夹") }
+            }
             IconButton({ vm.syncNas(config) }, enabled = !status.busy && config.enabled && config.address.isNotBlank()) {
                 Icon(Icons.Default.Sync, "同步 NAS")
             }
@@ -69,17 +79,27 @@ internal fun PagedNasLibrary(vm: MusicViewModel, total: Int, openMenu: () -> Uni
             listOf("歌曲", "专辑", "歌手").forEachIndexed { index, name ->
                 FilterChip(tab == index, { tab = index; back() }, label = { Text(name) })
             }
+            Spacer(Modifier.weight(1f))
+            TextButton(
+                onClick = {
+                    val available = songs.itemSnapshotList.items
+                    available.randomOrNull()?.let { vm.play(it, available.shuffled()) }
+                },
+                enabled = songs.itemSnapshotList.items.isNotEmpty(),
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+            ) { Icon(Icons.Default.Shuffle, "随心听", Modifier.size(17.dp)); Spacer(Modifier.width(3.dp)); Text("随心听") }
         }
         LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)) {
             if (showingSongs) {
                 items(songs.itemCount, key = songs.itemKey { it.mediaStoreId }) { index ->
                     val song = songs[index]
                     if (song == null) Text("正在加载…", Modifier.padding(16.dp)) else {
-                        LibrarySongRow(song, index + 1, playback.song?.mediaStoreId == song.mediaStoreId, playback.playing,
+                        LibrarySongRow(song, index + 1, if (selectionMode) song.mediaStoreId in selectedIds else playback.song?.mediaStoreId == song.mediaStoreId, playback.playing,
                             onPlay = {
-                                if (selectedArtist != null || selectedAlbum != null) vm.playLibraryGroup(selectedArtist, selectedAlbum, query, song)
+                                if (selectionMode) selectedIds = if (song.mediaStoreId in selectedIds) selectedIds - song.mediaStoreId else selectedIds + song.mediaStoreId
+                                else if (selectedArtist != null || selectedAlbum != null) vm.playLibraryGroup(selectedArtist, selectedAlbum, query, song)
                                 else vm.play(song, songs.itemSnapshotList.items)
-                            }, onFavorite = { vm.favorite(song.mediaStoreId) })
+                            }, onFavorite = { if (selectionMode) selectedIds = if (song.mediaStoreId in selectedIds) selectedIds - song.mediaStoreId else selectedIds + song.mediaStoreId else vm.favorite(song.mediaStoreId) }, onLongClick = { selectionMode = true; selectedIds = selectedIds + song.mediaStoreId })
                     }
                 }
             } else {

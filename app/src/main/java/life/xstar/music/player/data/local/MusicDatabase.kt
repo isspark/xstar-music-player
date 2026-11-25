@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
-@Database(entities = [SongEntity::class, PlaylistEntity::class, PlaylistSongEntity::class, SingingRecordEntity::class, life.xstar.music.player.data.nas.NasSyncTask::class, life.xstar.music.player.data.nas.NasSyncItem::class], version = 7, exportSchema = false)
+@Database(entities = [SongEntity::class, PlaylistEntity::class, PlaylistSongEntity::class, SingingRecordEntity::class, life.xstar.music.player.data.nas.NasSyncTask::class, life.xstar.music.player.data.nas.NasSyncItem::class], version = 8, exportSchema = false)
 abstract class MusicDatabase : RoomDatabase() {
     abstract fun songDao(): SongDao
     abstract fun playlistDao(): PlaylistDao
@@ -87,6 +87,16 @@ abstract class MusicDatabase : RoomDatabase() {
                 database.execSQL("CREATE INDEX IF NOT EXISTS index_nas_sync_items_sourceId_done_kind_retryAt ON nas_sync_items(sourceId, done, kind, retryAt)")
                 database.execSQL("ALTER TABLE songs ADD COLUMN nasScanToken TEXT")
                 database.execSQL("CREATE INDEX IF NOT EXISTS index_songs_sourceFolderUri ON songs(sourceFolderUri)")
+            }
+        }, object : Migration(7, 8) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                // Independent and rebuildable: an interrupted index build cannot damage songs.
+                database.execSQL("CREATE TABLE IF NOT EXISTS songs_fts (mediaStoreId INTEGER PRIMARY KEY NOT NULL, title TEXT NOT NULL, artist TEXT NOT NULL, album TEXT NOT NULL, fileName TEXT)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_songs_fts_title ON songs_fts(title)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_songs_fts_artist ON songs_fts(artist)")
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_songs_fts_album ON songs_fts(album)")
+                database.execSQL("CREATE TABLE IF NOT EXISTS search_index_state (id INTEGER PRIMARY KEY NOT NULL, indexedCount INTEGER NOT NULL DEFAULT 0, complete INTEGER NOT NULL DEFAULT 0)")
+                database.execSQL("INSERT OR IGNORE INTO search_index_state(id, indexedCount, complete) VALUES(1, 0, 0)")
             }
         }).build()
     }

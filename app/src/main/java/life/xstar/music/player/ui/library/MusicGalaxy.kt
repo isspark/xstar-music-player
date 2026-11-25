@@ -40,6 +40,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.LocalFireDepartment
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.semantics.Role
@@ -93,6 +94,7 @@ fun MusicGalaxy(
     scanEnabled: Boolean,
     floatingStyle: FloatingButtonStyle,
     playing: Boolean,
+    onRandomPlay: (List<SongEntity>) -> Unit,
     modifier: Modifier = Modifier
 ) {
     var filter by rememberSaveable { mutableStateOf("全部") }
@@ -266,6 +268,15 @@ fun MusicGalaxy(
         Column(Modifier.align(Alignment.TopCenter).statusBarsPadding()) {
             androidx.compose.runtime.CompositionLocalProvider(androidx.compose.material3.LocalContentColor provides Color.White) {
             PageTopBar("音乐库", onMenu, immersive = true) {
+                androidx.compose.material3.TextButton(
+                    onClick = { onRandomPlay(visibleSongs) },
+                    enabled = visibleSongs.isNotEmpty(),
+                    contentPadding = PaddingValues(horizontal = 8.dp)
+                ) {
+                    Icon(Icons.Default.Shuffle, "随心听", Modifier.size(17.dp))
+                    Spacer(Modifier.width(3.dp))
+                    Text("随心听", fontSize = 12.sp)
+                }
                 IconButton({ searchOpen = !searchOpen }) { Icon(Icons.Default.Search, "搜索音乐库") }
                 IconButton(onScan, enabled = scanEnabled) { Icon(Icons.Default.Refresh, "扫描音乐库") }
             }

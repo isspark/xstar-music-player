@@ -34,6 +34,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import life.xstar.music.player.data.local.SongEntity
+import life.xstar.music.player.data.local.PlaylistEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.ensureActive
@@ -108,6 +109,8 @@ internal fun LibraryEditorialContent(
     scanState: ScanState, scanEnabled: Boolean, currentSongId: Long?, playing: Boolean,
     openMenu: () -> Unit, addFolder: () -> Unit, onScan: () -> Unit,
     onPlay: (SongEntity, List<SongEntity>) -> Unit, onFavorite: (Long) -> Unit,
+    selectedIds: Set<Long> = emptySet(), onLongSelect: (Long) -> Unit = {}, onBatchFavorite: (List<Long>, Boolean) -> Unit = { _, _ -> },
+    playlists: List<PlaylistEntity> = emptyList(), onBatchAddToPlaylist: (Long, List<Long>) -> Unit = { _, _ -> }, onBatchAppendToQueue: (List<Long>) -> Unit = {},
     onAlbum: (String, List<SongEntity>) -> Unit
 ) {
     val colors = MaterialTheme.colorScheme
@@ -117,6 +120,10 @@ internal fun LibraryEditorialContent(
     var group by rememberSaveable { mutableIntStateOf(0) }
     var artist by rememberSaveable { mutableStateOf<String?>(null) }
     var album by rememberSaveable { mutableStateOf<String?>(null) }
+    var selected by rememberSaveable { mutableStateOf<Set<Long>>(emptySet()) }
+    var showBatchPlaylists by remember { mutableStateOf(false) }
+    var selectionMode by rememberSaveable { mutableStateOf(false) }
+    val selecting = selectionMode
     val listState = rememberLazyListState()
     val index by produceState(
         if (LibraryIndexCache.source === songs && LibraryIndexCache.query == query) LibraryIndexCache.index else LibraryIndex(), songs, query
@@ -164,18 +171,44 @@ internal fun LibraryEditorialContent(
     androidx.activity.compose.BackHandler(artist != null || album != null) { artist = null; album = null }
     CompositionLocalProvider(LocalContentColor provides colors.onBackground) {
         Column(Modifier.fillMaxSize().systemBarsPadding().imePadding()) {
-            PageTopBar(artist ?: album ?: "音乐库", { if (artist != null || album != null) { artist = null; album = null } else openMenu() },
+            PageTopBar(if (selecting) "已选择 ${selected.size} 首" else artist ?: album ?: "音乐库", { if (selecting) { selected = emptySet(); selectionMode = false } else if (artist != null || album != null) { artist = null; album = null } else openMenu() },
                 back = artist != null || album != null) {
-                IconButton(addFolder, enabled = !scanState.running) { Icon(Icons.Default.CreateNewFolder, "添加音乐文件夹") }
+                if (selecting) {
+                    IconButton({ onBatchFavorite(selected.toList(), true); selected = emptySet(); selectionMode = false }) { Icon(Icons.Default.Favorite, "批量收藏") }
+                    IconButton({ onBatchAppendToQueue(selected.toList()); selected = emptySet(); selectionMode = false }) { Icon(Icons.Default.QueueMusic, "加入播放队列") }
+                    IconButton({ showBatchPlaylists = true }) { Icon(Icons.Default.PlaylistAdd, "加入播放列表") }
+                    IconButton({ selected = visibleSongs.map { it.mediaStoreId }.toSet() }) { Icon(Icons.Default.SelectAll, "全选当前结果") }
+                    IconButton({ selected = emptySet(); selectionMode = false }) { Icon(Icons.Default.Close, "取消选择") }
+                } else {
+                    IconButton({ selectionMode = true }) { Icon(Icons.Default.Checklist, "批量管理") }
+                    IconButton(addFolder, enabled = !scanState.running) { Icon(Icons.Default.CreateNewFolder, "添加音乐文件夹") }
+                }
                 IconButton(onScan, enabled = scanEnabled) { Icon(Icons.Default.Refresh, "扫描音乐库", tint = if (scanEnabled) colors.primary else colors.onSurfaceVariant.copy(alpha = .4f)) }
             }
             PageSearchField(query, { onQueryChange(it) })
             NasSyncBanner(nasStatus,
                 { life.xstar.music.player.data.nas.NasSyncService.pause(context) },
                 { life.xstar.music.player.data.nas.NasSyncService.start(context) })
-            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                listOf("歌曲" to filtered.size, "专辑" to albums.size, "歌手" to artists.size).forEachIndexed { position, (label, count) ->
-                    FilterChip(group == position, { group = position; artist = null; album = null }, label = { Text("$label $count") })
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                androidx.compose.foundation.lazy.LazyRow(
+                    Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    contentPadding = PaddingValues(end = 6.dp)
+                ) {
+                    listOf("歌曲" to filtered.size, "专辑" to albums.size, "歌手" to artists.size).forEachIndexed { position, (label, count) ->
+                        item {
+                            FilterChip(group == position, { group = position; artist = null; album = null }, label = { Text("$label $count") })
+                        }
+                    }
+                }
+                TextButton(
+                    onClick = { onPlay(filtered.random(), filtered.shuffled()) },
+                    enabled = filtered.isNotEmpty(),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Icon(Icons.Default.Shuffle, null, Modifier.size(17.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("随心听")
                 }
             }
             Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -208,8 +241,9 @@ internal fun LibraryEditorialContent(
                     }
                 } else if (showingSongs) {
                     itemsIndexed(visibleSongs, key = { _, song -> song.mediaStoreId }) { position, song ->
-                        LibrarySongRow(song, position + 1, song.mediaStoreId == currentSongId, playing,
-                            onPlay = { onPlay(song, visibleSongs) }, onFavorite = { onFavorite(song.mediaStoreId) })
+                        LibrarySongRow(song, position + 1, if (selecting) song.mediaStoreId in selected else song.mediaStoreId == currentSongId, playing,
+                            onPlay = { if (selecting) selected = if (song.mediaStoreId in selected) selected - song.mediaStoreId else selected + song.mediaStoreId else onPlay(song, visibleSongs) },
+                            onFavorite = { if (selecting) selected = if (song.mediaStoreId in selected) selected - song.mediaStoreId else selected + song.mediaStoreId else onFavorite(song.mediaStoreId) }, onLongClick = { selectionMode = true; selected = selected + song.mediaStoreId })
                     }
                 } else {
                     itemsIndexed(entries, key = { _, entry -> entry.key }) { _, entry ->
@@ -239,6 +273,21 @@ internal fun LibraryEditorialContent(
             }
         }
     }
+    if (showBatchPlaylists) AlertDialog(
+        onDismissRequest = { showBatchPlaylists = false },
+        title = { Text("加入播放列表") },
+        text = {
+            Column {
+                if (playlists.isEmpty()) Text("还没有播放列表，请先创建一个播放列表。")
+                playlists.forEach { playlist ->
+                    TextButton(onClick = { onBatchAddToPlaylist(playlist.id, selected.toList()); showBatchPlaylists = false; selected = emptySet(); selectionMode = false }, modifier = Modifier.fillMaxWidth()) {
+                        Text(playlist.name, modifier = Modifier.fillMaxWidth(), textAlign = androidx.compose.ui.text.style.TextAlign.Start)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton({ showBatchPlaylists = false }) { Text("取消") } }
+    )
 }
 
 @Composable
